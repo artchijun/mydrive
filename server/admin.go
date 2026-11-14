@@ -358,9 +358,13 @@ func hAdminRoots(w http.ResponseWriter, r *http.Request) {
 
 func hAdminPolicy(w http.ResponseWriter, r *http.Request) {
 	var p VerPolicy
-	if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&p) != nil || p.MaxCount < 0 || p.KeepDays < 0 {
+	if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&p) != nil || p.MaxCount < 0 || p.KeepDays < 0 ||
+		(p.Mode != "" && p.Mode != "intelli" && p.Mode != "fifo") {
 		httpErr(w, 400, "bad_json", "요청 형식 오류")
 		return
+	}
+	if p.Mode == "" {
+		p.Mode = "intelli"
 	}
 	verMu.Lock()
 	verPolicy = p
@@ -368,7 +372,7 @@ func hAdminPolicy(w http.ResponseWriter, r *http.Request) {
 	cfgMu.Lock()
 	srvCfg.Versions = p
 	cfgMu.Unlock()
-	log.Printf("버전 보관 규칙: 파일마다 %d개, %d일", p.MaxCount, p.KeepDays)
+	log.Printf("버전 보관 규칙: %s, 파일마다 %d개, %d일", map[string]string{"intelli": "지능형", "fifo": "먼저 들어온 것부터"}[p.Mode], p.MaxCount, p.KeepDays)
 	if err := saveCfg(); err != nil {
 		httpErr(w, 500, "io", err.Error())
 		return

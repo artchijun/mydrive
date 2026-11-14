@@ -57,6 +57,8 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
 .log { font: 12.5px/1.6 Consolas, "D2Coding", monospace; color: var(--sub); white-space: pre-wrap; max-height: 560px; overflow: auto; padding: 14px 18px; }
 .log .e { color: var(--red); }
 .empty { color: var(--muted); padding: 22px 18px; text-align: center; }
+.opt { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; padding-top: 6px; }
+.sel { background: #14171c; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; color: var(--text); font: inherit; }
 .filters { padding: 12px 18px; border-bottom: 1px solid var(--line); }
 .filters select, .filters input { background: #14171c; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; color: var(--text); font: inherit; }
 .filters input { max-width: 260px; }
@@ -154,9 +156,14 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
         <div class="field"><label title="한 파일에 남겨 둘 이전 판의 최대 개수입니다. 넘으면 가장 오래된 판부터 지웁니다. 0이면 개수 제한 없음.">파일마다 최대 판 수</label>
           <div class="row"><input id="maxCount" type="number" min="0" style="max-width:120px"> <span class="sub">개</span></div>
           <div class="desc">한 파일에 남길 이전 판의 수. 넘으면 오래된 것부터 지웁니다.</div></div>
-        <div class="field"><label title="이보다 오래된 판은 지웁니다. 하루 안의 판은 모두, 30일 안은 하루에 하나, 그 뒤로는 일주일에 하나씩 남깁니다(시놀로지 '지능형 버전 관리'와 같은 방식).">보관 기간</label>
-          <div class="row"><input id="keepDays" type="number" min="0" style="max-width:120px"> <span class="sub">일</span></div>
-          <div class="desc">이보다 오래된 판은 지웁니다. 하루 안은 모두, 30일 안은 하루 1개, 그 뒤는 주 1개씩 남깁니다.</div></div>
+        <div class="field"><label title="판이 최대 개수에 닿았을 때 어느 판부터 지울지 정합니다. 시놀로지 드라이브의 '버전 순환 정책'과 같은 선택입니다.">지우는 순서</label>
+          <div><label class="opt"><input type="radio" name="vmode" value="intelli"> <b>지능형</b> <span class="sub">(권장)</span></label>
+            <div class="desc" style="margin:2px 0 8px 22px">하루 안의 판은 모두, 30일 안은 하루에 하나, 그 뒤는 일주일에 하나씩 남깁니다. 오래전 모습도 골고루 남아, 언제쯤으로 되돌릴지 고르기 쉽습니다.</div>
+            <label class="opt"><input type="radio" name="vmode" value="fifo"> <b>먼저 들어온 것부터 (FIFO)</b></label>
+            <div class="desc" style="margin:2px 0 0 22px">가장 최근 판부터 최대 개수만큼 남기고, 오래된 판부터 지웁니다. 하루에 여러 번 고치는 파일은 최근 며칠 것만 남습니다.</div></div></div>
+        <div class="field"><label title="이보다 오래된 판은 지우는 순서와 상관없이 지웁니다.">보관 기간</label>
+          <div class="row"><select id="keepDays" class="sel"><option value="7">7일</option><option value="30">30일</option><option value="60">60일</option><option value="90">90일</option><option value="120">120일</option><option value="365">1년</option><option value="0">제한 없음</option></select></div>
+          <div class="desc">이보다 오래된 판은 지웁니다. 시놀로지 드라이브는 7·30·60·120일 중에서 고릅니다.</div></div>
         <div class="row" style="justify-content:flex-end;padding-top:12px"><button class="btn pri" id="polBtn">저장</button></div>
       </div></div>
       <div class="panel"><h2>폴더별 버전 용량</h2><table id="verUse"></table></div>
@@ -338,11 +345,22 @@ function render() {
   const lg = $('log'); const atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 20;
   lg.innerHTML = i.log.map(l => `<div class="${/실패|오류|error/i.test(l) ? 'e' : ''}">${esc(l)}</div>`).join('');
   if (atEnd) lg.scrollTop = lg.scrollHeight;
-  if (document.activeElement !== $('maxCount') && document.activeElement !== $('keepDays')) { $('maxCount').value = i.policy.maxCount; $('keepDays').value = i.policy.keepDays; }
+  if (!polDirty) {
+    $('maxCount').value = i.policy.maxCount;
+    const kd = String(i.policy.keepDays), sel = $('keepDays');
+    if (![...sel.options].some(o => o.value === kd)) sel.add(new Option(kd + '일', kd));
+    sel.value = kd;
+    document.querySelectorAll('input[name=vmode]').forEach(r => r.checked = r.value === (i.policy.mode || 'intelli'));
+  }
 }
 
+let polDirty = false;   // 고치는 중에는 5초 새로 고침이 덮어쓰지 않게
+['maxCount', 'keepDays'].forEach(id => $(id).addEventListener('input', () => polDirty = true));
+$('keepDays').addEventListener('change', () => polDirty = true);
+document.querySelectorAll('input[name=vmode]').forEach(r => r.addEventListener('change', () => polDirty = true));
 $('polBtn').onclick = async () => {
-  try { await api('/v1/admin/policy', { maxCount: +$('maxCount').value, keepDays: +$('keepDays').value }); toast('버전 보관 규칙을 저장했습니다'); refresh(); }
+  const mode = (document.querySelector('input[name=vmode]:checked') || {}).value || 'intelli';
+  try { await api('/v1/admin/policy', { maxCount: +$('maxCount').value, keepDays: +$('keepDays').value, mode }); polDirty = false; toast('버전 보관 규칙을 저장했습니다'); refresh(); }
   catch (e) { toast(e.message, true); }
 };
 

@@ -37,7 +37,8 @@ var adminPage = func() string {
 func hAdminPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	// DSM 기본 메뉴의 Mydrive 창(iframe)에서 열림. 다른 사이트가 몰래 감싸지 못하게 DSM 포트(5000/5001)만 허용
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'self' http://*:5000 https://*:5001")
 	w.Write([]byte(adminPage))
 }
 

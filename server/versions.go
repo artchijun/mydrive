@@ -2,8 +2,10 @@
 //
 // 자리: <공유 폴더>/#mydrive-versions/<파일 경로>/<바뀐 시각 ns>
 //   같은 디스크 안의 하드 링크라서 복사하지 않고, 공간은 옛 판 크기만큼만 듦.
-// 보관 규칙 (시놀로지 Intelliversioning 비슷하게):
-//   하루 안: 모두 / 30일 안: 하루에 하나 / 그 뒤: 한 주에 하나 / keepDays 지나면 지움 / 파일마다 최대 maxCount 개
+// 보관 규칙 (시놀로지 드라이브처럼 둘 중 고름):
+//   지능형(intelli, 기본): 하루 안: 모두 / 30일 안: 하루에 하나 / 그 뒤: 한 주에 하나 → 오래된 시점도 골고루 남음
+//   먼저 들어온 것부터(fifo): 가장 최근 판부터 maxCount 개
+//   둘 다: keepDays 지나면 지움 / 파일마다 최대 maxCount 개
 //
 // API
 //   GET  /v1/versions?root=&path=        그 파일의 이전 판 목록 (새것부터)
@@ -29,8 +31,9 @@ import (
 const verDirName = "#mydrive-versions"
 
 type VerPolicy struct {
-	MaxCount int `json:"maxCount"` // 파일마다 최대 개수
-	KeepDays int `json:"keepDays"` // 이보다 오래된 판은 지움
+	MaxCount int    `json:"maxCount"`       // 파일마다 최대 개수
+	KeepDays int    `json:"keepDays"`       // 이보다 오래된 판은 지움
+	Mode     string `json:"mode,omitempty"` // "intelli"(기본) 또는 "fifo"
 }
 
 var verPolicy = VerPolicy{MaxCount: 32, KeepDays: 90}
@@ -167,6 +170,7 @@ func pruneDir(dir string) {
 		switch {
 		case pol.KeepDays > 0 && age > time.Duration(pol.KeepDays)*24*time.Hour:
 			keep = false
+		case pol.Mode == "fifo": // 먼저 들어온 것부터: 솎지 않고 최근 것부터 개수만큼
 		case age <= 24*time.Hour:
 		case age <= 30*24*time.Hour:
 			d := t.Format("2006-01-02")

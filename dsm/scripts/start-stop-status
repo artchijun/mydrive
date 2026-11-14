@@ -1,0 +1,7 @@
+#!/bin/sh
+# 바로가기만 있는 패키지: 따로 돌아가는 프로그램이 없음 (서버는 Container Manager의 mydrive 컨테이너)
+case "$1" in
+    start|stop) exit 0 ;;
+    status) exit 0 ;;
+    *) exit 0 ;;
+esac
