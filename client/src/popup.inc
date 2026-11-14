@@ -242,6 +242,40 @@ static void SyncNow() {
     if (AnyPaused()) PauseAll(0);
     for (auto& e : g_engines) { e->ClearCanceled(); e->Kick(); }
 }
+// 왼쪽 위 Mydrive 아이콘: NAS 다시 확인
+//   NAS 서버는 바뀐 것을 실시간(inotify)으로 알지만, 폴더가 아주 많으면 일부 폴더는 감시하지 못해 15분마다 비교로만 알게 됨.
+//   File Station·SMB 로 그런 폴더를 바꿨을 때 누르면 서버가 지금 전체를 비교하고, PC 앱은 곧바로 맞춤.
+static HWND g_pop = nullptr;   // 이 창 (아래 그리기·누르기에서 씀)
+static std::atomic<bool> g_rescanning{false};
+static void RescanNow() {
+    if (g_rescanning.exchange(true)) return;
+    std::vector<std::string> roots;
+    for (auto& e : g_engines) roots.push_back(e->cfg().name);
+    for (auto& w : g_webdrives) roots.push_back(w->cfg().name);
+    std::wstring server = ActiveServer(); std::string token = g_cfg.token;
+    InvalidateRect(g_pop, nullptr, FALSE);
+    std::thread([roots, server, token] {
+        Http http(server, token);
+        int changed = 0, fail = 0;
+        for (auto& r : roots) {
+            Resp res = http.Req(L"POST", "/v1/rescan", {{"root", r}}, nullptr, 300);
+            json j = res.ok() ? json::parse(res.body, nullptr, false) : json();
+            if (j.is_object()) changed += j.value("changed", 0); else fail++;
+        }
+        for (auto& e : g_engines) e->Kick();
+        SYSTEMTIME st; GetLocalTime(&st);
+        wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        LOG("NAS 다시 확인 (아이콘): %d개 연결, %d개 바뀜, %d개 실패", (int)roots.size(), changed, fail);
+        std::wstring extra = fail ? Fmt(L"%d개 연결은 확인 못 함 (서버가 0.6.4 보다 예전이거나 연결 안 됨)", fail) : changed ? Fmt(L"%d개 바뀐 것을 찾아 맞춤", changed) : L"바뀐 것 없음";
+        {
+            std::lock_guard<std::mutex> g(g_evMu);
+            g_evPending.push_back(EvRow{t, L"NAS", L"🔄 NAS 다시 확인", L"", extra});
+            if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
+        }
+        g_rescanning = false;
+        if (g_pop) InvalidateRect(g_pop, nullptr, FALSE);
+    }).detach();
+}
 
 // ---------- 전체 상태 (트레이 색 · 상태 알약) ----------
 enum TrayState { T_IDLE, T_SYNC, T_STUCK, T_NET, T_HOLD };
@@ -363,7 +397,7 @@ static void WatchAlerts(const Overall& o) {
 // ---------- 트레이 창 ----------
 enum Hit {
     H_NONE = 0, H_SET = 1, H_HELP, H_PIN, H_CLOSE, H_TAB0, H_TAB1, H_TAB2, H_SYNCNOW, H_P30, H_P60, H_P180, H_RESUME,
-    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL,
+    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL, H_RESCAN,
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -376,7 +410,7 @@ enum Hit {
     H_XFER = 7000,         // + 줄 번호 (지금 처리 중)
     H_XCANCEL = 7500,      // + 줄 번호 (지금 처리 중인 파일 취소)
 };
-static HWND g_pop, g_popTip;
+static HWND g_popTip;
 static ui::Canvas g_cv;
 static int g_tab = 0, g_sumMins = 60, g_logFilter = 0;
 static bool g_pinned = false, g_legend = false;
@@ -929,8 +963,10 @@ static void Render() {
     // 머리줄
     g_rcHeader = {0, 0, WW, 64};
     Rect tile{c.l, c.t, c.l + 36, c.t + 36};
-    g_cv.Gradient(tile, Hex(0xFF4F8CFF), Hex(0xFF8B5CF6), 10, true);
-    g_cv.Icon(0xE895, tile, col::White(1), 17);
+    bool tileHot = g_cv.hover == H_RESCAN;
+    g_cv.Gradient(tile, Hex(tileHot ? 0xFF6FA3FF : 0xFF4F8CFF), Hex(tileHot ? 0xFFA07CFA : 0xFF8B5CF6), 10, true);
+    g_cv.Icon(g_rescanning ? 0xE72C : 0xE895, tile, col::White(1), 17);
+    g_cv.AddHit(tile, H_RESCAN, g_rescanning ? L"NAS 다시 확인하는 중…" : L"NAS 다시 확인 — File Station 등으로 NAS에서 바꾼 것을 지금 바로 찾아 맞춥니다 (평소에는 바로 알지만, 폴더가 아주 많으면 일부는 15분마다 확인)", true);
     g_cv.Text(L"Mydrive", {c.l + 48, c.t, c.r - 200, c.t + 20}, col::Text(), {15.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD});
     g_cv.Text(L"NAS " + ServerHost() + Fmt(L" · 연결 %d개", (int)g_engines.size()), {c.l + 48, c.t + 20, c.r - 200, c.t + 36}, col::Muted(), {11});
     float bx = c.r;
@@ -1036,6 +1072,7 @@ static void OnClick(int id) {
     else if (id == H_SET) { g_pinned = true; OpenSettings(); }
     else if (id >= H_TAB0 && id <= H_TAB2) { g_tab = id - H_TAB0; g_legend = false; }
     else if (id == H_SYNCNOW || id == H_RESUME) SyncNow();
+    else if (id == H_RESCAN) RescanNow();
     else if (id == H_P30) PauseAll(30); else if (id == H_P60) PauseAll(60); else if (id == H_P180) PauseAll(180);
     else if (id == H_NOWOPEN && !g_lastFile.empty()) RevealInExplorer(LocalPathOf(g_lastConn, g_lastFile));
     else if (id == H_NOWCOPY && !g_lastFile.empty()) CopyText(LocalPathOf(g_lastConn, g_lastFile));
@@ -1185,20 +1222,25 @@ static void Popup_Create() {
 }
 
 // ---------- 트레이 메뉴 (SynoWatch 와 같은 구성) ----------
-enum { IDM_OPEN = 300, IDM_COPYNOW, IDM_COPYSTUCK, IDM_SUM, IDM_LOG, IDM_P30, IDM_P60, IDM_P180, IDM_SYNC, IDM_SETTINGS, IDM_UPDATE, IDM_EXIT };
+enum { IDM_OPEN = 300, IDM_COPYNOW, IDM_COPYSTUCK, IDM_SUM, IDM_LOG, IDM_P30, IDM_P60, IDM_P180, IDM_SYNC, IDM_SETTINGS, IDM_UPDATE, IDM_EXIT, IDM_RESCAN };
 static std::wstring UpdateMenuLabel();   // update.inc: 새 판이 있으면 메뉴 글자, 없으면 빈 값
 static void UpdateInstallNow();
 static void TrayMenu() {
+    // 묶음: 창 / 동기화 / 경로·보기 / 설정 / 종료 (메뉴 색은 app.cpp DarkMenus 로 어둡게)
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING | MF_DEFAULT, IDM_OPEN, L"창 열기");
-    AppendMenuW(m, MF_STRING | (g_lastFile.empty() ? MF_GRAYED : 0), IDM_COPYNOW, L"지금 위치 경로 복사");
-    AppendMenuW(m, MF_STRING, IDM_COPYSTUCK, L"막힌 경로 복사");
-    AppendMenuW(m, MF_STRING, IDM_SUM, L"요약 보기");
-    AppendMenuW(m, MF_STRING, IDM_LOG, L"기록 보기");
+    AppendMenuW(m, MF_STRING | MF_DEFAULT, IDM_OPEN, L"Mydrive 창 열기");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, IDM_SYNC, AnyPaused() ? L"지금 동기화 (멈춤 풀기)" : L"지금 동기화");
+    AppendMenuW(m, MF_STRING | (g_rescanning ? MF_GRAYED : 0), IDM_RESCAN, g_rescanning ? L"NAS 다시 확인하는 중…" : L"NAS 다시 확인 (NAS에서 바꾼 것 바로 찾기)");
     HMENU p = CreatePopupMenu();
     AppendMenuW(p, MF_STRING, IDM_P30, L"30분"); AppendMenuW(p, MF_STRING, IDM_P60, L"1시간"); AppendMenuW(p, MF_STRING, IDM_P180, L"3시간");
-    AppendMenuW(m, MF_POPUP, (UINT_PTR)p, L"동기화 잠시 멈춤");
-    AppendMenuW(m, MF_STRING, IDM_SYNC, AnyPaused() ? L"지금 동기화 (멈춤 풀기)" : L"지금 동기화");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)p, L"잠시 멈춤");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, IDM_SUM, L"요약 보기");
+    AppendMenuW(m, MF_STRING, IDM_LOG, L"기록 보기");
+    AppendMenuW(m, MF_STRING | (g_lastFile.empty() ? MF_GRAYED : 0), IDM_COPYNOW, L"지금 위치 경로 복사");
+    AppendMenuW(m, MF_STRING, IDM_COPYSTUCK, L"막힌 경로 복사");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_SETTINGS, L"설정…");
     std::wstring upd = UpdateMenuLabel();
     if (!upd.empty()) AppendMenuW(m, MF_STRING, IDM_UPDATE, upd.c_str());
@@ -1226,6 +1268,7 @@ static void TrayCommand(int id) {
     case IDM_P60: PauseAll(60); break;
     case IDM_P180: PauseAll(180); break;
     case IDM_SYNC: SyncNow(); break;
+    case IDM_RESCAN: RescanNow(); break;
     case IDM_SETTINGS: OpenSettings(); break;
     case IDM_UPDATE: UpdateInstallNow(); break;
     }

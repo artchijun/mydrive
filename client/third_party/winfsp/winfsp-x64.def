@@ -1,0 +1,19 @@
+; winfsp-x64.dll 가져오기 목록 — WinFsp 개발 파일 없이 링크하려고 build.cmd 가 이것으로 가져오기 라이브러리를 만듦 (lib /def)
+LIBRARY winfsp-x64.dll
+EXPORTS
+FspFileSystemCreate
+FspFileSystemDelete
+FspFileSystemSetMountPoint
+FspFileSystemRemoveMountPoint
+FspFileSystemStartDispatcher
+FspFileSystemStopDispatcher
+FspFileSystemAcquireDirectoryBuffer
+FspFileSystemFillDirectoryBuffer
+FspFileSystemReleaseDirectoryBuffer
+FspFileSystemReadDirectoryBuffer
+FspFileSystemDeleteDirectoryBuffer
+FspFileSystemNotifyBegin
+FspFileSystemNotify
+FspFileSystemNotifyEnd
+FspNtStatusFromWin32
+FspVersion

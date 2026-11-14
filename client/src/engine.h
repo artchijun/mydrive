@@ -110,6 +110,8 @@ public:
     ItemStatus Status(const std::string& rel);   // rel: 연결 안 경로 ("" = 연결 전체)
     // 동기화 작업 사이 옮기기: 다른 연결이 'PC 파일 번호(lid)'로 물어봄 — 이 연결이 맞춰 둔 항목인데 지금 PC 의 그 자리에서 사라졌나
     bool OwnsMissing(uint64_t lid, std::string* p, BaseE* b);
+    // '다른 동기화 작업으로 옮기기': NAS 에서 이미 다른 연결로 옮긴 항목 → PC 쪽 것을 휴지통으로 보내고 기록을 지움 (받지 않음)
+    bool ForgetMoved(const std::string& rel);
 private:
     // 동기화 작업 사이 옮기기 (engine.cpp '동기화 작업 사이 옮기기' 참고)
     std::mutex idxMu_;

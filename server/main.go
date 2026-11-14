@@ -43,7 +43,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.3"
+const version = "0.6.5"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -90,6 +90,7 @@ func main() {
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
+	mux.HandleFunc("/v1/rescan", auth(hRescan)) // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
 	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
 	mux.HandleFunc("/v1/move", auth(logged(hMove)))
 	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
@@ -210,9 +211,32 @@ func hRoots(w http.ResponseWriter, r *http.Request) {
 		if d := filepath.Clean(rt.Dir); strings.HasPrefix(d, filepath.Clean(nasBase)+"/") {
 			share = strings.TrimPrefix(d, filepath.Clean(nasBase))
 		}
-		out = append(out, map[string]any{"name": rt.Name, "epoch": e, "seq": s, "items": len(es), "share": share})
+		total, free := diskSpace(rt.Dir)
+		out = append(out, map[string]any{"name": rt.Name, "epoch": e, "seq": s, "items": len(es), "share": share, "total": total, "free": free})
 	}
 	writeJSON(w, r, out)
+}
+
+// hRescan: 그 연결 전체를 지금 디스크와 비교해 바뀐 것을 변경 기록에 넣음
+//   (File Station·SMB 로 바꾼 것 중 inotify 한도 때문에 감시하지 못하는 폴더의 것 — 평소에는 MYDRIVE_RESCAN 주기마다)
+func hRescan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "method", "POST 만")
+		return
+	}
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	rt.rescanMu.Lock() // 여러 PC 가 한꺼번에 눌러도 한 번씩만
+	defer rt.rescanMu.Unlock()
+	t0 := time.Now()
+	cur, _ := rt.walk()
+	n := rt.diffInto(cur)
+	if n > 0 {
+		log.Printf("[%s] 다시 확인(PC 요청): %d개 변경 반영 (%v)", rt.Name, n, time.Since(t0).Round(time.Millisecond))
+	}
+	writeJSON(w, r, map[string]any{"changed": n, "ms": time.Since(t0).Milliseconds()})
 }
 
 func hSnapshot(w http.ResponseWriter, r *http.Request) {

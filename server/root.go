@@ -42,6 +42,8 @@ type Root struct {
 	Name string
 	Dir  string
 
+	rescanMu sync.Mutex // 전체 비교를 한 번에 하나만 (주기 비교 · PC 요청)
+
 	mu      sync.Mutex
 	idx     map[string]Entry
 	epoch   string
@@ -324,7 +326,7 @@ func (r *Root) startWatch(dirs []string) error {
 		}
 	}
 	if failed > 0 {
-		log.Printf("[%s] 폴더 %d개는 실시간 감시를 못 함 (inotify 한도) — 주기적 비교로 보완", r.Name, failed)
+		log.Printf("[%s] 폴더 %d개는 실시간 감시를 못 함 (inotify 한도 %s) — 주기적 비교로 보완", r.Name, failed, inotifyLimit())
 	}
 	go func() {
 		for {
@@ -385,6 +387,8 @@ func (r *Root) startWatch(dirs []string) error {
 
 // 주기적 전체 비교 (실시간 감시가 놓친 것 보완)
 func (r *Root) Rescan() {
+	r.rescanMu.Lock()
+	defer r.rescanMu.Unlock()
 	t0 := time.Now()
 	cur, _ := r.walk()
 	n := r.diffInto(cur)

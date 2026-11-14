@@ -1,5 +1,6 @@
 // app.cpp — Mydrive 트레이 앱 (주 창 · 설정 창 · 트레이 아이콘)
 #include "engine.h"
+#include "webdrive.h"
 #include "../third_party/json.hpp"
 #include <windowsx.h>
 #include <commctrl.h>
@@ -32,6 +33,8 @@ struct Conn {
     bool high = false;                // (예전 설정 읽기용) 지금은 목록 순서가 우선순위
     bool onDemand = true;             // 받는 방식: true = 필요할 때 받기, false = 모두 받아 두기 (탐색기 연동은 늘 켬)
     std::vector<std::string> keep;    // 항상 이 PC에 둘 폴더 (나머지는 요청 시 받기)
+    bool web = false;                 // 받는 방식 '웹드라이브처럼 사용': PC에 파일을 두지 않고 NAS 를 드라이브로 붙임 (webdrive.cpp)
+    std::wstring mount;               // 웹드라이브를 붙일 드라이브 문자 ("M:"). 비어 있으면 local 폴더에 붙임
 };
 struct AppCfg {
     std::wstring server = L"http://192.168.0.6:8642";
@@ -106,6 +109,8 @@ static void LoadCfg() {
         x.high = c.value("high", false);
         x.onDemand = c.value("onDemand", false);
         x.keep = c.value("keepDirs", std::vector<std::string>());
+        x.web = c.value("mode", std::string()) == "webdrive";
+        x.mount = W(c.value("mount", std::string()));
         g_cfg.conns.push_back(x);
     }
     // 예전 '우선순위 높음' 짝은 맨 위로 (이제는 목록 순서 = 우선순위)
@@ -120,7 +125,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -176,6 +181,7 @@ static HWND g_main, g_settings, g_tip;
 static HFONT g_font, g_fontBold, g_fontBig, g_fontSmall;
 static UINT g_dpi = 96;
 static std::vector<std::shared_ptr<Engine>> g_engines;   // shared: 상태 보기 창이 다른 스레드에서 잠시 붙잡을 수 있음
+static std::vector<std::shared_ptr<WebDrive>> g_webdrives;   // 받는 방식이 '웹드라이브처럼 사용'인 작업
 
 struct EvRow { std::wstring time, conn, kind, path, extra; int64_t ts = 0; int cat = 0; };
 // 엔진 스레드 → 화면 스레드: 기록을 여기 모아 두고 알림은 한 번만 (한 건마다 보내면 메시지 큐가 넘치고 창이 멈춤)
@@ -209,7 +215,13 @@ static HWND MakeTip(HWND owner) {
 }
 
 // ---------- 엔진 ----------
-static void StopEngines() { for (auto& e : g_engines) e->Stop(); g_engines.clear(); }
+static void StopEngines() {
+    for (auto& e : g_engines) e->Stop();
+    g_engines.clear();
+    for (auto& w : g_webdrives) w->Stop();   // 열린 파일 중 고친 것은 올리고 떼어 냄
+    g_webdrives.clear();
+}
+static std::wstring WebMount(const Conn& c) { return c.mount.empty() ? c.local : c.mount; }
 static void RemoveOldUserVerbs();   // tools.inc
 static void StartEngines() {
     StopEngines();
@@ -217,6 +229,23 @@ static void StartEngines() {
     g_skipMask = (unsigned)g_cfg.skipMask;
     int rank = 0;
     for (auto& c : g_cfg.conns) {
+        if (c.web) {   // 웹드라이브: 엔진(동기화) 없이 NAS 를 드라이브로 붙임
+            if (c.name.empty() || WebMount(c).empty()) continue;
+            WebDriveCfg wc; wc.name = c.name; wc.serverUrl = ActiveServer(); wc.token = g_cfg.token;
+            wc.mount = WebMount(c); wc.cacheDir = g_dataDir + L"\\webdrive";
+            auto w = std::make_shared<WebDrive>(wc);
+            std::wstring cname = W(c.name);
+            w->onEvent = [cname](const std::string& k, const std::string& p, const std::string& x) {
+                SYSTEMTIME st; GetLocalTime(&st);
+                wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                std::lock_guard<std::mutex> g(g_evMu);
+                g_evPending.push_back(EvRow{t, cname, W(k), W(p), W(x)});
+                if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
+            };
+            w->Start();
+            g_webdrives.push_back(std::move(w));
+            continue;
+        }
         if (c.name.empty() || c.local.empty()) continue;
         CreateDirectoryW(c.local.c_str(), nullptr);
         Config ec;
@@ -248,7 +277,7 @@ static void StartEngines() {
     }
     {   // 탐색 창: Mydrive 하나 아래에 모든 짝
         std::vector<std::pair<std::wstring, std::wstring>> ps;
-        for (auto& c : g_cfg.conns) if (!c.name.empty() && !c.local.empty()) ps.push_back({W(c.name), c.local});
+        for (auto& c : g_cfg.conns) if (!c.web && !c.name.empty() && !c.local.empty()) ps.push_back({W(c.name), c.local});
         wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
         cloud::NavHub(ps, g_dataDir + L"\\탐색기", std::wstring(exe) + L",0");
     }
@@ -368,6 +397,7 @@ static void OnProbed(std::wstring* s) {
 }
 
 static void ShellCmd(const std::wstring& cmd, const std::wstring& path);   // tools.inc: 탐색기 오른쪽 클릭의 동기화 명령
+static void MoveToBatch();   // tools.inc
 #define WM_APP_SHELLCMD (WM_APP + 30)
 static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == g_msgTaskbarCreated && msg) { g_icoState = -1; TrayAdd(); return 0; }
@@ -392,6 +422,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 2) { KillTimer(h, 2); PromoteTray(); return 0; }
         if (wp == 3) { CheckServer(); return 0; }
         if (wp == 4) { UpdateTick(); return 0; }
+        if (wp == 77) { KillTimer(h, 77); MoveToBatch(); return 0; }   // tools.inc: 다른 동기화 작업으로 옮기기
         Tick();
         return 0;
     case WM_APP_EVENT: DrainEvents(); return 0;
@@ -432,6 +463,16 @@ static void DarkWindow(HWND h) {
     BOOL d = TRUE; DwmSetWindowAttribute(h, 20, &d, sizeof d);
     COLORREF c = kBg; DwmSetWindowAttribute(h, 35 /*DWMWA_CAPTION_COLOR*/, &c, sizeof c);
     COLORREF t = kText; DwmSetWindowAttribute(h, 36 /*DWMWA_TEXT_COLOR*/, &t, sizeof t);
+}
+// 오른쪽 클릭 메뉴(트레이 아이콘 · 기록 줄 · 작업 줄)도 어둡게: Windows 의 메뉴는 앱이 '어두운 모드'를 고르지 않으면 늘 흰색.
+//   uxtheme 의 이름 없는 함수(135 SetPreferredAppMode, 136 FlushMenuThemes) — 탐색기·작업 관리자도 쓰는 방법. 없으면 그냥 흰 메뉴.
+static void DarkMenus() {
+    HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!ux) return;
+    using SetMode = int(WINAPI*)(int);
+    using Flush = void(WINAPI*)();
+    if (auto f = (SetMode)GetProcAddress(ux, MAKEINTRESOURCEA(135))) f(2 /*ForceDark: 창들이 늘 어두운 색이므로 메뉴도 늘 어둡게*/);
+    if (auto f = (Flush)GetProcAddress(ux, MAKEINTRESOURCEA(136))) f();
 }
 static bool ChkGet(HWND b) { return GetPropW(b, L"chk.on") != nullptr; }
 static void ChkSet(HWND b, bool on) { if (on) SetPropW(b, L"chk.on", (HANDLE)1); else RemovePropW(b, L"chk.on"); InvalidateRect(b, nullptr, TRUE); }
@@ -698,9 +739,10 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
     std::wstring n = W(c.name);
     RECT nr{cl.nas + S(26), r.top, cl.pc - S(8), r.bottom}; DrawTextW(dc, n.c_str(), -1, &nr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, g_font); SetTextColor(dc, kSub);
-    RECT pr{cl.pc, r.top, cl.mode - S(10), r.bottom}; DrawTextW(dc, c.local.c_str(), -1, &pr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
-    SetTextColor(dc, c.onDemand ? RGB(0x8F, 0xB4, 0xFF) : RGB(0x4A, 0xDE, 0xA8));
-    RECT mr{cl.mode, r.top, cl.st - S(6), r.bottom}; DrawTextW(dc, c.onDemand ? L"필요할 때" : L"모두 받기", -1, &mr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    std::wstring pcText = c.web && !c.mount.empty() ? c.mount + L" 드라이브" : c.local;
+    RECT pr{cl.pc, r.top, cl.mode - S(10), r.bottom}; DrawTextW(dc, pcText.c_str(), -1, &pr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
+    SetTextColor(dc, c.web ? RGB(0xC4, 0x9A, 0xFF) : c.onDemand ? RGB(0x8F, 0xB4, 0xFF) : RGB(0x4A, 0xDE, 0xA8));
+    RECT mr{cl.mode, r.top, cl.st - S(6), r.bottom}; DrawTextW(dc, c.web ? L"웹드라이브" : c.onDemand ? L"필요할 때" : L"모두 받기", -1, &mr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     // 상태: 저장된 작업이면 지금 엔진 상태
     std::wstring st = L"저장 뒤 시작"; COLORREF sc = kMuted;
     for (auto& e : g_engines) if (e->cfg().name == c.name && _wcsicmp(e->cfg().localRoot.c_str(), c.local.c_str()) == 0) {
@@ -711,6 +753,12 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
         case 3: st = L"확인 필요"; sc = RGB(0xF5, 0xB4, 0x48); break;
         default: st = L"연결 안 됨"; sc = RGB(0xFF, 0x6B, 0x74); break;
         }
+    }
+    if (c.web) for (auto& w : g_webdrives) if (w->cfg().name == c.name) {
+        if (!w->Mounted()) { st = w->Online() ? L"붙이는 중" : L"연결 안 됨"; sc = w->Online() ? RGB(0x6C, 0xA8, 0xF0) : RGB(0xFF, 0x6B, 0x74); }
+        else if (!w->Online()) { st = L"NAS 연결 안 됨"; sc = RGB(0xFF, 0x6B, 0x74); }
+        else if (w->Uploading()) { st = L"올리는 중"; sc = RGB(0x6C, 0xA8, 0xF0); }
+        else { st = L"붙어 있음"; sc = RGB(0x38, 0xD3, 0x9F); }
     }
     RECT dot{cl.st, cy - S(4), cl.st + S(8), cy + S(4)}; FillRound(dc, dot, sc, S(8));
     SetTextColor(dc, sc);
@@ -1318,16 +1366,32 @@ static bool Overlaps(const std::wstring& a, const std::wstring& b) {
            (x.size() > y.size() && x.compare(0, y.size(), y) == 0 && x[y.size()] == L'\\');
 }
 // 작업 창의 [확인]: NAS 이름·PC 폴더 확인 (idx = 고치는 작업, -1 = 새 작업)
-static bool CheckTask(HWND h, const std::string& name, std::wstring& local, int idx) {
+static bool CheckTask(HWND h, const std::string& name, std::wstring& local, int idx, bool web = false, const std::wstring& mount = L"") {
     while (local.size() > 3 && local.back() == L'\\') local.pop_back();
     if (name.empty()) { MessageBoxW(h, L"NAS 폴더를 고르세요.", L"Mydrive", MB_ICONINFORMATION); return false; }
+    if (web && !mount.empty()) {   // 웹드라이브를 드라이브 문자로: PC 폴더는 쓰지 않음
+        for (int i = 0; i < (int)s_conns.size(); i++) {
+            if (i == idx) continue;
+            if (s_conns[i].name == name) { MessageBoxW(h, (L"'" + W(name) + L"'은(는) 이미 다른 작업으로 맞추고 있습니다.").c_str(), L"Mydrive", MB_ICONINFORMATION); return false; }
+            if (s_conns[i].web && _wcsicmp(s_conns[i].mount.c_str(), mount.c_str()) == 0) { MessageBoxW(h, (mount + L" 드라이브는 '" + W(s_conns[i].name) + L"' 작업이 이미 씁니다.").c_str(), L"Mydrive", MB_ICONINFORMATION); return false; }
+        }
+        local.clear();
+        return true;
+    }
+    if (web && (idx < 0 || !s_conns[idx].web || _wcsicmp(s_conns[idx].local.c_str(), local.c_str()) != 0)) {
+        DWORD a = GetFileAttributesW(local.c_str());
+        if (a != INVALID_FILE_ATTRIBUTES && (!(a & FILE_ATTRIBUTE_DIRECTORY) || !PathIsDirectoryEmptyW(local.c_str()))) {
+            MessageBoxW(h, L"웹드라이브는 없는 폴더나 빈 폴더에만 붙일 수 있습니다.\n다른 폴더 이름을 적거나 [받는 방식] 탭에서 '새 드라이브 문자로'를 고르세요.", L"Mydrive", MB_ICONINFORMATION);
+            return false;
+        }
+    }
     if (local.empty()) { MessageBoxW(h, L"이 PC의 폴더를 정하세요.", L"Mydrive", MB_ICONINFORMATION); return false; }
     if (local.size() < 3 || local[1] != L':' || local[2] != L'\\') { MessageBoxW(h, L"PC 폴더는 C:\\폴더 처럼 전체 경로로 적어 주세요.", L"Mydrive", MB_ICONINFORMATION); return false; }
     if (local.size() <= 3) { MessageBoxW(h, L"드라이브 전체(C:\\ 등)는 고를 수 없습니다. 그 안의 폴더를 고르세요.", L"Mydrive", MB_ICONINFORMATION); return false; }
     for (int i = 0; i < (int)s_conns.size(); i++) {
         if (i == idx) continue;
         if (s_conns[i].name == name) { MessageBoxW(h, (L"'" + W(name) + L"'은(는) 이미 다른 작업으로 맞추고 있습니다.").c_str(), L"Mydrive", MB_ICONINFORMATION); return false; }
-        if (Overlaps(s_conns[i].local, local)) {
+        if (!s_conns[i].local.empty() && Overlaps(s_conns[i].local, local)) {
             MessageBoxW(h, (L"이 폴더는 '" + W(s_conns[i].name) + L"' 작업의 PC 폴더(" + s_conns[i].local + L")와 겹칩니다.\n서로 안쪽·바깥쪽이 아닌 폴더를 고르세요.").c_str(), L"Mydrive", MB_ICONWARNING);
             return false;
         }
@@ -1345,10 +1409,11 @@ static bool CheckConns(HWND h) {
         l = Trim(l);
         while (l.size() > 3 && l.back() == L'\\') l.pop_back();
         std::wstring who = L"'" + W(s_conns[i].name) + L"'의 PC 폴더";
+        if (s_conns[i].web && !s_conns[i].mount.empty()) { l.clear(); continue; }
         if (l.size() < 3 || l[1] != L':' || l[2] != L'\\') return fail(i, who + L"는 C:\\폴더 처럼 전체 경로로 적어 주세요.");
         if (l.size() <= 3) return fail(i, who + L": 드라이브 전체(C:\\ 등)는 고를 수 없습니다. 그 안의 폴더를 고르세요.");
         for (int k = 0; k < i; k++)
-            if (Overlaps(s_conns[k].local, l))
+            if (!s_conns[k].local.empty() && Overlaps(s_conns[k].local, l))
                 return fail(i, who + L"(" + l + L")가 '" + W(s_conns[k].name) + L"'의 PC 폴더(" + s_conns[k].local + L")와 겹칩니다.\n서로 안쪽·바깥쪽이 아닌 폴더를 고르세요.");
     }
     return true;
@@ -1549,9 +1614,57 @@ static void PickClick(int r, int x, bool dbl) {
     if (changed) { InvalidateRect(p_list, nullptr, FALSE); PickInfo(); }
 }
 enum { IDP_TAB0 = 720, IDP_TAB1, IDP_TAB2, IDP_OD, IDP_ALL, IDP_ROOT, IDP_LOCAL, IDP_BROWSE, IDP_LINE, IDP_DESC };
+enum { IDP_WEB = 740, IDP_MFOLDER, IDP_MDRIVE, IDP_LETTER, IDP_MLABEL, IDP_WFSP, IDP_WDESC };
 static std::vector<HWND> p_pg[3];
 static HWND p_od, p_all, p_local, p_rootBox;
+static HWND p_web, p_mFolder, p_mDrive, p_letter, p_mLabel, p_wfsp, p_wdesc, p_mdesc, p_tip;   // 웹드라이브 고르기
 static void PickTab(HWND h, int k);
+static std::wstring PickLetter() { std::wstring s = GetText(p_letter); return s.size() >= 2 ? s.substr(0, 2) : L""; }
+// 받는 방식 탭: 고른 것 표시 + 웹드라이브면 '연결할 곳' 보이기
+static void PickModeUi() {
+    ChkSet(p_od, !t_conn.web && t_conn.onDemand); ChkSet(p_all, !t_conn.web && !t_conn.onDemand); ChkSet(p_web, t_conn.web);
+    int sw = t_conn.web ? SW_SHOW : SW_HIDE;
+    for (HWND c : {p_mLabel, p_mFolder, p_mDrive, p_letter, p_wdesc}) ShowWindow(c, sw);
+    ShowWindow(p_mdesc, t_conn.web ? SW_HIDE : SW_SHOW);
+    bool letter = !t_conn.mount.empty();
+    ChkSet(p_mFolder, !letter); ChkSet(p_mDrive, letter);
+    EnableWindow(p_letter, letter);
+    ShowWindow(p_wfsp, t_conn.web && !WinFspInstalled() ? SW_SHOW : SW_HIDE);
+    for (HWND c : {p_od, p_all, p_web, p_mFolder, p_mDrive}) InvalidateRect(c, nullptr, TRUE);
+}
+#define WM_APP_WFSP (WM_APP + 41)
+// WinFsp 설치: GitHub 의 최신 설치 파일(.msi)을 받아 실행 (Windows 가 관리자 승인을 물음)
+static void InstallWinFsp(HWND h) {
+    EnableWindow(p_wfsp, FALSE); SetWindowTextW(p_wfsp, L"받는 중…");
+    std::thread([h] {
+        std::wstring err;
+        Http api(L"https://api.github.com", ""); api.plain = true;
+        Resp r = api.Req(L"GET", "/repos/winfsp/winfsp/releases/latest", {}, nullptr, 30);
+        std::string url;
+        json j = r.ok() ? json::parse(r.body, nullptr, false) : json();
+        if (j.is_object()) for (auto& a : j.value("assets", json::array())) {
+            std::string u = a.value("browser_download_url", std::string());
+            if (u.size() > 4 && u.compare(u.size() - 4, 4, ".msi") == 0 && u.rfind("https://github.com/winfsp/winfsp/releases/download/", 0) == 0) { url = u; break; }
+        }
+        std::wstring msi = g_dataDir + L"\\winfsp-setup.msi";
+        if (url.empty()) err = L"WinFsp 설치 파일을 찾지 못했습니다" + (r.ok() ? std::wstring() : L" (" + W(r.error.empty() ? std::to_string(r.status) : r.error) + L")");
+        else {
+            Http dl(L"https://github.com", ""); dl.plain = true;
+            Resp d = dl.Download(url.substr(18), {}, msi);
+            if (!d.ok()) err = L"WinFsp 설치 파일을 받지 못했습니다 (" + W(d.error.empty() ? std::to_string(d.status) : d.error) + L")";
+            else {
+                SetFileAttributesW(msi.c_str(), FILE_ATTRIBUTE_NORMAL);
+                std::wstring args = L"/i \"" + msi + L"\" /passive";
+                SHELLEXECUTEINFOW se{sizeof se}; se.fMask = SEE_MASK_NOCLOSEPROCESS; se.lpFile = L"msiexec.exe"; se.lpParameters = args.c_str(); se.nShow = SW_SHOWNORMAL;
+                if (!ShellExecuteExW(&se)) err = L"WinFsp 설치를 시작하지 못했습니다";
+                else if (se.hProcess) { WaitForSingleObject(se.hProcess, INFINITE); CloseHandle(se.hProcess); }
+                DeleteFileW(msi.c_str());
+            }
+        }
+        auto* m = new std::wstring(err);
+        if (!PostMessageW(h, WM_APP_WFSP, 0, (LPARAM)m)) delete m;
+    }).detach();
+}
 // 이 NAS 폴더의 하위 폴더 목록을 받아 옴 (폴더 탭)
 static void PickLoad(HWND h, const std::string& root) {
     p_loadName = root; p_loaded = false;
@@ -1587,12 +1700,16 @@ static void PickTab(HWND h, int k) {
     s_dlgTab = k;
     for (int t = 0; t < 3; t++) for (HWND c : p_pg[t]) ShowWindow(c, t == k ? SW_SHOW : SW_HIDE);
     for (int t = 0; t < 3; t++) InvalidateRect(GetDlgItem(h, IDP_TAB0 + t), nullptr, TRUE);
-    if (k == 0) {
+    if (k == 0 && t_conn.web) {
+        ShowWindow(p_list, SW_HIDE);
+        SetWindowTextW(p_info, L"웹드라이브는 NAS 폴더 전체를 드라이브로 보여 줍니다. 여기서 고를 폴더는 없습니다.");
+    } else if (k == 0) {
         std::string root = PickRootName();
         if (root.empty()) { p_guard = true; ListView_DeleteAllItems(p_list); p_guard = false; p_loadName.clear(); p_loaded = false; SetWindowTextW(p_info, L"먼저 [일반] 탭에서 NAS 폴더를 고르세요."); }
         else if (root != p_loadName) PickLoad(h, root);
     }
-    if (k == 1) { ChkSet(p_od, t_conn.onDemand); ChkSet(p_all, !t_conn.onDemand); }
+    if (k == 1) PickModeUi();
+    else for (HWND c : {p_mLabel, p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc}) ShowWindow(c, SW_HIDE);
 }
 static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     LRESULT dr;
@@ -1622,11 +1739,45 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         // 탭 2: 받는 방식
         p_od = Ctl(h, L"BUTTON", L"필요할 때 받기\n새 파일은 탐색기에 자리만 두고(구름), 열 때 받음 · PC 공간 절약", BS_OWNERDRAW | WS_TABSTOP, IDP_OD);
         p_all = Ctl(h, L"BUTTON", L"모두 받아 두기\n모든 파일을 이 PC에 받아 둠 (초록 체크) · 인터넷 없어도 열림", BS_OWNERDRAW | WS_TABSTOP, IDP_ALL);
-        SetPropW(p_od, L"opt", (HANDLE)1); SetPropW(p_all, L"opt", (HANDLE)1);
-        MoveWindow(p_od, x, S(64), CW, S(60), TRUE); MoveWindow(p_all, x, S(134), CW, S(60), TRUE);
+        p_web = Ctl(h, L"BUTTON", L"웹드라이브처럼 사용\nPC에 파일을 두지 않음 · 열 때 NAS에서 바로 읽고 저장하면 바로 올림 · 인터넷 필요", BS_OWNERDRAW | WS_TABSTOP, IDP_WEB);
+        SetPropW(p_od, L"opt", (HANDLE)1); SetPropW(p_all, L"opt", (HANDLE)1); SetPropW(p_web, L"opt", (HANDLE)1);
+        MoveWindow(p_od, x, S(60), CW, S(58), TRUE); MoveWindow(p_all, x, S(124), CW, S(58), TRUE); MoveWindow(p_web, x, S(188), CW, S(58), TRUE);
+        // 웹드라이브: 연결할 곳
+        p_mLabel = Ctl(h, L"STATIC", L"연결할 곳", SS_LEFT | SS_NOPREFIX, IDP_MLABEL);
+        SendMessageW(p_mLabel, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(p_mLabel, x, S(258), CW, S(20), TRUE);
+        p_mFolder = Ctl(h, L"BUTTON", L"PC 폴더에 붙이기\n[일반] 탭의 'PC 폴더'로 보임 · 그 폴더는 없거나 비어 있어야 함", BS_OWNERDRAW | WS_TABSTOP, IDP_MFOLDER);
+        p_mDrive = Ctl(h, L"BUTTON", L"새 드라이브 문자로\n탐색기에 네트워크 드라이브로 보임 (PC 폴더는 비워 둬도 됨)", BS_OWNERDRAW | WS_TABSTOP, IDP_MDRIVE);
+        SetPropW(p_mFolder, L"opt", (HANDLE)1); SetPropW(p_mDrive, L"opt", (HANDLE)1);
+        MoveWindow(p_mFolder, x, S(282), CW, S(54), TRUE); MoveWindow(p_mDrive, x, S(342), CW - S(96), S(54), TRUE);
+        p_letter = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_LETTER);
+        MoveWindow(p_letter, x + CW - S(88), S(356), S(88), S(300), TRUE);
+        {
+            std::wstring fl = FreeDriveLetters(), cur = t_conn.mount.size() >= 1 ? std::wstring(1, (wchar_t)towupper(t_conn.mount[0])) : L"";
+            if (!cur.empty() && fl.find(cur[0]) == std::wstring::npos) { fl += cur; std::sort(fl.begin(), fl.end()); }
+            int sel = -1, idxM = -1;
+            for (size_t i = 0; i < fl.size(); i++) {
+                std::wstring s = std::wstring(1, fl[i]) + L":";
+                SendMessageW(p_letter, CB_ADDSTRING, 0, (LPARAM)s.c_str());
+                if (!cur.empty() && fl[i] == cur[0]) sel = (int)i;
+                if (fl[i] == L'M') idxM = (int)i;
+            }
+            SendMessageW(p_letter, CB_SETCURSEL, sel >= 0 ? sel : idxM >= 0 ? idxM : (int)fl.size() - 1, 0);
+        }
+        p_wdesc = Ctl(h, L"STATIC", L"목록은 NAS에서 그때그때 보여 주고, 프로그램이 읽는 조각만 잠시 받습니다. 오프라인이면 열리지 않고 탐색기 상태 아이콘도 없습니다.\n"
+                                     L"WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos · github.com/winfsp/winfsp", SS_LEFT | SS_NOPREFIX, IDP_WDESC);
+        SendMessageW(p_wdesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_wdesc, x, S(404), CW, S(58), TRUE);
+        p_wfsp = Ctl(h, L"BUTTON", L"WinFsp 설치", BS_PUSHBUTTON | WS_TABSTOP, IDP_WFSP);
+        MoveWindow(p_wfsp, x, S(466), S(150), S(30), TRUE);
+        p_tip = MakeTip(h);
+        AddTip(p_tip, p_web, L"PC에 파일을 받아 두지 않고 NAS 폴더를 드라이브처럼 씁니다. 파일을 열면 NAS에서 바로 읽고, 저장하고 닫으면 바로 NAS로 올립니다. 인터넷(NAS 연결)이 없으면 열리지 않습니다. WinFsp 드라이버가 필요합니다(처음 한 번 설치, 관리자 승인).");
+        AddTip(p_tip, p_mFolder, L"[일반] 탭에 적은 PC 폴더 자리에 NAS 내용이 보입니다. 그 폴더는 아직 없거나 비어 있어야 합니다.");
+        AddTip(p_tip, p_mDrive, L"오른쪽에서 고른 문자(예: M:)로 탐색기 '내 PC'에 네트워크 드라이브가 생깁니다.");
+        AddTip(p_tip, p_letter, L"지금 비어 있는 드라이브 문자만 보입니다.");
+        AddTip(p_tip, p_wfsp, L"WinFsp 공식 설치 파일(GitHub)을 받아 실행합니다. Windows가 관리자 승인을 묻습니다.");
         HWND md = Ctl(h, L"STATIC", L"폴더마다 다르게 하려면 [받을 폴더] 탭의 '항상 이 PC에' 칸을 체크하세요.\n탐색기에서 파일·폴더를 오른쪽 클릭 → Mydrive → 항상 이 장치에 유지 / 공간 확보로도 바꿀 수 있습니다.\n탐색기 연동(왼쪽 Mydrive · 상태 아이콘 · 오른쪽 클릭 메뉴)은 어느 쪽이든 늘 켜져 있습니다.", SS_LEFT | SS_NOPREFIX, IDP_DESC);
-        SendMessageW(md, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(md, x, S(210), CW, S(80), TRUE);
-        p_pg[1] = {p_od, p_all, md};
+        SendMessageW(md, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(md, x, S(258), CW, S(80), TRUE);
+        p_mdesc = md;
+        p_pg[1] = {p_od, p_all, p_web, md};
         // 탭 3: 일반 (NAS 폴더 · PC 폴더)
         HWND l1 = Ctl(h, L"STATIC", L"NAS 폴더", SS_LEFT | SS_NOPREFIX, 0);
         SendMessageW(l1, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(l1, x, S(64), CW, S(20), TRUE);
@@ -1663,6 +1814,15 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         PickTab(h, t_idx < 0 ? 2 : 0);
         return 0;
     }
+    case WM_APP_WFSP: {
+        auto* m = (std::wstring*)lp;
+        SetWindowTextW(p_wfsp, L"WinFsp 설치"); EnableWindow(p_wfsp, TRUE);
+        if (!m->empty()) MessageBoxW(h, m->c_str(), L"Mydrive", MB_ICONWARNING);
+        else if (WinFspInstalled()) MessageBoxW(h, L"WinFsp를 설치했습니다. [확인]을 누르고 설정을 저장하면 웹드라이브를 붙입니다.", L"Mydrive", MB_ICONINFORMATION);
+        delete m;
+        PickModeUi();
+        return 0;
+    }
     case WM_APP_PICKED: {
         auto* d = (std::vector<std::string>*)lp;
         std::string root; if (!d->empty() && d->back()[0] == '\x02') { root = d->back().substr(1); d->pop_back(); }
@@ -1675,7 +1835,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = (HDC)wp; SetBkColor(dc, kBg);
         int id = GetDlgCtrlID((HWND)lp);
         if (id == IDP_LINE) return (LRESULT)s_brLine;
-        SetTextColor(dc, (HWND)lp == p_info || id == IDP_DESC || id == IDP_DESC + 1 ? kMuted : kText);
+        SetTextColor(dc, (HWND)lp == p_info || id == IDP_DESC || id == IDP_DESC + 1 || id == IDP_WDESC ? kMuted : kText);
         return (LRESULT)g_brDark;
     }
     case WM_NOTIFY: {
@@ -1706,17 +1866,31 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDP_TAB0: case IDP_TAB1: case IDP_TAB2: PickTab(h, LOWORD(wp) - IDP_TAB0); break;
         case IDP_OD: case IDP_ALL:
-            t_conn.onDemand = LOWORD(wp) == IDP_OD;
-            ChkSet(p_od, t_conn.onDemand); ChkSet(p_all, !t_conn.onDemand);
+            t_conn.onDemand = LOWORD(wp) == IDP_OD; t_conn.web = false;
+            PickModeUi();
             InvalidateRect(p_list, nullptr, FALSE); PickInfo();
             break;
+        case IDP_WEB:
+            if (!t_conn.web && Trim(GetText(p_local)).empty()) t_conn.mount = PickLetter();   // PC 폴더를 아직 안 정했으면 드라이브 문자로
+            t_conn.web = true;
+            PickModeUi();
+            break;
+        case IDP_MFOLDER: t_conn.mount.clear(); PickModeUi(); break;
+        case IDP_MDRIVE: t_conn.mount = PickLetter(); PickModeUi(); break;
+        case IDP_LETTER: if (HIWORD(wp) == CBN_SELCHANGE && !t_conn.mount.empty()) t_conn.mount = PickLetter(); break;
+        case IDP_WFSP: InstallWinFsp(h); break;
         case IDP_BROWSE: BrowseFolder(h, p_local); break;
         case IDP_ROOT: if (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == CBN_EDITCHANGE) { p_loaded = false; } break;
         case IDP_OK: case IDOK: {
             std::string name = PickRootName();
             std::wstring local = Trim(GetText(p_local));
-            if (!CheckTask(h, name, local, t_idx)) { PickTab(h, 2); break; }
-            if (p_loaded && p_loadName == name) PickApply();
+            if (t_conn.web && !t_conn.mount.empty()) t_conn.mount = PickLetter();
+            if (!CheckTask(h, name, local, t_idx, t_conn.web, t_conn.mount)) { PickTab(h, t_conn.web && !t_conn.mount.empty() ? 1 : 2); break; }
+            if (t_conn.web && !WinFspInstalled() &&
+                MessageBoxW(h, L"웹드라이브에는 WinFsp 드라이버가 필요합니다. 지금 설치할까요?\n(GitHub의 공식 설치 파일을 받아 실행합니다. Windows가 관리자 승인을 묻습니다.)", L"Mydrive", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                PickTab(h, 1); InstallWinFsp(h); break;
+            }
+            if (!t_conn.web && p_loaded && p_loadName == name) PickApply();
             t_conn.name = name; t_conn.local = local;
             if (t_idx < 0) { s_conns.push_back(t_conn); s_sel = (int)s_conns.size() - 1; }
             else s_conns[t_idx] = t_conn;
@@ -1967,7 +2141,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         LocalFree(argv);
         // 동기화 명령은 떠 있는 Mydrive(동기화를 하는 쪽)에 넘김. 안 떠 있으면 먼저 켬.
         if (cmd == L"--sync-now" || cmd == L"--pause30" || cmd == L"--pause60" || cmd == L"--pause180" || cmd == L"--resume" ||
-            cmd == L"--toggle-skip" || cmd == L"--status" || cmd == L"--keep" || cmd == L"--free") {
+            cmd == L"--toggle-skip" || cmd == L"--status" || cmd == L"--keep" || cmd == L"--free" || cmd == L"--move-to") {
             HWND w = FindWindowW(L"MydriveMain", nullptr);
             if (!w) {
                 ShellExecuteW(nullptr, L"open", ExePath().c_str(), L"--tray", nullptr, SW_SHOWNORMAL);
@@ -2006,6 +2180,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     CreateDirectoryW(g_dataDir.c_str(), nullptr);
     Log::I().Open(g_dataDir + L"\\mydrive.log");
     LOG("Mydrive 시작");
+    DarkMenus();
     LoadCfg();
     ApplyStartup();   // 설치 위치가 바뀌었으면 자동 실행 경로도 맞춤
 

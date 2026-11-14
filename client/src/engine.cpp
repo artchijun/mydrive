@@ -480,6 +480,19 @@ bool Engine::DeleteLocal(const std::string& p) {
     return true;
 }
 
+bool Engine::ForgetMoved(const std::string& rel) {
+    std::lock_guard<std::recursive_mutex> g(mu_);
+    bool ok = GetFileAttributesW(Abs(cfg_.localRoot, rel).c_str()) == INVALID_FILE_ATTRIBUTES || DeleteLocal(rel);   // 자리표시는 휴지통으로 보내도 받지 않음
+    std::string pre = rel + "/";
+    remote_.erase(rel);
+    for (auto i = remote_.lower_bound(pre); i != remote_.end() && i->first.compare(0, pre.size(), pre) == 0;) i = remote_.erase(i);
+    base_.erase(rel);
+    for (auto i = base_.lower_bound(pre); i != base_.end() && i->first.compare(0, pre.size(), pre) == 0;) i = base_.erase(i);
+    dirty_ = true;
+    Kick();
+    return ok;
+}
+
 bool Engine::KeepBothLocal(const std::string& p) {
     std::lock_guard<std::recursive_mutex> g(mu_);
     SYSTEMTIME st; GetLocalTime(&st);

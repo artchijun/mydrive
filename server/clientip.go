@@ -2,6 +2,7 @@ package main
 
 import (
 	"net"
+	"os"
 	"net/http"
 	"strings"
 )
@@ -28,4 +29,13 @@ func clientIP(r *http.Request) string {
 func inNet(p net.IP, cidr string) bool {
 	_, n, err := net.ParseCIDR(cidr)
 	return err == nil && n.Contains(p)
+}
+
+// inotifyLimit: 지금 NAS 의 감시 한도 (fs.inotify.max_user_watches) — 기록에 함께 남겨 한도를 올렸는지 확인
+func inotifyLimit() string {
+	b, err := os.ReadFile("/proc/sys/fs/inotify/max_user_watches")
+	if err != nil {
+		return "?"
+	}
+	return strings.TrimSpace(string(b))
 }

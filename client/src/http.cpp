@@ -160,6 +160,38 @@ Resp Http::Stream(const std::string& path, const std::map<std::string, std::stri
     return r;
 }
 
+Resp Http::Range(const std::string& path, const std::map<std::string, std::string>& q, int64_t off, int64_t len, std::string& out) {
+    Resp r;
+    out.clear();
+    if (len <= 0) { r.status = 206; return r; }
+    HINTERNET h = Open(L"GET", path, q, 120);
+    if (!h) { r.error = ErrText(GetLastError()); return r; }
+    std::wstring rg = L"Range: bytes=" + std::to_wstring(off) + L"-" + std::to_wstring(off + len - 1) + L"\r\n";
+    WinHttpAddRequestHeaders(h, rg.c_str(), (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    DWORD dec = 0; WinHttpSetOption(h, WINHTTP_OPTION_DECOMPRESSION, &dec, sizeof dec);
+    WinHttpAddRequestHeaders(h, L"Accept-Encoding: identity\r\n", (DWORD)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+    if (!WinHttpSendRequest(h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(h, nullptr)) {
+        r.error = ErrText(GetLastError()); Close(h); return r;
+    }
+    DWORD st = 0, sz = sizeof st;
+    WinHttpQueryHeaders(h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, nullptr, &st, &sz, nullptr);
+    r.status = (int)st;
+    if (!r.ok() || (st == 200 && off > 0)) { if (r.ok()) { r.status = 0; r.error = "서버가 조각 받기를 지원하지 않음"; } Close(h); return r; }
+    out.reserve((size_t)len);
+    std::vector<char> buf(256 * 1024);
+    while ((int64_t)out.size() < len) {
+        if (cancel) { r.status = 0; r.error = "취소됨"; break; }
+        DWORD got = 0;
+        if (!WinHttpReadData(h, buf.data(), (DWORD)buf.size(), &got)) { r.status = 0; r.error = ErrText(GetLastError()); break; }
+        if (got == 0) break;
+        size_t take = (size_t)std::min<int64_t>(got, len - (int64_t)out.size());
+        out.append(buf.data(), take);
+        Throttle(1, got, cancel);
+    }
+    Close(h);
+    return r;
+}
+
 Resp Http::Req(const wchar_t* method, const std::string& path, const std::map<std::string, std::string>& q,
                const std::string* body, int timeoutSec) {
     HINTERNET h = Open(method, path, q, timeoutSec);

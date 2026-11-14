@@ -41,6 +41,8 @@ public:
     // offset 부터 끝까지 받아 sink 로 넘김 (탐색기에서 온라인 전용 파일을 열 때). sink 가 false 면 멈춤
     Resp Stream(const std::string& path, const std::map<std::string, std::string>& q, int64_t offset,
                 const std::function<bool(const char*, size_t)>& sink, std::atomic<int64_t>* progress = nullptr);
+    // off 부터 len 바이트만 받아 out 에 (웹드라이브: 파일을 연 프로그램이 읽는 조각만)
+    Resp Range(const std::string& path, const std::map<std::string, std::string>& q, int64_t off, int64_t len, std::string& out);
     std::atomic<bool> cancel{false};
     bool plain = false;   // true: 토큰·PC 이름 머리글을 붙이지 않음 (GitHub 등 바깥 서버)
     void Abort();

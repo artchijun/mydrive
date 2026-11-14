@@ -64,7 +64,7 @@ static bool RemoveShellVerbs() {
     return ok;
 }
 // 메뉴 구성이 바뀌면 이 숫자를 올림 → 업데이트 설치 때 다시 등록 (관리자 승인 한 번)
-static const DWORD kMenuVersion = 5;   // 3: 항목마다 아이콘, 4: 항상 유지/공간 확보
+static const DWORD kMenuVersion = 6;   // 6: 다른 동기화 작업으로 옮기기   // 3: 항목마다 아이콘, 4: 항상 유지/공간 확보
 // 지금 등록된 메뉴가 이 실행 파일·이 구성인지
 static bool ShellVerbsCurrent() {
     wchar_t buf[1024]; DWORD n = sizeof buf, ver = 0, vn = sizeof ver;
@@ -97,6 +97,7 @@ static bool RegisterShellVerbs() {
             {L"11versions", L"버전 기록…", L"--versions", L"-206", true, true},
             {L"12deleted", L"지운 파일 되살리기…", L"--deleted", L"-207", false, false},
             {L"13copy", L"NAS 경로 복사", L"--copy-nas", L"-208", false, false},
+            {L"14moveto", L"다른 동기화 작업으로 옮기기…", L"--move-to", L"-205", false, true},
             {L"21status", L"동기화 상태 보기…", L"--status", L"-205", true, false},
             {L"22sync", L"동기화", nullptr, L"-201", false, false},   // 하위 메뉴 (아래)
             {L"99open", L"Mydrive 열기", L"", L"0", true, false},
@@ -259,7 +260,80 @@ static void StatusDialog(std::shared_ptr<Engine> e, std::wstring where, std::str
     if (btn == 100) { if (e->Paused()) e->Pause(0); e->Kick(); }
 }
 
+// ---------- 다른 동기화 작업으로 옮기기 ----------
+//   탐색기로 옮기면 Windows 가 온라인 전용 파일을 먼저 다 받은 뒤 옮김(동기화 폴더 밖으로 나가는 자리표시 규칙) → 큰 폴더는 오래 걸림.
+//   이 메뉴는 NAS 에서 먼저 옮기고(/v1/move toRoot, 공유 폴더가 달라도 reflink 라 순간),
+//   PC 에서는 원래 자리의 것을 휴지통으로 보내고 새 자리에는 자리표시만 만듦 → 받기·올리기가 없음.
+//   여러 개를 고르면 탐색기가 하나씩 부르므로 0.7초 모았다가 한 번에 물음.
+static std::vector<std::wstring> g_moveBatch;
+#define MOVE_TIMER 77
+static std::wstring PickFolder(HWND owner, const std::wstring& start, const wchar_t* title) {
+    std::wstring out;
+    IFileOpenDialog* d = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&d)))) return out;
+    DWORD o; d->GetOptions(&o); d->SetOptions(o | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+    d->SetTitle(title); d->SetOkButtonLabel(L"여기로 옮기기");
+    IShellItem* si = nullptr;
+    if (!start.empty() && SUCCEEDED(SHCreateItemFromParsingName(start.c_str(), nullptr, IID_PPV_ARGS(&si)))) { d->SetFolder(si); si->Release(); }
+    if (SUCCEEDED(d->Show(owner))) {
+        IShellItem* it = nullptr;
+        if (SUCCEEDED(d->GetResult(&it))) { PWSTR p = nullptr; if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &p))) { out = p; CoTaskMemFree(p); } it->Release(); }
+    }
+    d->Release();
+    return out;
+}
+static void MoveToBatch() {
+    std::vector<std::wstring> items; items.swap(g_moveBatch);
+    if (items.empty()) return;
+    ConnPath a = FindConn(items[0]);
+    if (a.conn < 0 || g_cfg.conns[a.conn].web) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"Mydrive로 맞추는 폴더 안의 항목만 옮길 수 있습니다.", NIIF_WARNING); return; }
+    std::vector<std::string> rels;
+    for (auto& p : items) { ConnPath c = FindConn(p); if (c.conn == a.conn && !c.rel.empty()) rels.push_back(c.rel); }
+    if (rels.empty()) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"연결 폴더 전체는 옮길 수 없습니다. 그 안의 파일·폴더를 고르세요.", NIIF_WARNING); return; }
+    std::wstring start;
+    for (int i = 0; i < (int)g_cfg.conns.size(); i++) if (i != a.conn && !g_cfg.conns[i].web && !g_cfg.conns[i].local.empty()) { start = g_cfg.conns[i].local; break; }
+    if (start.empty()) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"옮겨 갈 다른 동기화 작업이 없습니다.", NIIF_WARNING); return; }
+    std::wstring title = Fmt(L"%d개를 옮길 곳 고르기 — 다른 동기화 작업 폴더 안 (NAS 안에서 바로 옮김)", (int)rels.size());
+    SetForegroundWindow(g_main);
+    wchar_t testDest[MAX_PATH] = {};   // 시험용: 고르기 창 대신 이 폴더로 (MYDRIVE_MOVETO_TEST)
+    std::wstring dest = GetEnvironmentVariableW(L"MYDRIVE_MOVETO_TEST", testDest, MAX_PATH) ? std::wstring(testDest) : PickFolder(nullptr, start, title.c_str());
+    if (dest.empty()) return;
+    ConnPath b = FindConn(dest);
+    if (b.conn < 0 || g_cfg.conns[b.conn].web) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"고른 곳이 Mydrive로 맞추는 폴더가 아닙니다:\n" + dest, NIIF_WARNING); return; }
+    if (b.conn == a.conn) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"같은 작업 안에서는 탐색기로 옮기세요 (이름만 바뀌어 바로 끝납니다).", NIIF_INFO); return; }
+    auto ea = EngineOf(a.conn), eb = EngineOf(b.conn);
+    if (!ea) { TrayBalloon(L"다른 동기화 작업으로 옮기기", L"원래 작업이 지금 꺼져 있습니다.", NIIF_WARNING); return; }
+    std::string ra = g_cfg.conns[a.conn].name, rb = g_cfg.conns[b.conn].name, base = b.rel;
+    std::wstring server = ActiveServer(); std::string token = g_cfg.token;
+    std::thread([=] {
+        Http http(server, token);
+        int ok = 0; std::wstring fails;
+        for (auto& rel : rels) {
+            std::string to = base.empty() ? Leaf(rel) : base + "/" + Leaf(rel);
+            ItemStatus st = ea->Status(rel);
+            if (st.upWait || st.both || st.transferring || st.failing || st.locked || st.checkWait) { fails += W(Leaf(rel)) + L" — 아직 NAS에 올리지 않은 변경이 있음\n"; continue; }
+            Resp r = http.Req(L"POST", "/v1/move", {{"root", ra}, {"from", rel}, {"to", to}, {"toRoot", rb}}, nullptr, 900);
+            if (!r.ok()) {
+                fails += W(Leaf(rel)) + (r.status == 409 ? L" — 옮길 자리에 같은 이름이 있음" : L" — " + W(r.error.empty() ? std::to_string(r.status) : r.error)) + L"\n";
+                continue;
+            }
+            ea->ForgetMoved(rel);
+            ok++;
+            std::lock_guard<std::mutex> g(g_evMu);
+            SYSTEMTIME tm; GetLocalTime(&tm);
+            wchar_t ts[32]; swprintf(ts, 32, L"%04d-%02d-%02d %02d:%02d:%02d", tm.wYear, tm.wMonth, tm.wDay, tm.wHour, tm.wMinute, tm.wSecond);
+            g_evPending.push_back(EvRow{ts, W(rb), L"⇄ 작업 사이 옮김", W(to), L"← " + W(ra) + L": " + W(rel) + L" · 메뉴로 · NAS 안에서 바로"});
+            if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
+        }
+        if (eb) eb->Kick();
+        std::wstring msg = Fmt(L"%d개를 %s 로 옮겼습니다. PC에는 자리표시로 생깁니다.", ok, W(rb).c_str());
+        if (!fails.empty()) msg += L"\n옮기지 못함:\n" + fails;
+        TrayBalloon(L"다른 동기화 작업으로 옮기기", msg, fails.empty() ? NIIF_INFO : NIIF_WARNING);
+    }).detach();
+}
+
 static void ShellCmd(const std::wstring& cmd, const std::wstring& path) {
+    if (cmd == L"move-to") { g_moveBatch.push_back(path); SetTimer(g_main, MOVE_TIMER, 700, nullptr); return; }
     ConnPath cp = FindConn(path);
     if (cmd == L"pause30" || cmd == L"pause60" || cmd == L"pause180") {
         int m = cmd == L"pause30" ? 30 : cmd == L"pause60" ? 60 : 180;
