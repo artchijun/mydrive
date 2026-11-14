@@ -188,6 +188,8 @@ private:
     bool DeleteRemote(const std::string& p, const BaseE& b);
     bool DeleteLocal(const std::string& p);
     bool KeepBothLocal(const std::string& p);   // 로컬 판을 충돌 사본 이름으로 바꿔 둠
+    void HealInSync();                          // 켠 뒤 한 번: 맞춰진 항목인데 '맞춰짐' 표시가 빠진 것에 다시 붙임
+    bool healed_ = false;
     int SameContent(const std::string& p);      // 크기·시각이 같아도 내용(SHA-256)까지 같은지: 1 같음, 0 다름, -1 확인 못 함
     bool StatLocal(const std::string& p, LocalE& out);
     void SetBase(const std::string& p, const LocalE& l, const RemoteE& r);

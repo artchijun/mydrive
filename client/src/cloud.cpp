@@ -294,6 +294,17 @@ static HRESULT Transfer(const CF_CALLBACK_INFO* ci, NTSTATUS st, const void* buf
     return CfExecute(&oi, &op);
 }
 
+int InSyncState(const std::wstring& path, bool dir) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           dir ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    alignas(8) char buf[1024];
+    DWORD got = 0;
+    HRESULT hr = CfGetPlaceholderInfo(h, CF_PLACEHOLDER_INFO_BASIC, buf, sizeof buf, &got);
+    CloseHandle(h);
+    if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_MORE_DATA)) return -1;
+    return ((CF_PLACEHOLDER_BASIC_INFO*)buf)->InSyncState == CF_IN_SYNC_STATE_IN_SYNC ? 1 : 0;
+}
 static thread_local std::wstring t_requester;
 std::wstring FetchRequester() { return t_requester; }
 static void CALLBACK OnFetchData(const CF_CALLBACK_INFO* ci, const CF_CALLBACK_PARAMETERS* cp) {

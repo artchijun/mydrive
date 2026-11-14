@@ -25,6 +25,8 @@ using FetchFn = std::function<bool(const std::wstring& absPath, int64_t offset, 
 struct Connection { int64_t key = 0; };
 // 지금 '열 때 받기'를 부른 프로그램 이름 (예: explorer.exe) — 받기 콜백 안에서만 뜻이 있음
 std::wstring FetchRequester();
+// 자리표시에 '맞춰짐' 표시가 붙어 있는지 (1 붙음, 0 없음, -1 모름) — 파일을 받지 않고 확인
+int InSyncState(const std::wstring& path, bool dir);
 bool Connect(const std::wstring& path, FetchFn fetch, Connection& out);
 void Disconnect(Connection& c);
 

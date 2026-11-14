@@ -926,7 +926,33 @@ bool Engine::RunPass() {
     { std::lock_guard<std::mutex> g(xMu_); stats.waiting = (int)waitNote_.size(); }
     if (dirty_) Save();
     SaveOpened();
+    if (!healed_ && !stop_) { healed_ = true; L.unlock(); HealInSync(); }
     return any;
+}
+
+// 예전 판에서 이름을 바꾸거나 옮긴 파일은 Windows 가 지운 '맞춰짐' 표시가 그대로 빠져 있어 탐색기에 '보류 중'으로 보임.
+// 켠 뒤 첫 차례가 끝나면 한 번, 양쪽이 마지막 상태와 같은 자리표시만 골라 표시를 확인하고 빠졌으면 붙임 (파일은 받지 않음).
+void Engine::HealInSync() {
+    if (!cloudOn_ || unregister_) return;
+    std::vector<std::pair<std::string, bool>> list;
+    {
+        std::lock_guard<std::recursive_mutex> g(mu_);
+        for (auto& [p, b] : base_) {
+            auto li = local_.find(p); auto ri = remote_.find(p);
+            if (li == local_.end() || ri == remote_.end()) continue;
+            const LocalE& l = li->second; const RemoteE& r = ri->second;
+            if (!(l.a & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+            bool sameL = l.d == b.d && (b.d || (l.s == b.ls && SameTime(l.m, b.lm)));
+            bool sameR = r.d == b.d && (b.d || (r.s == b.rs && r.m == b.rm));
+            if (sameL && sameR) list.push_back({p, l.d});
+        }
+    }
+    int fixed = 0;
+    for (auto& [p, d] : list) {
+        if (stop_) return;
+        if (cloud::InSyncState(Abs(cfg_.localRoot, p), d) == 0) { InSync(p, d); fixed++; }
+    }
+    if (fixed) Event("✔ 맞춰짐 표시 고침", cfg_.name, std::to_string(fixed) + "개 — 이름을 바꾸거나 옮긴 뒤 빠져 있던 표시");
 }
 
 // ---------- 계속 맞추기: PC 폴더 감시 + NAS 변경 기다리기 ----------
