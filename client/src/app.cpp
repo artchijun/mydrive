@@ -1010,7 +1010,7 @@ static void CreateSettingsControls(HWND h) {
         for (int i = 0; i < 5; i++) {
             s_sk[i] = SCtl(h, L"BUTTON", sk[i], BS_AUTOCHECKBOX | WS_TABSTOP, IDS_SKTMP + i);
             MakeChk(s_sk[i]); ChkSet(s_sk[i], ((g_cfg.skipMask >> i) & 1) != 0);
-            MoveWindow(s_sk[i], s_cx + (i % 2) * (cw2 + S(12)), y + (i / 2) * (eh + S(4)), cw2, eh, TRUE);
+            MoveWindow(s_sk[i], s_cx + (i % 2) * (cw2 + S(12)), y + (i / 2) * (eh + S(4)), i == 4 ? s_cw : cw2, eh, TRUE);   // 마지막 줄은 글이 길어 한 줄 전체
         }
         y = Field(h, y, L"임시·시스템 파일", L"체크한 종류는 맞추지 않고 이 PC에만 둡니다 (탐색기에는 '항상 이 장치에'로 보여 폴더가 '동기화 중'으로 남지 않음).\n"
                   L"늘 빼는 것 (바꿀 수 없음): Mydrive가 받는 동안 쓰는 임시 파일 .mydrive-tmp-…, 시놀로지 내부 폴더 #recycle · @eaDir · #snapshot · @tmp · .SynologyWorkingDirectory",
