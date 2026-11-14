@@ -300,7 +300,7 @@ void RefreshShell(const std::wstring& path) {
 }
 bool MarkExcluded(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           nullptr, OPEN_EXISTING, 0, nullptr);
+                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);   // 폴더도 (늘 빼는 폴더)
     if (h == INVALID_HANDLE_VALUE) return false;   // 다른 프로그램이 쓰는 중 → 다음에
     char id[] = "x";
     HRESULT hr = CfConvertToPlaceholder(h, id, 1, CF_CONVERT_FLAG_MARK_IN_SYNC, nullptr, nullptr);

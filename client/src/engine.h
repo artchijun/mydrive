@@ -149,7 +149,8 @@ private:
     bool CloudFetch(const std::wstring& abs, int64_t off, const std::function<bool(const char*, size_t)>& sink);
     uint8_t ParentPin(const std::string& p) const;
     std::map<std::string, LocalE> local_;
-    std::vector<std::string> exclPlain_;   // 이번에 훑으며 본, 체크로 뺀 보통 파일 (탐색기 표시만 고침)
+    std::vector<std::string> exclPlain_;
+    std::vector<std::string> exclTree_;    // 늘 빼는 이름의 보통 폴더·파일 (예: 예전 시놀로지 드라이브가 남긴 .SynologyWorkingDirectory) — 안까지 '이 PC에만'으로 표시   // 이번에 훑으며 본, 체크로 뺀 보통 파일 (탐색기 표시만 고침)
     std::map<std::string, RemoteE> remote_;
     std::map<std::string, BaseE> base_;
     std::string epoch_;

@@ -280,6 +280,9 @@ bool Engine::ScanLocal() {
                 if (!(e->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) && !AlwaysSkipName(n) &&
                     (SkipKind(n) & g_skipMask.load()) && nowNs - FtToNs(*(FILETIME*)&e->LastWriteTime) > 60000000000LL && exclPlain.size() < 500)
                     exclPlain.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
+                // 늘 빼는 이름(시놀로지 내부 폴더 등)이 자리표시가 아니면 위 폴더가 탐색기에 늘 '동기화 중' → 안까지 표시만 고침 (우리 임시 파일은 제외)
+                if (n != L"." && n != L".." && AlwaysSkipName(n) && n.rfind(L".mydrive-tmp-", 0) != 0 && !(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && exclTree_.size() < 20)
+                    exclTree_.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
                 if (n != L"." && n != L".." && !SkipLocalName(n) && !link) {
                     std::string rel = dir.empty() ? U(n) : dir + "/" + U(n);
                     LocalE l;
@@ -1037,6 +1040,9 @@ bool Engine::RunPass() {
             bool done = stats.pending <= 0 && inflight_.empty() && hydr.empty() && conv.empty() && stats.heldDeletes == 0;
             { std::lock_guard<std::mutex> g(qMu_); if (!bigQ_.empty()) done = false; }
             int want = done ? 1 : 2;
+            // Windows 는 맨 위 폴더 바로 아래 항목이 생기거나 사라지면(이름 바꾸기·옮기기 포함) 맨 위 폴더의 '맞춰짐' 표시를 지움
+            //   → 기억해 둔 값만 믿으면 탐색기에 계속 '동기화 중'. 다 맞았을 때는 실제 표시를 확인해 빠졌으면 다시 칠함
+            if (want == 1 && rootSync_ == 1 && cloud::InSyncState(PlainRoot(cfg_.localRoot), true) == 0) rootSync_ = 0;
             if (rootSync_ != want && cloud::SetRootInSync(W(cfg_.name), PlainRoot(cfg_.localRoot), done)) rootSync_ = want;
             else if (rootSync_ != want) rootSync_ = want;   // 맨 위 폴더에 못 칠해도 'Mydrive' 쪽은 칠함 — 매번 다시 하지 않게
         }
@@ -1081,6 +1087,21 @@ bool Engine::RunPass() {
     if (dirty_) Save();
     SaveOpened();
     // 뺀 파일 때문에 폴더가 탐색기에 '동기화 중'으로 남지 않게: 그 파일을 '이 PC에만 · 맞춰짐'으로 표시
+    if (cloudOn_ && !unregister_ && !exclTree_.empty()) {
+        int n = 0;
+        std::function<void(const std::wstring&)> mark = [&](const std::wstring& a) {
+            if (stop_ || n > 5000) return;
+            if (cloud::MarkExcluded(a)) n++;   // 폴더면 먼저 폴더, 그다음 안의 것
+            if (!(GetFileAttributesW(a.c_str()) & FILE_ATTRIBUTE_DIRECTORY)) return;
+            WIN32_FIND_DATAW fd; HANDLE fh = FindFirstFileW((a + L"\\*").c_str(), &fd);
+            if (fh == INVALID_HANDLE_VALUE) return;
+            do { std::wstring f = fd.cFileName; if (f != L"." && f != L"..") mark(a + L"\\" + f); } while (FindNextFileW(fh, &fd));
+            FindClose(fh);
+        };
+        for (auto& p : exclTree_) mark(Abs(cfg_.localRoot, p));
+        if (n) LOG("[%s] 늘 빼는 폴더 %d개 안의 항목 %d개를 탐색기에 '이 PC에만'으로 표시", cfg_.name.c_str(), (int)exclTree_.size(), n);
+    }
+    exclTree_.clear();
     if (cloudOn_ && !unregister_ && !exclPlain_.empty()) {
         int n = 0;
         for (auto& p : exclPlain_) if (!stop_ && cloud::MarkExcluded(Abs(cfg_.localRoot, p))) n++;
