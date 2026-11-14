@@ -346,10 +346,13 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
         auto it = remote_.find(p);
         if (it != remote_.end()) cond = (b && !b->d) ? CondB(*b) : Cond(it->second);
     }
-    auto xs = BeginXfer(p, true, l.s);
+    auto xs = BeginXfer(p, true, l.s, l.s, l.m);
+    t_xferStop = &xs->cancel;
     Resp r = http_.Upload("/v1/file", {{"root", cfg_.name}, {"path", p}, {"mtime", std::to_string(l.m)}, {"if", cond}},
                           Abs(cfg_.localRoot, p), &xs->done);
+    t_xferStop = nullptr;
     EndXfer(p);
+    if (xs->cancel) { Event("⏹ 취소함", p, "올리기 — 파일이 바뀌거나 [지금 동기화]를 누르면 다시 맞춤"); return false; }
     if (r.status == 409) { Event("충돌", p, "그사이 NAS에서도 바뀜 — 다음 차례에 둘 다 남김"); return false; }
     if (!r.ok()) { stats.errors++; Event("올리기 실패", p, r.error.empty() ? std::to_string(r.status) + " " + r.body : r.error); return false; }
     json j = json::parse(r.body, nullptr, false);
@@ -371,9 +374,12 @@ bool Engine::Download(const std::string& p, const RemoteE& r, const BaseE* b) {
     if (!par.empty()) { LocalE pd; if (!StatLocal(par, pd)) SHCreateDirectoryExW(nullptr, Abs(cfg_.localRoot, par).c_str() + 4, nullptr); }
     wchar_t rnd[16]; swprintf(rnd, 16, L"%08x", GetTickCount() ^ GetCurrentThreadId());
     std::wstring tmp = Abs(cfg_.localRoot, par.empty() ? ".mydrive-tmp-" + U(rnd) : par + "/.mydrive-tmp-" + U(rnd));
-    auto xs = BeginXfer(p, false, r.s);
+    auto xs = BeginXfer(p, false, r.s, r.s, r.m);
+    t_xferStop = &xs->cancel;
     Resp res = http_.Download("/v1/file", {{"root", cfg_.name}, {"path", p}}, tmp, &xs->done);
+    t_xferStop = nullptr;
     EndXfer(p);
+    if (xs->cancel) { Event("⏹ 취소함", p, "받기 — NAS 파일이 바뀌거나 [지금 동기화]를 누르면 다시 맞춤"); return false; }
     if (!res.ok()) { stats.errors++; Event("받기 실패", p, res.error.empty() ? std::to_string(res.status) : res.error); return false; }
     // 받는 사이 NAS 쪽이 또 바뀌었으면, 받은 판의 정보(헤더)를 씀
     RemoteE got = r;
@@ -490,12 +496,17 @@ static std::string LocalSha256(const std::wstring& file) {
     return out;
 }
 
-bool Engine::SameContent(const std::string& p) {
+int Engine::SameContent(const std::string& p) {
     std::string lh = LocalSha256(Abs(cfg_.localRoot, p));
+    if (lh.empty() || stop_) return -1;
     Resp r = http_.Req(L"GET", "/v1/hash", {{"root", cfg_.name}, {"path", p}}, nullptr, 600);
-    if (lh.empty() || !r.ok()) return false;   // 확인할 수 없으면 다르다고 보고 둘 다 남김 (안전한 쪽)
+    // 확인을 못 했으면(끊김·종료 중) '다르다'로 보지 않고 다음 차례에 다시 — 예전에는 여기서 충돌 사본을 만들어 큰 파일을 통째로 다시 올렸음
+    if (!r.ok()) return -1;
     json j = json::parse(r.body, nullptr, false);
-    return !j.is_discarded() && j.value("sha256", std::string()) == lh;
+    if (j.is_discarded()) return -1;
+    std::string rh = j.value("sha256", std::string());
+    if (rh.empty()) return -1;
+    return rh == lh ? 1 : 0;
 }
 
 // ---------- 이름 바꾸기 알아채기 (지우고 새로 올리는 대신 이름만 바꿈) ----------
@@ -589,6 +600,7 @@ bool Engine::RunPass() {
         autoFreeNs = (int64_t)cfg_.autoFreeDays * 86400LL * 1000000000LL;
         lastAutoFree_ = GetTickCount64();
     }
+    std::map<std::string, Canceled> canceled; { std::lock_guard<std::mutex> g(xMu_); canceled = canceled_; }
     std::set<std::string> flightAnc;                 // 큰 파일 통로에서 옮기는 중인 파일의 위 폴더
     for (auto& f : inflight_) for (std::string q = Parent(f); !q.empty(); q = Parent(q)) flightAnc.insert(q);
     for (auto& p : all) {
@@ -639,6 +651,16 @@ bool Engine::RunPass() {
             else if (l && r) a = Conflict;
             else if (l) a = l->d ? MkR : Up;        // NAS 에서 지웠지만 PC 에서 고침 → 고친 판을 살림
             else a = r->d ? MkL : Down;             // PC 에서 지웠지만 NAS 에서 고침 → 고친 판을 살림
+        }
+        // [취소]한 파일: 그 판이 그대로면 이번에도 옮기지 않음 (바뀌었으면 취소 표시를 지우고 평소대로)
+        if (a != None && !canceled.empty()) {
+            auto ci = canceled.find(p);
+            if (ci != canceled.end()) {
+                bool same = ci->second.up ? (l && !l->d && l->s == ci->second.s && SameTime(l->m, ci->second.m))
+                                          : (r && !r->d && r->s == ci->second.s && r->m == ci->second.m);
+                if (same) continue;
+                std::lock_guard<std::mutex> g(xMu_); canceled_.erase(p);
+            }
         }
         if (a != None) items.push_back({p, a});
         else if (cloudOn_ && l && b) {
@@ -903,12 +925,20 @@ bool Engine::RunPass() {
 }
 
 // ---------- 계속 맞추기: PC 폴더 감시 + NAS 변경 기다리기 ----------
-std::shared_ptr<Engine::XState> Engine::BeginXfer(const std::string& p, bool up, int64_t total) {
-    auto x = std::make_shared<XState>(); x->up = up; x->total = total; x->start = GetTickCount64();
+std::shared_ptr<Engine::XState> Engine::BeginXfer(const std::string& p, bool up, int64_t total, int64_t sigS, int64_t sigM) {
+    auto x = std::make_shared<XState>(); x->up = up; x->total = total; x->start = GetTickCount64(); x->sigS = sigS; x->sigM = sigM;
     std::lock_guard<std::mutex> g(xMu_); xfers_[p] = x;
     return x;
 }
 void Engine::EndXfer(const std::string& p) { std::lock_guard<std::mutex> g(xMu_); xfers_.erase(p); }
+bool Engine::CancelTransfer(const std::string& p) {
+    std::lock_guard<std::mutex> g(xMu_);
+    auto it = xfers_.find(p);
+    if (it == xfers_.end() || it->second->sigS < 0) return false;   // 이미 끝났거나, 탐색기에서 열 때 받는 중 (그건 연 프로그램이 멈춤)
+    it->second->cancel = true;
+    canceled_[p] = Canceled{it->second->up, it->second->sigS, it->second->sigM};
+    return true;
+}
 
 std::vector<Transfer> Engine::Transfers() {
     std::lock_guard<std::mutex> g(xMu_);
@@ -986,7 +1016,9 @@ bool Engine::RunJob(const Job& j) {
     }
     case Job::Compare: {
         // 양쪽에 크기가 같은 파일: 내용이 같으면 옮기지 않고 그대로 맞춘 것으로, 다르면 둘 다 남김
-        if (SameContent(j.p)) {
+        int same = SameContent(j.p);
+        if (same < 0) return false;   // 확인 못 함 → 아무것도 바꾸지 않고 다음 차례에 다시
+        if (same == 1) {
             LocalE now;
             std::lock_guard<std::recursive_mutex> g(mu_);
             if (StatLocal(j.p, now) && now.s == j.l.s && SameTime(now.m, j.l.m)) { SetBase(j.p, now, j.r); return true; }

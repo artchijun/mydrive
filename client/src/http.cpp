@@ -23,6 +23,9 @@ static void Throttle(int dir, int64_t n, const std::atomic<bool>& cancel) {
     while (wait >= 1 && !cancel) { DWORD s = (DWORD)std::min(wait, 200.0); Sleep(s); wait -= s; }
 }
 
+thread_local const std::atomic<bool>* t_xferStop = nullptr;
+static bool XferStopped() { return t_xferStop && t_xferStop->load(); }
+
 Http::Http(const std::wstring& baseUrl, const std::string& token) : token_(token) {
     URL_COMPONENTS uc{sizeof uc};
     wchar_t host[256] = {}, path[1024] = {};
@@ -110,7 +113,7 @@ Resp Http::Finish(HINTERNET h, HANDLE outFile, std::atomic<int64_t>* progress) {
     bool toFile = outFile != INVALID_HANDLE_VALUE && r.ok();
     std::vector<char> buf(1 << 20);
     for (;;) {
-        if (cancel) { r.status = 0; r.error = "취소됨"; break; }
+        if (cancel || XferStopped()) { r.status = 0; r.error = "취소됨"; break; }
         DWORD got = 0;
         if (!WinHttpReadData(h, buf.data(), (DWORD)buf.size(), &got)) { r.status = 0; r.error = ErrText(GetLastError()); break; }
         if (got == 0) break;
@@ -187,7 +190,7 @@ Resp Http::Upload(const std::string& path, const std::map<std::string, std::stri
     std::vector<char> buf(1 << 20);
     int64_t left = size.QuadPart;
     while (left > 0) {
-        if (cancel) { Close(h); CloseHandle(f); r.error = "취소됨"; return r; }
+        if (cancel || XferStopped()) { Close(h); CloseHandle(f); r.error = "취소됨"; return r; }
         DWORD got = 0;
         if (!ReadFile(f, buf.data(), (DWORD)buf.size(), &got, nullptr)) { Close(h); CloseHandle(f); r.status = -1; r.error = "파일 읽기 실패"; return r; }
         if (got == 0) break;

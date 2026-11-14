@@ -94,6 +94,8 @@ public:
     void ConfirmMassDelete() { confirmDelete_ = true; Kick(); }
     void RestoreMassDelete() { restoreDelete_ = true; Kick(); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
+    bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
+    void ClearCanceled() { std::lock_guard<std::mutex> g(xMu_); canceled_.clear(); }   // [지금 동기화]: 취소한 것도 다시 맞춤
     // 일시 중지: minutes 동안 (0 = 다시 시작)
     void Pause(int minutes) { pausedUntil_ = minutes > 0 ? GetTickCount64() + (uint64_t)minutes * 60000 : 0; Kick(); }
     bool Paused() const { return pausedUntil_ > GetTickCount64(); }
@@ -159,13 +161,15 @@ private:
     int lastHeld_ = -1;
     int rootSync_ = 0;   // 맨 위 폴더에 알린 상태: 0 아직, 1 맞춰짐, 2 맞추는 중
     std::map<std::string, std::pair<std::string, uint64_t>> waitNote_;   // 기다리는 파일 → (알린 내용, 처음 본 시각) — xMu_ 로 보호
-    struct XState { bool up; int64_t total; std::atomic<int64_t> done{0}; uint64_t start; };
+    struct XState { bool up; int64_t total; std::atomic<int64_t> done{0}; uint64_t start; std::atomic<bool> cancel{false}; int64_t sigS = -1, sigM = 0; };
+    struct Canceled { bool up; int64_t s, m; };   // 취소한 파일: 그 판(크기·시각)이 그대로인 동안은 다시 옮기지 않음
+    std::map<std::string, Canceled> canceled_;   // xMu_ 로 보호
     struct FailInfo { int n = 0; uint64_t first = 0, last = 0; std::string msg; };
     std::mutex xMu_;
     std::map<std::string, std::shared_ptr<XState>> xfers_;
     std::map<std::string, FailInfo> fails_;
     std::atomic<uint64_t> failRetryAt_{0};
-    std::shared_ptr<XState> BeginXfer(const std::string& p, bool up, int64_t total);
+    std::shared_ptr<XState> BeginXfer(const std::string& p, bool up, int64_t total, int64_t sigS = -1, int64_t sigM = 0);
     void EndXfer(const std::string& p);
     uint64_t retryAt_ = 0;                          // 기다리는 파일을 다시 볼 시각
     bool Excluded(const std::string& p, bool d, int64_t size) const;
@@ -184,7 +188,7 @@ private:
     bool DeleteRemote(const std::string& p, const BaseE& b);
     bool DeleteLocal(const std::string& p);
     bool KeepBothLocal(const std::string& p);   // 로컬 판을 충돌 사본 이름으로 바꿔 둠
-    bool SameContent(const std::string& p);     // 크기·시각이 같아도 내용(SHA-256)까지 같은지
+    int SameContent(const std::string& p);      // 크기·시각이 같아도 내용(SHA-256)까지 같은지: 1 같음, 0 다름, -1 확인 못 함
     bool StatLocal(const std::string& p, LocalE& out);
     void SetBase(const std::string& p, const LocalE& l, const RemoteE& r);
     void Rekey(const std::string& from, const std::string& to);   // 폴더째 이름이 바뀐 경우 아래 항목까지

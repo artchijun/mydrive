@@ -240,7 +240,7 @@ static void PauseAll(int minutes) {
 }
 static void SyncNow() {
     if (AnyPaused()) PauseAll(0);
-    for (auto& e : g_engines) e->Kick();
+    for (auto& e : g_engines) { e->ClearCanceled(); e->Kick(); }
 }
 
 // ---------- 전체 상태 (트레이 색 · 상태 알약) ----------
@@ -374,6 +374,7 @@ enum Hit {
     H_SUMROW = 5000,       // + 줄 번호 (요약 폴더)
     H_LOGROW = 6000,       // + 줄 번호 (기록)
     H_XFER = 7000,         // + 줄 번호 (지금 처리 중)
+    H_XCANCEL = 7500,      // + 줄 번호 (지금 처리 중인 파일 취소)
 };
 static HWND g_pop, g_popTip;
 static ui::Canvas g_cv;
@@ -389,6 +390,7 @@ static std::vector<StuckView> g_stuckView;
 static uint64_t g_stuckViewAt = 0;
 // 줄을 누르면 쓸 경로
 static std::vector<std::wstring> g_recentPaths, g_sumPaths, g_logPaths, g_xferPaths;
+static std::vector<std::pair<int, std::string>> g_xferRefs;   // 처리 중인 줄 → (연결 번호, NAS 경로)
 
 static void Popup_Invalidate() { if (g_pop && IsWindowVisible(g_pop)) InvalidateRect(g_pop, nullptr, FALSE); }
 
@@ -421,7 +423,7 @@ static void DrawNow(Rect r, const Overall& o) {
     Rect in = r.inset(14, 12);
     Color c = o.color; Color tile = Alpha(c, 0.14f);
     wchar_t g = 0xE895; std::wstring label, where, extra;
-    g_xferPaths.clear();
+    g_xferPaths.clear(); g_xferRefs.clear();
     std::vector<std::pair<int, Transfer>> xs = o.xf;   // 시작한 순서로 (줄이 뛰지 않게)
     std::sort(xs.begin(), xs.end(), [](auto& a, auto& b) { return a.second.startTick < b.second.startTick; });
     int ups = 0, downs = 0;
@@ -458,18 +460,23 @@ static void DrawNow(Rect r, const Overall& o) {
         std::wstring right = Fmt(L"%d%%", (int)(f * 100));
         if (secs > 0.5 && t.done > 0) right = SizeText((int64_t)(t.done / secs)) + L"/s · " + right;
         float rw = g_cv.TextWidth(right, {11});
+        const float cb = 26;   // [취소] 단추 자리
         g_cv.Icon(t.up ? 0xE898 : 0xE896, {in.l, y, in.l + 16, y + 18}, tc, 12);
-        g_cv.Text(leaf, {in.l + 22, y, in.r - rw - 10, y + 18}, col::Text(), {12.5f});
-        g_cv.Text(right, {in.r - rw, y + 1, in.r, y + 18}, col::Sub(), {11});
-        Rect bar{in.l + 22, y + 22, in.r, y + 25};
+        g_cv.Text(leaf, {in.l + 22, y, in.r - cb - rw - 14, y + 18}, col::Text(), {12.5f});
+        g_cv.Text(right, {in.r - cb - 6 - rw, y + 1, in.r - cb - 6, y + 18}, col::Sub(), {11});
+        Rect bar{in.l + 22, y + 22, in.r - cb - 6, y + 25};
         g_cv.Fill(bar, col::White(0.1f), 1.5f);
         if (f > 0) g_cv.Fill({bar.l, bar.t, bar.l + bar.w() * f, bar.b}, tc, 1.5f);
         std::wstring sz = SizeText(t.done) + L" / " + SizeText(t.total);
         float sw = g_cv.TextWidth(sz, {10.5f});
         g_cv.Text(dir, {in.l + 22, y + 27, in.r - sw - 10, y + 41}, col::Sub(), {10.5f});
-        g_cv.Text(sz, {in.r - sw, y + 27, in.r, y + 41}, col::Muted(), {10.5f});
-        g_cv.AddHit({in.l, y, in.r, y + 42}, H_XFER + k, dir + L"\\" + leaf + L"\n두 번 눌러 열기 · 오른쪽 클릭 메뉴");
+        g_cv.Text(sz, {in.r - cb - 6 - sw, y + 27, in.r - cb - 6, y + 41}, col::Muted(), {10.5f});
+        g_cv.AddHit({in.l, y, in.r - cb - 4, y + 42}, H_XFER + k, dir + L"\\" + leaf + L"\n두 번 눌러 열기 · 오른쪽 클릭 메뉴");
+        Btn(H_XCANCEL + k, {in.r - cb, y + 6, in.r, y + 32}, L"", 0xE711,
+            t.up ? L"이 파일 올리기 취소\n지금 옮기던 것을 멈추고, 이 파일은 고치거나 [지금 동기화]를 누를 때까지 다시 올리지 않습니다.\nPC 파일은 그대로 남습니다."
+                 : L"이 파일 받기 취소\n지금 받던 것을 멈추고, NAS 파일이 바뀌거나 [지금 동기화]를 누를 때까지 다시 받지 않습니다.\nNAS 파일은 그대로 남습니다.", 1);
         g_xferPaths.push_back(dir + L"\\" + leaf);
+        g_xferRefs.push_back({ci, t.p});
         y += kNowRowH;
     }
     if ((int)xs.size() > shown)
@@ -1032,6 +1039,10 @@ static void OnClick(int id) {
     else if (id == H_P30) PauseAll(30); else if (id == H_P60) PauseAll(60); else if (id == H_P180) PauseAll(180);
     else if (id == H_NOWOPEN && !g_lastFile.empty()) RevealInExplorer(LocalPathOf(g_lastConn, g_lastFile));
     else if (id == H_NOWCOPY && !g_lastFile.empty()) CopyText(LocalPathOf(g_lastConn, g_lastFile));
+    else if (id >= H_XCANCEL && id < H_XCANCEL + 100 && id - H_XCANCEL < (int)g_xferRefs.size()) {
+        auto& ref = g_xferRefs[id - H_XCANCEL];
+        if (ref.first >= 0 && ref.first < (int)g_engines.size()) g_engines[ref.first]->CancelTransfer(ref.second);
+    }
     else if (id == H_RESTOREDEL) {
         int64_t held = 0; for (auto& e : g_engines) held += e->stats.heldDeletes;
         for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->RestoreMassDelete();

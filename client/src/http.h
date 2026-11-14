@@ -19,6 +19,9 @@ struct Resp {
     bool ok() const { return status >= 200 && status < 300; }
 };
 
+// 지금 이 스레드가 옮기는 파일 하나를 멈추라는 표시 (엔진이 올리기·받기 직전에 정하고 끝나면 비움)
+extern thread_local const std::atomic<bool>* t_xferStop;
+
 // 모든 연결에 함께 적용되는 속도 제한 (바이트/초, 0 = 제한 없음)
 void SetRateLimit(int64_t upBps, int64_t downBps);
 
