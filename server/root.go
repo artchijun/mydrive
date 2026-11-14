@@ -253,7 +253,7 @@ func (r *Root) emitLocked(op string, e Entry) {
 		delete(r.idx, e.P)
 	}
 	r.log = append(r.log, Change{Q: r.seq, Op: op, E: e})
-	if len(r.log) > maxLog {
+	if len(r.log) > maxLog+maxLog/4 { // 넘칠 때마다 통째로 복사하지 않고, 1/4 더 쌓이면 한 번에 잘라 냄
 		cut := len(r.log) - maxLog
 		r.log = append([]Change(nil), r.log[cut:]...)
 	}

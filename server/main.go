@@ -21,9 +21,11 @@
 package main
 
 import (
+	"bufio"
 	"compress/gzip"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -43,7 +45,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.7"
+const version = "0.6.8"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -90,8 +92,9 @@ func main() {
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
-	mux.HandleFunc("/v1/rescan", auth(hRescan)) // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
+	mux.HandleFunc("/v1/rescan", auth(hRescan))     // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
 	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
+	mux.HandleFunc("/v1/batch", auth(hBatch))       // 작은 파일 묶어 올리기 (기록은 안에서 파일마다)
 	mux.HandleFunc("/v1/move", auth(logged(hMove)))
 	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
 	mux.HandleFunc("/v1/hash", auth(hHash))
@@ -218,7 +221,8 @@ func hRoots(w http.ResponseWriter, r *http.Request) {
 }
 
 // hRescan: 그 연결 전체를 지금 디스크와 비교해 바뀐 것을 변경 기록에 넣음
-//   (File Station·SMB 로 바꾼 것 중 inotify 한도 때문에 감시하지 못하는 폴더의 것 — 평소에는 MYDRIVE_RESCAN 주기마다)
+//
+//	(File Station·SMB 로 바꾼 것 중 inotify 한도 때문에 감시하지 못하는 폴더의 것 — 평소에는 MYDRIVE_RESCAN 주기마다)
 func hRescan(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		httpErr(w, 405, "method", "POST 만")
@@ -401,20 +405,35 @@ func putFile(w http.ResponseWriter, r *http.Request, rt *Root, rel, abs string) 
 		httpErr(w, 400, "bad_mtime", "mtime(ns) 필요")
 		return
 	}
+	code, e, kind, msg := putOne(rt, rel, abs, mt, q.Get("if"), r.Body, r.ContentLength)
+	if code != 200 {
+		httpErr(w, code, kind, msg)
+		return
+	}
+	writeJSON(w, r, e)
+}
+
+// 파일 하나 받아 넣기 (/v1/file PUT 과 /v1/batch 공통). size<0 이면 길이를 모름.
+// 조건이 맞지 않아도 내용은 끝까지 읽음 (묶음에서 다음 파일 자리가 어긋나지 않게).
+func putOne(rt *Root, rel, abs string, mt int64, cond string, body io.Reader, size int64) (int, Entry, string, string) {
 	dir := filepath.Dir(abs)
 	if err := os.MkdirAll(dir, 0777); err != nil {
-		httpErr(w, 500, "io", err.Error())
-		return
+		if size >= 0 {
+			io.CopyN(io.Discard, body, size)
+		}
+		return 500, Entry{}, "io", err.Error()
 	}
 	tmp := filepath.Join(dir, ".mydrive-tmp-"+randHex())
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0666)
 	if err != nil {
-		httpErr(w, 500, "io", err.Error())
-		return
+		if size >= 0 {
+			io.CopyN(io.Discard, body, size)
+		}
+		return 500, Entry{}, "io", err.Error()
 	}
-	n, err := io.CopyBuffer(f, r.Body, make([]byte, 1<<20))
-	if err == nil && r.ContentLength >= 0 && n != r.ContentLength {
-		err = fmt.Errorf("받은 크기 %d ≠ %d", n, r.ContentLength)
+	n, err := io.CopyBuffer(f, body, make([]byte, 1<<20))
+	if err == nil && size >= 0 && n != size {
+		err = fmt.Errorf("받은 크기 %d ≠ %d", n, size)
 	}
 	if err == nil && os.Getenv("MYDRIVE_FSYNC") == "1" {
 		err = f.Sync()
@@ -424,8 +443,7 @@ func putFile(w http.ResponseWriter, r *http.Request, rt *Root, rel, abs string) 
 	f.Close()
 	if err != nil {
 		os.Remove(tmp)
-		httpErr(w, 400, "upload", "올리기가 끊김: "+err.Error())
-		return
+		return 400, Entry{}, "upload", "올리기가 끊김: " + err.Error()
 	}
 	t := time.Unix(0, mt)
 	os.Chtimes(tmp, t, t)
@@ -433,25 +451,89 @@ func putFile(w http.ResponseWriter, r *http.Request, rt *Root, rel, abs string) 
 	cur, exists := statRel(rt, rel)
 	if exists && cur.D {
 		os.Remove(tmp)
-		httpErr(w, 409, "is_dir", "같은 이름의 폴더가 있음")
-		return
+		return 409, Entry{}, "is_dir", "같은 이름의 폴더가 있음"
 	}
-	if !checkIf(q.Get("if"), cur, exists) {
+	if !checkIf(cond, cur, exists) {
 		os.Remove(tmp)
-		httpErr(w, 409, "conflict", "그사이 NAS에서 바뀜")
-		return
+		return 409, Entry{}, "conflict", "그사이 NAS에서 바뀜"
 	}
 	if exists {
 		saveVersion(rt, rel, abs) // 덮기 전 판을 '이전 버전'으로 남김
 	}
 	if err := os.Rename(tmp, abs); err != nil {
 		os.Remove(tmp)
-		httpErr(w, 500, "io", err.Error())
-		return
+		return 500, Entry{}, "io", err.Error()
 	}
 	rt.Apply(rel)
 	e, _ := statRel(rt, rel)
-	writeJSON(w, r, e)
+	return 200, e, "", ""
+}
+
+// PUT /v1/batch?root= — 작은 파일 여러 개를 한 요청으로 올림 (PC 앱 0.5.25부터).
+// 몸통: [4바이트(little-endian) 머리 길이][머리 JSON {"p","m","if","s"}][내용 s바이트] … 길이 0 으로 끝.
+// 파일마다 /v1/file PUT 과 같은 처리를 하고 {"results":[{"status":200,"e":{…}} | {"status":409,"err":{…}}]} 를 차례대로 돌려줌.
+// 한 파일이 실패해도 나머지는 계속. 몸통이 중간에 끊기면 남은 파일은 결과에서 빠짐 (PC 앱이 다음 차례에 다시 올림).
+func hBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		httpErr(w, 405, "method", "지원하지 않음")
+		return
+	}
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	const maxFiles, maxHead = 256, 64 * 1024
+	type head struct {
+		P  string `json:"p"`
+		M  int64  `json:"m"`
+		If string `json:"if"`
+		S  int64  `json:"s"`
+	}
+	br := bufio.NewReaderSize(r.Body, 1<<20)
+	pc, ip := reqPC(r), clientIP(r)
+	if i := strings.LastIndex(ip, ":"); i > 0 {
+		ip = strings.Trim(ip[:i], "[]")
+	}
+	results := []map[string]any{}
+	for len(results) < maxFiles {
+		var lb [4]byte
+		if _, err := io.ReadFull(br, lb[:]); err != nil {
+			break
+		}
+		hl := binary.LittleEndian.Uint32(lb[:])
+		if hl == 0 {
+			break
+		}
+		if hl > maxHead {
+			break
+		}
+		hb := make([]byte, hl)
+		if _, err := io.ReadFull(br, hb); err != nil {
+			break
+		}
+		var h head
+		if json.Unmarshal(hb, &h) != nil || h.S < 0 {
+			break // 머리를 못 읽으면 내용 길이를 몰라 뒤를 이어 읽을 수 없음
+		}
+		rel, ok := cleanRel(h.P)
+		if !ok {
+			io.CopyN(io.Discard, br, h.S)
+			results = append(results, map[string]any{"status": 400, "err": map[string]string{"error": "bad_path", "msg": "경로가 올바르지 않음"}})
+			continue
+		}
+		abs := filepath.Join(rt.Dir, filepath.FromSlash(rel))
+		code, e, kind, msg := putOne(rt, rel, abs, h.M, h.If, io.LimitReader(br, h.S), h.S)
+		if code != 200 {
+			results = append(results, map[string]any{"status": code, "err": map[string]string{"error": kind, "msg": msg}})
+			if kind == "upload" {
+				break // 내용이 덜 왔음 → 뒤는 자리가 어긋남
+			}
+			continue
+		}
+		actAppend(actEntry{T: time.Now().UnixNano(), PC: pc, IP: ip, Root: rt.Name, Path: rel, Act: "올림", Size: h.S})
+		results = append(results, map[string]any{"status": 200, "e": e})
+	}
+	writeJSON(w, r, map[string]any{"results": results})
 }
 
 func hMove(w http.ResponseWriter, r *http.Request) {

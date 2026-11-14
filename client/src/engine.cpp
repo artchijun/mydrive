@@ -330,13 +330,13 @@ bool Engine::StatLocal(const std::string& p, LocalE& out) {
     return true;
 }
 
-void Engine::SetBase(const std::string& p, const LocalE& l, const RemoteE& r) {
+void Engine::SetBase(const std::string& p, const LocalE& l, const RemoteE& r, bool mark) {
     std::lock_guard<std::recursive_mutex> g(mu_);
     base_[p] = BaseE{l.d, l.s, l.m, l.id, r.s, r.m, r.i};
     LocalE keep = l;
     if (!keep.pin) { auto it = local_.find(p); keep.pin = it != local_.end() ? it->second.pin : ParentPin(p); }   // 물려받은 표시는 유지
     local_[p] = keep; remote_[p] = r; dirty_ = true;
-    InSync(p, l.d);   // 탐색기에 '맞춰짐' 표시
+    if (mark) InSync(p, l.d);   // 탐색기에 '맞춰짐' 표시
     // '항상 유지' 폴더 안에 새로 생긴 항목도 같은 표시 (탐색기에 진한 초록 체크)
     if (cloudOn_ && !unregister_ && keep.pin == 1 && !cloud::IsPinned(l.a)) cloud::PinOne(Abs(cfg_.localRoot, p), l.d);
 }
@@ -376,6 +376,10 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
     EndXfer(p);
     if (xs->gone) { Event("⏹ 올리기 멈춤", p, "올리는 중에 PC에서 지움 — NAS에는 올리지 않음"); return false; }
     if (xs->cancel) { Event("⏹ 취소함", p, "올리기 — 파일이 바뀌거나 [지금 동기화]를 누르면 다시 맞춤"); return false; }
+    return UploadDone(p, l, r, nullptr);
+}
+
+bool Engine::UploadDone(const std::string& p, const LocalE& l, const Resp& r, std::vector<std::pair<std::string, bool>>* marks) {
     if (r.status == 409) {
         Event("충돌", p, "그사이 NAS에서도 바뀜 — NAS 목록을 다시 받아 둘 다 남김");
         // PC 가 들고 있는 NAS 목록이 어긋났을 수 있음 → 전체 목록을 새로 받음 (2분에 한 번까지). 안 그러면 같은 올리기를 계속 되풀이함
@@ -390,13 +394,91 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
     {
         std::lock_guard<std::recursive_mutex> g(mu_);
         bool here = StatLocal(p, now);
-        if (here && now.s == l.s && SameTime(now.m, l.m)) SetBase(p, now, re);
+        bool mark = marks == nullptr;
+        if (here && now.s == l.s && SameTime(now.m, l.m)) { SetBase(p, now, re, mark); if (!mark) marks->push_back({p, now.d}); }
         else if (!here) SetBase(p, l, re);   // 다 올린 뒤 지워짐 → 다음 차례에 NAS에서도 지움 (예전에는 PC로 도로 받아 와서 되살아났음)
         else { remote_[p] = re; dirty_ = true; }
     }   // 올리는 사이 또 바뀜 → 다음 차례에 다시 올림
     stats.up++;
     Event("↑ 올림", p, std::to_string(l.s) + " B");
     return true;
+}
+
+// ---------- 작은 파일 묶어 올리기 ----------
+// 몸통: [4바이트 머리 길이][머리 JSON {"p","m","if","s"}][내용 s바이트] 를 이어 붙이고 길이 0 으로 끝냄.
+// 서버는 파일마다 /v1/file PUT 과 똑같이 처리하고 결과를 차례대로 돌려줌 → 파일마다 주고받던 왕복이 묶음당 한 번.
+int Engine::UploadBatch(const std::vector<const Job*>& jobs, bool& fallback) {
+    fallback = false;
+    struct One { const Job* j; std::string cond; std::shared_ptr<XState> xs; };
+    std::vector<One> sent;
+    std::string body;
+    int64_t bytes = 0;
+    for (auto* j : jobs) {
+        One o{j, "none", nullptr};
+        {
+            std::lock_guard<std::recursive_mutex> g(mu_);
+            auto it = remote_.find(j->p);
+            if (it != remote_.end()) o.cond = (j->hasBase && !j->b.d) ? CondB(j->b) : Cond(it->second);
+        }
+        // 내용을 지금 읽어 둠 (작은 파일만 오므로 메모리로 충분)
+        HANDLE f = CreateFileW(Abs(cfg_.localRoot, j->p).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                               OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+        if (f == INVALID_HANDLE_VALUE) { stats.errors++; Event("올리기 실패", j->p, "파일을 열 수 없음 (다른 프로그램이 쓰는 중일 수 있음)"); continue; }
+        LARGE_INTEGER sz{}; GetFileSizeEx(f, &sz);
+        if (sz.QuadPart != j->l.s) { CloseHandle(f); continue; }   // 그사이 바뀜 → 다음 차례에 다시 맞춤
+        json h = {{"p", j->p}, {"m", j->l.m}, {"if", o.cond}, {"s", j->l.s}};
+        std::string hs = h.dump();
+        uint32_t hl = (uint32_t)hs.size();
+        size_t at = body.size();
+        body.append((const char*)&hl, 4); body += hs;
+        size_t dataAt = body.size();
+        body.resize(dataAt + (size_t)j->l.s);
+        DWORD got = 0; bool ok = true; int64_t left = j->l.s; char* dst = body.data() + dataAt;
+        while (left > 0) {
+            DWORD want = (DWORD)std::min<int64_t>(left, 1 << 20);
+            if (!ReadFile(f, dst, want, &got, nullptr) || got == 0) { ok = false; break; }
+            dst += got; left -= got;
+        }
+        CloseHandle(f);
+        if (!ok) { body.resize(at); stats.errors++; Event("올리기 실패", j->p, "파일 읽기 실패"); continue; }
+        o.xs = BeginXfer(j->p, true, j->l.s, j->l.s, j->l.m);
+        bytes += j->l.s;
+        sent.push_back(std::move(o));
+    }
+    if (sent.empty()) return 0;
+    uint32_t end = 0; body.append((const char*)&end, 4);
+    uint64_t t0 = GetTickCount64();
+    Resp r = http_.Req(L"PUT", "/v1/batch", {{"root", cfg_.name}}, &body, 300);
+    uint64_t ms = GetTickCount64() - t0;
+    for (auto& o : sent) { o.xs->done = o.j->l.s; EndXfer(o.j->p); }
+    // 서버가 묶음 올리기를 모름 (예전 판): 하나씩 올리도록 돌려보냄
+    if (r.status == 404 || r.status == 405) {
+        if (r.body.find("no_root") == std::string::npos) { fallback = true; if (batchOk_.exchange(false)) LOG("[%s] 서버가 묶음 올리기를 지원하지 않음 — 하나씩 올림", cfg_.name.c_str()); return 0; }
+    }
+    if (!r.ok()) {
+        for (auto& o : sent) { stats.errors++; Event("올리기 실패", o.j->p, r.error.empty() ? std::to_string(r.status) + " " + r.body : r.error); }
+        return 0;
+    }
+    json res = json::parse(r.body, nullptr, false);
+    const json* arr = (res.is_object() && res.contains("results") && res["results"].is_array()) ? &res["results"] : nullptr;
+    std::vector<std::pair<std::string, bool>> marks;
+    int okN = 0;
+    for (size_t i = 0; i < sent.size(); i++) {
+        auto& o = sent[i];
+        Resp one;
+        if (!arr || i >= arr->size()) { one.status = 0; one.error = "서버 응답에 결과가 없음"; }
+        else {
+            const json& it = (*arr)[i];
+            one.status = it.value("status", 0);
+            if (it.contains("e")) one.body = it["e"].dump();
+            else if (it.contains("err")) one.body = it["err"].dump();
+        }
+        if (UploadDone(o.j->p, o.j->l, one, &marks)) okN++;
+    }
+    // 탐색기 '맞춰짐' 표시는 상태 잠금 밖에서 (다른 통로가 기다리지 않게)
+    for (auto& [p, d] : marks) InSync(p, d);
+    LOG("[%s] 묶음 올림 %d/%d개 %.1f MB — %llu ms", cfg_.name.c_str(), okN, (int)sent.size(), bytes / 1048576.0, (unsigned long long)ms);
+    return okN;
 }
 
 bool Engine::Download(const std::string& p, const RemoteE& r, const BaseE* b) {
@@ -1066,20 +1148,40 @@ bool Engine::RunPass() {
         }
         stats.pending--;
     }
-    // 작은 파일: 통로 3개로 함께 옮김 (하나가 느려도 나머지는 계속)
+    // 작은 파일: 통로 8개로 함께 옮김 (하나가 느려도 나머지는 계속).
+    // 1 MB 이하 올리기는 최대 32개(8 MB)씩 묶어 한 요청으로 → 파일마다 드는 왕복을 줄임
     if (!smallJobs.empty()) {
         std::atomic<size_t> next{0};
         std::atomic<bool> anyJob{false};
+        const int64_t kTiny = 1LL << 20, kBatchBytes = 8LL << 20;
+        const size_t kBatchN = 32;
+        auto tiny = [&](const Job& j) { return j.kind == Job::Up && j.size <= kTiny && batchOk_ && UpRateLimit() <= 0; };
         auto work = [&] {
             for (size_t k; !stop_ && (k = next++) < smallJobs.size();) {
                 while (UpperBusy(cfg_.rank) && !stop_) Sleep(200);   // 우선순위 '높음' 연결이 먼저
-                if (RunJob(smallJobs[k])) anyJob = true;
-                stats.pending--;
+                if (!tiny(smallJobs[k])) {
+                    if (RunJob(smallJobs[k])) anyJob = true;
+                    stats.pending--;
+                    continue;
+                }
+                // 뒤따르는 작은 올리기를 함께 가져감 (다른 통로와 겹치지 않게 하나씩 차지)
+                std::vector<const Job*> batch{&smallJobs[k]};
+                int64_t bytes = smallJobs[k].size;
+                for (size_t k2 = next.load(); batch.size() < kBatchN && k2 < smallJobs.size();) {
+                    const Job& c = smallJobs[k2];
+                    if (!tiny(c) || bytes + c.size > kBatchBytes) break;
+                    if (next.compare_exchange_weak(k2, k2 + 1)) { batch.push_back(&c); bytes += c.size; k2++; }
+                }
+                bool fallback = false;
+                int n = batch.size() == 1 ? -1 : UploadBatch(batch, fallback);
+                if (n > 0) anyJob = true;
+                if (n < 0 || fallback) for (auto* j : batch) if (RunJob(*j)) anyJob = true;   // 한 개뿐이거나 서버가 묶음을 모름
+                stats.pending -= (int)batch.size();
             }
         };
         RankGuard hg2(cfg_.rank);
         L.unlock();
-        int nThreads = (int)std::min<size_t>(3, smallJobs.size());
+        int nThreads = (int)std::min<size_t>(8, smallJobs.size());
         std::vector<std::thread> th;
         for (int t = 1; t < nThreads; t++) th.emplace_back(work);
         work();

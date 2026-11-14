@@ -24,6 +24,7 @@ extern thread_local const std::atomic<bool>* t_xferStop;
 
 // 모든 연결에 함께 적용되는 속도 제한 (바이트/초, 0 = 제한 없음)
 void SetRateLimit(int64_t upBps, int64_t downBps);
+int64_t UpRateLimit();   // 올리기 제한 (0 = 없음) — 묶어 올리기는 제한이 없을 때만
 
 class Http {
 public:

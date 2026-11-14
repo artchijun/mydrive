@@ -213,6 +213,11 @@ private:
     bool DetectRenames();
     // 실행
     bool Upload(const std::string& p, const LocalE& l, const BaseE* b);
+    // 올린 뒤 결과 처리 (한 파일·묶음 공통). marks 를 주면 탐색기 '맞춰짐' 표시는 잠금 밖에서 하도록 모아 둠
+    bool UploadDone(const std::string& p, const LocalE& l, const Resp& r, std::vector<std::pair<std::string, bool>>* marks);
+    // 작은 파일 여러 개를 한 요청으로 (서버 /v1/batch). 서버가 모르면 false → 하나씩 올림
+    int UploadBatch(const std::vector<const Job*>& jobs, bool& fallback);
+    std::atomic<bool> batchOk_{true};   // 서버가 묶음 올리기를 지원하는지 (404 면 끔)
     bool Download(const std::string& p, const RemoteE& r, const BaseE* b);
     bool MkdirRemote(const std::string& p);
     bool MkdirLocal(const std::string& p, const RemoteE& r);
@@ -223,7 +228,7 @@ private:
     bool healed_ = false;
     int SameContent(const std::string& p);      // 크기·시각이 같아도 내용(SHA-256)까지 같은지: 1 같음, 0 다름, -1 확인 못 함
     bool StatLocal(const std::string& p, LocalE& out);
-    void SetBase(const std::string& p, const LocalE& l, const RemoteE& r);
+    void SetBase(const std::string& p, const LocalE& l, const RemoteE& r, bool mark = true);   // mark=false: '맞춰짐' 표시는 부른 쪽이 잠금 밖에서
     void Rekey(const std::string& from, const std::string& to);   // 폴더째 이름이 바뀐 경우 아래 항목까지
     void Load();
     void Save();

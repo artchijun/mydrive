@@ -9,6 +9,7 @@ static std::atomic<int64_t> g_lim[2];
 static std::mutex g_limMu[2];
 static double g_next[2];   // 이 시각(ms)까지는 이미 보낸 양으로 꽉 참
 void SetRateLimit(int64_t upBps, int64_t downBps) { g_lim[0] = upBps; g_lim[1] = downBps; }
+int64_t UpRateLimit() { return g_lim[0]; }
 static void Throttle(int dir, int64_t n, const std::atomic<bool>& cancel) {
     int64_t lim = g_lim[dir];
     if (lim <= 0 || n <= 0) return;
