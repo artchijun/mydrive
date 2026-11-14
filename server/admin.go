@@ -90,6 +90,20 @@ func loadCfg() {
 		srvCfg.Versions = verPolicy
 		srvCfg.SyncToken = os.Getenv("MYDRIVE_TOKEN")
 	}
+	// 같은 이름이 여러 번 들어 있으면 하나만 (예전 판이 덧붙인 것) — 겹치면 같은 폴더를 여러 번 훑고 감시도 겹쳐 걸림
+	seen := map[string]bool{}
+	uniq := srvCfg.Roots[:0]
+	for _, rc := range srvCfg.Roots {
+		if rc.Name == "" || seen[rc.Name] {
+			continue
+		}
+		seen[rc.Name] = true
+		uniq = append(uniq, rc)
+	}
+	if n := len(srvCfg.Roots) - len(uniq); n > 0 {
+		srvCfg.Roots = uniq
+		log.Printf("설정의 겹친 공유 폴더 %d개를 정리함 (남은 것 %d개)", n, len(uniq))
+	}
 	if t := os.Getenv("MYDRIVE_ADMIN_TOKEN"); t != "" && srvCfg.AdminToken == "" {
 		srvCfg.AdminToken = t
 	}
