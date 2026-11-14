@@ -284,6 +284,8 @@ struct Overall {
     int64_t pend = 0, held = 0, wait = 0, xfers = 0;
     std::vector<std::pair<int, StuckInfo>> stuck;   // (연결 번호, 막힌 파일)
     std::vector<std::pair<int, Transfer>> xf;
+    std::vector<std::pair<int, Engine::HeldDir>> heldDirs;   // (연결 번호, 폴더) 많은 순 상위 3곳
+    int heldGroups = 0;
     bool offline = false;
 };
 static uint64_t g_offlineSince = 0;
@@ -297,7 +299,10 @@ static Overall GetOverall() {
         if (e.busy || e.stats.pending > 0) busy = true;
         for (auto& s : e.StuckList()) o.stuck.push_back({i, s});
         for (auto& t : e.Transfers()) o.xf.push_back({i, t});
+        if (e.stats.heldDeletes > 0) { int g = 0; for (auto& d : e.HeldDirs(&g)) o.heldDirs.push_back({i, d}); o.heldGroups += g; }
     }
+    std::sort(o.heldDirs.begin(), o.heldDirs.end(), [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
+    if (o.heldDirs.size() > 3) o.heldDirs.resize(3);
     o.xfers = (int64_t)o.xf.size();
     uint64_t now = GetTickCount64();
     if (anyOffline) { if (!g_offlineSince) g_offlineSince = now; } else g_offlineSince = 0;
@@ -341,7 +346,9 @@ static void TraySet(int state, std::wstring tip) {
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
     g_icoState = state;
 }
-static void TrayBalloon(const std::wstring& title, const std::wstring& text, DWORD icon) {
+static std::wstring g_balloonReveal;   // 알림을 누르면 탐색기에서 보여 줄 파일 (비면 창을 엶)
+static void TrayBalloon(const std::wstring& title, const std::wstring& text, DWORD icon, const std::wstring& reveal = L"") {
+    g_balloonReveal = reveal;
     NOTIFYICONDATAW n = g_nid;
     n.uFlags = NIF_INFO;
     wcsncpy_s(n.szInfoTitle, title.c_str(), _TRUNCATE);
@@ -387,6 +394,21 @@ static void WatchAlerts(const Overall& o) {
         AddAlert(A_HELD, Fmt(L"한 번에 %lld개가 지워져서 삭제를 멈춤 — 확인을 기다림", o.held));
     }
     g_prevHeld = o.held;
+    // 충돌 사본: 기록에 하나씩 남기고, 알림은 1분에 한 번 (그사이 생긴 것은 모아서)
+    static int s_cfPend = 0; static std::wstring s_cfFirst; static uint64_t s_cfAt = 0;
+    for (size_t i = 0; i < g_engines.size(); i++) {
+        for (auto& rel : g_engines[i]->TakeConflicts()) {
+            std::wstring abs = LocalPathOf(ConnName((int)i), W(rel));
+            AddAlert(A_CONFLICT, L"충돌 사본 — 두 곳에서 바뀌어 둘 다 남김: " + Leaf(W(rel)), abs);
+            if (!s_cfPend++) s_cfFirst = abs;
+        }
+    }
+    if (s_cfPend && (!s_cfAt || now - s_cfAt >= 60000)) {
+        std::wstring body = s_cfPend == 1 ? Leaf(s_cfFirst) + L"\n원본과 사본을 둘 다 남겼습니다. 눌러서 위치 보기"
+                                          : Fmt(L"%d개 — ", s_cfPend) + Leaf(s_cfFirst) + L" 등\n원본과 사본을 둘 다 남겼습니다. 눌러서 첫 파일 위치 보기 (전체는 기록 탭)";
+        TrayBalloon(L"Mydrive · 충돌 사본이 생겼습니다", body, NIIF_WARNING, s_cfFirst);
+        s_cfPend = 0; s_cfFirst.clear(); s_cfAt = now;
+    }
     if (o.offline != g_prevOffline) {
         if (o.offline) { AddAlert(A_NET, L"NAS에 연결할 수 없음 — 다시 시도하는 중 (" + ServerHost() + L")"); }
         else AddAlert(A_NETOK, L"NAS에 다시 연결됨");
@@ -397,7 +419,8 @@ static void WatchAlerts(const Overall& o) {
 // ---------- 트레이 창 ----------
 enum Hit {
     H_NONE = 0, H_SET = 1, H_HELP, H_PIN, H_CLOSE, H_TAB0, H_TAB1, H_TAB2, H_SYNCNOW, H_P30, H_P60, H_P180, H_RESUME,
-    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL, H_RESCAN,
+    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL, H_RESCAN, H_HELDLIST,
+    H_HELDDIR = 90,        // + 0..2 (대량 삭제가 일어난 폴더)
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -591,17 +614,47 @@ static void DrawStuck(Rect r) {
         y += ih + 6;
     }
 }
-static void DrawHeld(Rect r, int64_t held) {
+static std::vector<std::wstring> g_heldDirAbs;   // [H_HELDDIR + k] 누르면 탐색기에서 보여 줄 폴더
+static float HeldHeight(const Overall& o) { return 110.f + 22.f * (float)o.heldDirs.size(); }
+static void DrawHeld(Rect r, const Overall& o) {
+    int64_t held = o.held;
     g_cv.Fill(r, Hex(0x22F5B544), 12); g_cv.Stroke(r, Hex(0x70F5B544), 12);
     Rect in = r.inset(14, 12);
+    // 사라진 폴더 (많은 순 상위 3곳): 누르면 탐색기에서 그 자리를 보여 줌
+    g_heldDirAbs.clear();
+    float ry = in.t + 56;
+    for (size_t k = 0; k < o.heldDirs.size(); k++) {
+        auto& [ci, d] = o.heldDirs[k];
+        std::wstring abs = LocalPathOf(ConnName(ci), W(d.rel));
+        g_heldDirAbs.push_back(abs);
+        std::wstring right = Fmt(L"%d개 · ", d.n) + (d.lostOnPC ? L"PC에서 사라짐" : L"NAS에서 사라짐");
+        Rect row{in.l + 20, ry, in.r, ry + 22};
+        if (g_cv.hover == H_HELDDIR + (int)k) g_cv.Fill(row, Hex(0x18FFFFFF), 6);
+        g_cv.Icon(0xE8B7, {row.l + 4, row.t + 2, row.l + 20, row.b - 2}, col::Orange(), 12);
+        float rw = 170;
+        // 길면 앞쪽을 줄여 끝 폴더 이름이 보이게: C:\…\4.WORKING\.20250524
+        std::wstring shown = abs; float maxw = row.w() - rw - 32;
+        for (size_t cut = 3; g_cv.TextWidth(shown, {11.5f}) > maxw;) {
+            size_t q = abs.find(L'\\', cut);
+            if (q == std::wstring::npos) break;
+            shown = abs.substr(0, 3) + L"…" + abs.substr(q); cut = q + 1;
+        }
+        g_cv.Text(shown, {row.l + 24, row.t, row.r - rw - 8, row.b}, col::Text(), {11.5f});
+        g_cv.Text(right, {row.r - rw, row.t, row.r - 6, row.b}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Right});
+        g_cv.AddHit(row, H_HELDDIR + (int)k, abs + L"\n누르면 탐색기에서 이 자리를 보여 줍니다", false);
+        ry += 22;
+    }
+    float off = 22.f * (float)o.heldDirs.size();
     g_cv.Icon(0xE769, {in.l, in.t, in.l + 16, in.t + 20}, col::Orange(), 14);
     g_cv.Text(Fmt(L"한 번에 %lld개가 지워져서 삭제를 멈췄습니다", held), {in.l + 24, in.t, in.r, in.t + 20}, Hex(0xFFFFD18A), {13, DWRITE_FONT_WEIGHT_SEMI_BOLD});
-    g_cv.Text(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [확인하고 지우기]. 다른 동기화는 계속합니다.",
+    g_cv.Text(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [지우기]. 다른 동기화는 계속합니다.",
               {in.l + 24, in.t + 22, in.r, in.t + 54}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, true, true});
-    float w1 = BtnW(L"되살리기", 0xE777), w2 = BtnW(L"확인하고 지우기", 0xE74D);
-    Btn(H_RESTOREDEL, {in.l + 24, in.t + 58, in.l + 24 + w1, in.t + 86}, L"되살리기", 0xE777,
+    float w1 = BtnW(L"되살리기", 0xE777), w2 = BtnW(L"지우기", 0xE74D), w3 = BtnW(L"목록 보기", 0xE8FD);
+    Btn(H_HELDLIST, {in.l + 40 + w1 + w2, in.t + 58 + off, in.l + 40 + w1 + w2 + w3, in.t + 86 + off}, L"목록 보기", 0xE8FD,
+        L"지워지려는 파일·폴더 목록을 메모장으로 엽니다. 어느 쪽에서 사라졌는지도 적혀 있습니다.");
+    Btn(H_RESTOREDEL, {in.l + 24, in.t + 58 + off, in.l + 24 + w1, in.t + 86 + off}, L"되살리기", 0xE777,
         L"아무것도 지우지 않고, 사라진 쪽에 다시 만듭니다.\nPC에서 사라졌으면 NAS 기준으로 PC에 다시 만들고(필요할 때 받기면 온라인 전용으로), NAS에서 사라졌으면 PC 파일을 다시 올립니다.");
-    Btn(H_CONFIRMDEL, {in.l + 32 + w1, in.t + 58, in.l + 32 + w1 + w2, in.t + 86}, L"확인하고 지우기", 0xE74D,
+    Btn(H_CONFIRMDEL, {in.l + 32 + w1, in.t + 58 + off, in.l + 32 + w1 + w2, in.t + 86 + off}, L"지우기", 0xE74D,
         L"반대쪽에서도 지웁니다. PC 에서는 휴지통, NAS 에서는 #recycle 로 가므로 나중에 되살릴 수 있습니다.");
 }
 
@@ -747,7 +800,7 @@ static void DrawNowTab(Rect r, const Overall& o) {
     DrawBar({r.l, y, r.r, y + bh}, o); y += bh + 10;
     float nh = NowHeight(o);
     DrawNow({r.l, y, r.r, y + nh}, o); y += nh + 10;
-    if (o.held > 0) { DrawHeld({r.l, y, r.r, y + 110}, o.held); y += 120; }
+    if (o.held > 0) { float hh = HeldHeight(o); DrawHeld({r.l, y, r.r, y + hh}, o); y += hh + 10; }
     RefreshStuckView(o, false);
     if (!g_stuckView.empty()) { float sh = StuckHeight(); DrawStuck({r.l, y, r.r, y + sh}); y += sh + 10; }
     g_cv.Text(L"최근 작업", {r.l + 2, y, r.r, y + 20}, col::Text(), {12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD});
@@ -1082,6 +1135,10 @@ static void OnClick(int id) {
         auto& ref = g_xferRefs[id - H_XCANCEL];
         if (ref.first >= 0 && ref.first < (int)g_engines.size()) g_engines[ref.first]->CancelTransfer(ref.second);
     }
+    else if (id == H_HELDLIST) {
+        for (auto& e : g_engines) if (e->stats.heldDeletes > 0)
+            ShellExecuteW(g_pop, L"open", L"notepad.exe", (L"\"" + e->HeldFile() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    }
     else if (id == H_RESTOREDEL) {
         int64_t held = 0; for (auto& e : g_engines) held += e->stats.heldDeletes;
         for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->RestoreMassDelete();
@@ -1114,6 +1171,7 @@ static void OnClick(int id) {
     else if (id == H_SUMREF) g_sum.at = 0;
     else if (id >= H_LOGF && id < H_LOGF + 4) { g_logFilter = id - H_LOGF; g_scrollLog = 0; }
     else if (id == H_LOGOPEN) ShellExecuteW(g_pop, L"open", L"notepad.exe", (L"\"" + AlertPath() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    else if (id >= H_HELDDIR && id < H_HELDDIR + 3 && id - H_HELDDIR < (int)g_heldDirAbs.size()) RevealInExplorer(g_heldDirAbs[id - H_HELDDIR]);
     else if (id >= H_CONN && id < H_CONN + 100 && id - H_CONN < (int)g_engines.size()) ShellExecuteW(g_pop, L"open", g_engines[id - H_CONN]->cfg().localRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     else if (id >= H_STUCKCOPY && id < H_STUCKCOPY + 100 && id - H_STUCKCOPY < (int)g_stuckView.size()) CopyText(g_stuckView[id - H_STUCKCOPY].abs);
     else if (id >= H_STUCKOPEN && id < H_STUCKOPEN + 100 && id - H_STUCKOPEN < (int)g_stuckView.size()) RevealInExplorer(g_stuckView[id - H_STUCKOPEN].abs);

@@ -43,7 +43,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.6"
+const version = "0.6.7"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")

@@ -107,6 +107,20 @@ inline bool SkipRemoteRel(const std::string& rel) {
     return SkipLocalName(w);
 }
 // 위 폴더 중 하나가 건너뛰는 이름인지 (예: LibreOffice 의 lu1234.tmp 폴더). PC 쪽은 그런 폴더 안을 아예 보지 않으므로 NAS 쪽도 맞춤
+// 충돌 사본 이름인가: "이름 (PC 충돌 2026-11-14 1635).확장자"
+inline bool IsConflictName(const std::string& leaf) {
+    const std::string k = " \xEC\xB6\xA9\xEB\x8F\x8C ";   // " 충돌 "
+    size_t i = leaf.find(k);
+    if (i == std::string::npos || leaf.rfind(" (", i) == std::string::npos) return false;
+    const char* f = "dddd-dd-dd dddd)";
+    size_t j = i + k.size();
+    for (size_t n = 0; f[n]; n++, j++) {
+        if (j >= leaf.size()) return false;
+        char c = leaf[j];
+        if (f[n] == 'd' ? (c < '0' || c > '9') : c != f[n]) return false;
+    }
+    return true;
+}
 inline bool SkipRemoteAnc(const std::string& rel) {
     size_t a = 0;
     for (size_t i = rel.find('/'); i != std::string::npos; a = i + 1, i = rel.find('/', a))

@@ -112,6 +112,13 @@ public:
     bool OwnsMissing(uint64_t lid, std::string* p, BaseE* b);
     // '다른 동기화 작업으로 옮기기': NAS 에서 이미 다른 연결로 옮긴 항목 → PC 쪽 것을 휴지통으로 보내고 기록을 지움 (받지 않음)
     bool ForgetMoved(const std::string& rel);
+    // 새로 생긴 충돌 사본 (이 PC 에서 만들었거나 다른 PC 가 만든 것을 받음) — 창이 가져가서 알림
+    std::vector<std::string> TakeConflicts() { std::lock_guard<std::mutex> g(cfMu_); std::vector<std::string> v; v.swap(newConf_); return v; }
+    // 보류된 대량 삭제 목록 파일 (메모장으로 엶)
+    // 보류된 대량 삭제가 일어난 폴더 (많은 순, 상위 3곳). groups: 전체 곳 수
+    struct HeldDir { std::string rel; int n = 0; bool lostOnPC = false; };
+    std::vector<HeldDir> HeldDirs(int* groups) { std::lock_guard<std::mutex> g(cfMu_); if (groups) *groups = heldGroups_; return heldDirs_; }
+    std::wstring HeldFile() const { return cfg_.stateDir + L"\\" + W(cfg_.name) + L" 삭제 보류 목록.txt"; }
 private:
     // 동기화 작업 사이 옮기기 (engine.cpp '동기화 작업 사이 옮기기' 참고)
     std::mutex idxMu_;
@@ -173,6 +180,10 @@ private:
     HANDLE watchDir_ = INVALID_HANDLE_VALUE;
     bool dirty_ = false;
     int lastHeld_ = -1;
+    std::mutex cfMu_;
+    std::vector<std::string> newConf_;
+    std::vector<HeldDir> heldDirs_; int heldGroups_ = 0;
+    void NoteConflict(const std::string& p) { std::lock_guard<std::mutex> g(cfMu_); if (newConf_.size() < 500) newConf_.push_back(p); }
     int rootSync_ = 0;   // 맨 위 폴더에 알린 상태: 0 아직, 1 맞춰짐, 2 맞추는 중
     std::map<std::string, std::pair<std::string, uint64_t>> waitNote_;   // 기다리는 파일 → (알린 내용, 처음 본 시각) — xMu_ 로 보호
     struct XState { bool up; int64_t total; std::atomic<int64_t> done{0}; uint64_t start; std::atomic<bool> cancel{false}, gone{false}; int64_t sigS = -1, sigM = 0; };   // gone: 올리는 중에 PC에서 지움

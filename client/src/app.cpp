@@ -437,7 +437,10 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(lp)) {
         case NIN_SELECT: case NIN_KEYSELECT: Popup_Toggle(); break;
         case WM_CONTEXTMENU: TrayMenu(); break;
-        case NIN_BALLOONUSERCLICK: Popup_Show(g_icoState == T_STUCK ? 0 : -1); break;
+        case NIN_BALLOONUSERCLICK:
+            if (!g_balloonReveal.empty()) { RevealInExplorer(g_balloonReveal); g_balloonReveal.clear(); }
+            else Popup_Show(g_icoState == T_STUCK ? 0 : -1);
+            break;
         }
         return 0;
     case WM_COMMAND:
@@ -1108,7 +1111,7 @@ static void CreateSettingsControls(HWND h) {
     Unit(h, L"개 넘게 지워지면 멈추고 묻기", ux, y);
     y = Field(h, y, L"대량 삭제 확인", L"한 번에 이 개수보다 많이 지워지면 삭제만 멈추고 먼저 물어봅니다.",
               L"실수로 폴더를 통째로 지웠을 때 반대쪽까지 지워지는 것을 막습니다.\n이 개수를 넘으면 삭제만 멈추고, 다른 동기화는 계속합니다.\n"
-              L"주 창의 [확인하고 지우기]를 눌러야 반대쪽에서도 지웁니다. 기본값 50.", {s_limit}, eh);
+              L"주 창의 [지우기]를 눌러야 반대쪽에서도 지웁니다. 기본값 50.", {s_limit}, eh);
     y = Head(h, y, L"저장 공간");
     s_autoFree = NumEdit(h, g_cfg.autoFreeDays, IDS_AUTOFREE, s_cx, y, nw);
     Unit(h, L"일 동안 안 열면 비우기  (0 = 끔)", ux, y);

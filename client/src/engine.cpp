@@ -422,6 +422,7 @@ bool Engine::Download(const std::string& p, const RemoteE& r, const BaseE* b) {
     SetBase(p, now, got);
     stats.down++;
     Event("↓ 받음", p, std::to_string(got.s) + " B");
+    if (IsConflictName(Leaf(p))) NoteConflict(p);
     return true;
 }
 
@@ -510,6 +511,7 @@ bool Engine::KeepBothLocal(const std::string& p) {
     base_.erase(p); local_.erase(p); dirty_ = true;
     stats.conflicts++;
     Event("⚠ 충돌 — 둘 다 남김", p, "PC 판 → " + nn);
+    NoteConflict(np);
     return true;
 }
 
@@ -865,8 +867,84 @@ bool Engine::RunPass() {
     bool holdL = nDelL > cfg_.massDeleteLimit && !confirmDelete_;
     bool holdR = nDelR > cfg_.massDeleteLimit && !confirmDelete_;
     stats.heldDeletes = (holdL ? nDelL : 0) + (holdR ? nDelR : 0);
-    if (stats.heldDeletes != lastHeld_ && stats.heldDeletes > 0)
-        Event("⏸ 대량 삭제 보류", cfg_.name, std::to_string(nDelR) + "개 NAS 삭제 / " + std::to_string(nDelL) + "개 PC 삭제 — 확인을 누르면 진행");
+    if (stats.heldDeletes != lastHeld_ && stats.heldDeletes > 0) {
+        Event("⏸ 대량 삭제 보류", cfg_.name, std::to_string(nDelR) + "개 NAS 삭제 / " + std::to_string(nDelL) + "개 PC 삭제 — [지우기]를 누르면 진행");
+        // 어느 폴더에서 사라졌나: 같이 사라진 가장 위 폴더(없으면 파일이 있던 폴더)로 묶어 셈
+        {
+            std::set<std::string> hs;
+            for (auto& it : items) if ((it.a == DelR && holdR) || (it.a == DelL && holdL)) hs.insert(it.p);
+            std::map<std::pair<std::string, bool>, int> grp;
+            for (auto& it : items) {
+                bool r = it.a == DelR;
+                if (!((r && holdR) || (it.a == DelL && holdL))) continue;
+                std::string rep;
+                for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) if (hs.count(q)) rep = q;
+                if (rep.empty()) { auto bi = base_.find(it.p); rep = (bi != base_.end() && bi->second.d) ? it.p : Parent(it.p); }
+                grp[{rep, r}]++;
+            }
+            // 곳이 많으면(예: 폴더마다 파일 하나씩) 가장 깊은 공통 상위 폴더로 묶어 3곳 이하로
+            auto lca = [](const std::string& a, const std::string& b) {
+                std::string c;
+                for (size_t i = 0;;) {
+                    size_t ja = a.find('/', i), jb = b.find('/', i);
+                    std::string sa = a.substr(i, ja == std::string::npos ? std::string::npos : ja - i), sb = b.substr(i, jb == std::string::npos ? std::string::npos : jb - i);
+                    if (sa != sb || sa.empty()) break;
+                    c = a.substr(0, ja == std::string::npos ? a.size() : ja);
+                    if (ja == std::string::npos || jb == std::string::npos) break;
+                    i = ja + 1;
+                }
+                return c;
+            };
+            for (int guard = 0; grp.size() > 3 && guard < 5000; guard++) {
+                std::string best; bool bestSide = false; int bestDepth = -1;
+                std::pair<std::string, bool> prev; bool havePrev = false;
+                for (auto& [k, n] : grp) {
+                    if (havePrev && prev.second == k.second) {
+                        std::string c = lca(prev.first, k.first);
+                        int d = c.empty() ? 0 : Depth(c) + 1;
+                        if (d > bestDepth) { bestDepth = d; best = c; bestSide = k.second; }
+                    }
+                    prev = k; havePrev = true;
+                }
+                if (bestDepth < 0) break;
+                int sum = 0;
+                for (auto g = grp.begin(); g != grp.end();) {
+                    if (g->first.second == bestSide && (best.empty() || g->first.first == best || Under(g->first.first, best))) { sum += g->second; g = grp.erase(g); }
+                    else ++g;
+                }
+                grp[{best, bestSide}] += sum;
+            }
+            std::vector<HeldDir> v;
+            for (auto& [k, n] : grp) v.push_back({k.first, n, k.second});
+            std::sort(v.begin(), v.end(), [](const HeldDir& a, const HeldDir& b) { return a.n > b.n; });
+            std::lock_guard<std::mutex> g(cfMu_);
+            heldGroups_ = (int)v.size();
+            if (v.size() > 3) v.resize(3);
+            heldDirs_ = v;
+        }
+        // 무엇이 지워지려는지 파일로 남김 ([목록 보기])
+        if (FILE* fp = _wfopen(HeldFile().c_str(), L"wb")) {
+            fputs("\xEF\xBB\xBF", fp);
+            SYSTEMTIME st; GetLocalTime(&st);
+            fprintf(fp, "Mydrive · %s · 대량 삭제 보류 (%04d-%02d-%02d %02d:%02d)\r\n\r\n", cfg_.name.c_str(), st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute);
+            for (int pass = 0; pass < 2; pass++) {
+                bool r = pass == 0;
+                if (!(r ? holdR : holdL)) continue;
+                fprintf(fp, r ? "[이 PC에서 사라짐 → [지우기]를 누르면 NAS에서도 지움] %d개\r\n" : "[NAS에서 사라짐 → [지우기]를 누르면 이 PC에서도 지움] %d개\r\n", r ? nDelR : nDelL);
+                for (auto& it : items) {
+                    if (it.a != (r ? DelR : DelL)) continue;
+                    auto bi = base_.find(it.p); bool d = bi != base_.end() && bi->second.d;
+                    std::string ap = U(Abs(cfg_.localRoot, it.p));
+                    if (ap.rfind("\\\\?\\", 0) == 0) ap.erase(0, 4);
+                    fprintf(fp, "  %s%s\r\n", ap.c_str(), d ? "\\" : "");
+                }
+                fputs("\r\n", fp);
+            }
+            fputs("직접 지운 적이 없으면 [되살리기]: 아무것도 지우지 않고 사라진 쪽에 다시 만듭니다.\r\n일부러 지웠으면 [지우기]: PC는 휴지통, NAS는 #recycle 로 갑니다.\r\n", fp);
+            fclose(fp);
+        }
+    }
+    if (stats.heldDeletes == 0 && lastHeld_ > 0) { std::lock_guard<std::mutex> g(cfMu_); heldDirs_.clear(); heldGroups_ = 0; }
     lastHeld_ = stats.heldDeletes;
 
     stats.pending = (int)items.size();
@@ -1369,6 +1447,7 @@ bool Engine::Placeholder(const Job& j) {
     LocalE now;
     if (StatLocal(j.p, now)) SetBase(j.p, now, j.r);
     Event("☁ 온라인 전용", j.p, std::to_string(j.r.s) + " B");
+    if (!j.hasL && IsConflictName(Leaf(j.p))) NoteConflict(j.p);
     return true;
 }
 

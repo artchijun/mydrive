@@ -190,25 +190,57 @@ func OpenRoot(name, dir, stateDir string) (*Root, error) {
 
 // cur(새로 훑은 결과)와 색인의 차이를 변경 기록으로 남긴다. 호출 측이 잠금 없이 부름.
 func (r *Root) diffInto(cur map[string]Entry) int {
+	// 전체 훑기는 몇 분 걸릴 수 있고, 그동안 올라온 파일(덮어쓰기 포함)은 훑은 결과에 옛 상태로 남는다.
+	// 그대로 반영하면 멀쩡히 있는 파일을 '지움'으로 알려 PC 들이 대량 삭제로 보게 됨 → 다른 곳만 지금 디스크에서 다시 확인.
+	r.mu.Lock()
+	var cand []string
+	for p, e := range cur {
+		if o, ok := r.idx[p]; !ok || !same(o, e) {
+			cand = append(cand, p)
+		}
+	}
+	for p := range r.idx {
+		if _, ok := cur[p]; !ok {
+			cand = append(cand, p)
+		}
+	}
+	r.mu.Unlock()
+	if len(cand) == 0 {
+		return 0
+	}
+	fresh := make(map[string]*Entry, len(cand))
+	for _, p := range cand {
+		fi, err := os.Lstat(filepath.Join(r.Dir, filepath.FromSlash(p)))
+		if err != nil || fi.Mode()&fs.ModeSymlink != 0 {
+			fresh[p] = nil
+			continue
+		}
+		e := entryOf(p, fi)
+		fresh[p] = &e
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := 0
-	for p, e := range cur {
-		if o, ok := r.idx[p]; !ok || !same(o, e) {
-			r.emitLocked("put", e)
-			n++
-		}
-	}
 	var gone []string
-	for p := range r.idx {
-		if _, ok := cur[p]; !ok {
-			gone = append(gone, p)
+	for _, p := range cand {
+		e := fresh[p]
+		if e == nil {
+			if _, ok := r.idx[p]; ok {
+				gone = append(gone, p)
+			}
+			continue
+		}
+		if o, ok := r.idx[p]; !ok || !same(o, *e) {
+			r.emitLocked("put", *e)
+			n++
 		}
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(gone))) // 자식 먼저
 	for _, p := range gone {
-		r.emitLocked("del", r.idx[p])
-		n++
+		if o, ok := r.idx[p]; ok {
+			r.emitLocked("del", o)
+			n++
+		}
 	}
 	return n
 }
