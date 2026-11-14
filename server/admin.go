@@ -3,12 +3,12 @@
 // 설정 파일: <MYDRIVE_STATE>/mydrive.json  (처음에는 환경 변수로 만들고, 그 뒤로는 이 파일이 기준)
 // NAS 폴더 고르기 범위: MYDRIVE_NAS_BASE (기본 /nas — compose 에서 /volume1 을 여기에 붙임)
 //
-//   GET  /v1/admin/info                   서버 상태, 연결(공유 폴더) 목록, 버전 보관량, 접속한 PC, 최근 기록
-//   GET  /v1/admin/browse?path=           NAS 폴더 안의 하위 폴더 목록 (폴더 고르기)
-//   POST /v1/admin/roots   {"add":{"name":"","dir":""}} | {"remove":"이름"}
-//   POST /v1/admin/policy  {"maxCount":32,"keepDays":90}
-//   POST /v1/admin/token   {"which":"sync"|"admin"}  → 새 토큰
-//   POST /v1/admin/restart
+//	GET  /v1/admin/info                   서버 상태, 연결(공유 폴더) 목록, 버전 보관량, 접속한 PC, 최근 기록
+//	GET  /v1/admin/browse?path=           NAS 폴더 안의 하위 폴더 목록 (폴더 고르기)
+//	POST /v1/admin/roots   {"add":{"name":"","dir":""}} | {"remove":"이름"}
+//	POST /v1/admin/policy  {"maxCount":32,"keepDays":90}
+//	POST /v1/admin/token   {"which":"sync"|"admin"}  → 새 토큰
+//	POST /v1/admin/restart
 package main
 
 import (
@@ -17,7 +17,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,11 +34,11 @@ type RootCfg struct {
 }
 
 type ServerCfg struct {
-	Roots      []RootCfg `json:"roots"`
-	Versions   VerPolicy `json:"versions"`
-	SyncToken  string    `json:"syncToken"`
-	AdminToken string    `json:"adminToken"`
-	Devices    []Device  `json:"devices"`
+	Roots      []RootCfg     `json:"roots"`
+	Versions   VerPolicy     `json:"versions"`
+	SyncToken  string        `json:"syncToken"`
+	AdminToken string        `json:"adminToken"`
+	Devices    []Device      `json:"devices"`
 	Consoles   []ConsoleSess `json:"consoles"` // DSM 계정으로 들어온 관리 콘솔 (해시, 30일) // DSM 계정으로 연결한 PC 마다의 토큰 (해시)
 }
 
@@ -120,7 +119,7 @@ func noteClient(r *http.Request) {
 	if u, err := url.QueryUnescape(pc); err == nil { // 한글 이름은 %XX 로 옴
 		pc = u
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r)
 	if pc == "" {
 		pc = "(이름 없음)"
 	}

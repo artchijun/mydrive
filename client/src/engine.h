@@ -108,7 +108,17 @@ public:
     std::vector<Transfer> Transfers();      // 지금 옮기는 중 (진행률)
     std::vector<StuckInfo> StuckList();     // 다른 프로그램이 잡고 있거나 계속 실패하는 파일
     ItemStatus Status(const std::string& rel);   // rel: 연결 안 경로 ("" = 연결 전체)
+    // 동기화 작업 사이 옮기기: 다른 연결이 'PC 파일 번호(lid)'로 물어봄 — 이 연결이 맞춰 둔 항목인데 지금 PC 의 그 자리에서 사라졌나
+    bool OwnsMissing(uint64_t lid, std::string* p, BaseE* b);
 private:
+    // 동기화 작업 사이 옮기기 (engine.cpp '동기화 작업 사이 옮기기' 참고)
+    std::mutex idxMu_;
+    std::unordered_map<uint64_t, std::pair<std::string, BaseE>> lidIdx_;   // base 의 PC 파일 번호 → (경로, 마지막 상태). Save 때 다시 만듦
+    void RebuildIdx();
+    std::map<std::string, uint64_t> xAdopt_;    // 다른 작업에서 NAS 안에서 옮겨 온 폴더 → 이 시각까지 아래 항목은 NAS 목록이 따라오면 그대로 맞춤
+    std::map<std::string, uint64_t> xOutWait_;  // 다른 작업으로 옮겨 간 항목 → 처음 본 시각 (그쪽이 NAS 안에서 옮길 때까지 지우지 않음, 최대 1분)
+    bool CrossMoveIn(const std::string& p, const LocalE& l);   // 받는 쪽: 다른 작업에서 옮겨 왔으면 NAS 안에서 옮기고 true
+    bool MovedElsewhere(uint64_t lid);          // 보내는 쪽: 이 파일 번호가 지금 다른 작업 폴더 안에 있나
     Config cfg_;
     Http http_, poll_, fetch_;   // fetch_: 탐색기에서 온라인 전용 파일을 열 때
     // 탐색기 연동 (Cloud Files)

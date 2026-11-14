@@ -1,21 +1,23 @@
 // mydrived — Mydrive NAS 서버
 //
 // 환경 변수
-//   MYDRIVE_ROOTS   이름=폴더 목록, 쉼표 구분   예) test=/data/MydriveTest,desktop=/data/DESKTOP
-//   MYDRIVE_TOKEN   PC 앱이 보내야 하는 비밀 값 (Authorization: Bearer ...)
-//   MYDRIVE_STATE   색인을 저장할 폴더 (기본 /state)
-//   MYDRIVE_LISTEN  기본 :8642
-//   MYDRIVE_RESCAN  주기적 전체 비교 간격 (기본 15m)
+//
+//	MYDRIVE_ROOTS   이름=폴더 목록, 쉼표 구분   예) test=/data/MydriveTest,desktop=/data/DESKTOP
+//	MYDRIVE_TOKEN   PC 앱이 보내야 하는 비밀 값 (Authorization: Bearer ...)
+//	MYDRIVE_STATE   색인을 저장할 폴더 (기본 /state)
+//	MYDRIVE_LISTEN  기본 :8642
+//	MYDRIVE_RESCAN  주기적 전체 비교 간격 (기본 15m)
 //
 // API (모두 JSON, 경로는 공유 폴더 안의 상대 경로, 슬래시 구분)
-//   GET    /v1/roots
-//   GET    /v1/snapshot?root=                      전체 목록 + epoch + seq
-//   GET    /v1/changes?root=&epoch=&since=&wait=   since 이후 변경 (wait초까지 기다렸다 답함)
-//   GET    /v1/file?root=&path=                    내려받기 (Range 지원)
-//   PUT    /v1/file?root=&path=&mtime=&if=         올리기 (if: none=없어야 함, s:m:i=그 상태여야 함, 생략=무조건)
-//   DELETE /v1/file?root=&path=&if=                삭제 = #recycle 로 옮김
-//   POST   /v1/move?root=&from=&to=&if=            이름 바꾸기·옮기기
-//   POST   /v1/mkdir?root=&path=
+//
+//	GET    /v1/roots
+//	GET    /v1/snapshot?root=                      전체 목록 + epoch + seq
+//	GET    /v1/changes?root=&epoch=&since=&wait=   since 이후 변경 (wait초까지 기다렸다 답함)
+//	GET    /v1/file?root=&path=                    내려받기 (Range 지원)
+//	PUT    /v1/file?root=&path=&mtime=&if=         올리기 (if: none=없어야 함, s:m:i=그 상태여야 함, 생략=무조건)
+//	DELETE /v1/file?root=&path=&if=                삭제 = #recycle 로 옮김
+//	POST   /v1/move?root=&from=&to=&if=&toRoot=    이름 바꾸기·옮기기 (toRoot: 다른 연결로)
+//	POST   /v1/mkdir?root=&path=
 package main
 
 import (
@@ -24,6 +26,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -33,13 +36,14 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.0"
+const version = "0.6.3"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -86,7 +90,7 @@ func main() {
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
-	mux.HandleFunc("/v1/file", auth(logged(hFile)))   // logged: 동기화 기록 (activity.go)
+	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
 	mux.HandleFunc("/v1/move", auth(logged(hMove)))
 	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
 	mux.HandleFunc("/v1/hash", auth(hHash))
@@ -94,7 +98,7 @@ func main() {
 	mux.HandleFunc("/v1/version", auth(hVersion))
 	mux.HandleFunc("/v1/restore", auth(logged(hRestore)))
 	mux.HandleFunc("/v1/deleted", auth(hDeleted))
-	mux.HandleFunc("/v1/update/latest", auth(hUpdateLatest))   // PC 앱 새 판 (update.go, 내려주기만)
+	mux.HandleFunc("/v1/update/latest", auth(hUpdateLatest)) // PC 앱 새 판 (update.go, 내려주기만)
 	mux.HandleFunc("/v1/update/file", auth(hUpdateFile))
 	mux.HandleFunc("/v1/admin/info", adminAuth(hAdminInfo))
 	mux.HandleFunc("/v1/admin/activity", adminAuth(hAdminActivity))
@@ -104,9 +108,9 @@ func main() {
 	mux.HandleFunc("/v1/admin/token", adminAuth(hAdminToken))
 	mux.HandleFunc("/v1/admin/devices", adminAuth(hAdminDevices))
 	mux.HandleFunc("/v1/admin/whoami", adminAuth(hAdminWhoami))
-	mux.HandleFunc("/v1/admin/login", hConsoleLogin)   // DSM 계정으로 관리 콘솔 (토큰 없이)
+	mux.HandleFunc("/v1/admin/login", hConsoleLogin) // DSM 계정으로 관리 콘솔 (토큰 없이)
 	mux.HandleFunc("/v1/admin/logout", hConsoleLogout)
-	mux.HandleFunc("/v1/pair", hPair)   // DSM 계정으로 PC 연결 (토큰 없이)
+	mux.HandleFunc("/v1/pair", hPair) // DSM 계정으로 PC 연결 (토큰 없이)
 	// 다시 켜기: 프로세스를 끝내면 Docker 가 다시 띄우면서 최신 실행 파일을 복사해 씀
 	restart := func(w http.ResponseWriter, r *http.Request) {
 		for _, rt := range rootList() {
@@ -122,7 +126,7 @@ func main() {
 		ok := (adminToken != "" && subtle.ConstantTimeCompare([]byte(got), []byte(adminToken)) == 1) || subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
 		cfgMu.Unlock()
 		if !ok {
-			adminAuth(restart)(w, r)   // DSM 관리자 세션으로 연 콘솔
+			adminAuth(restart)(w, r) // DSM 관리자 세션으로 연 콘솔
 			return
 		}
 		restart(w, r)
@@ -447,20 +451,41 @@ func hMove(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "conflict", "그사이 NAS에서 바뀜")
 		return
 	}
-	if _, ex := statRel(rt, to); ex {
+	// toRoot: 다른 연결(공유 폴더)로 옮김 — PC 에서 동기화 작업 사이로 옮긴 것. 받기·올리기 없이 NAS 안에서 바로 옮김
+	dt := rt
+	if tr := q.Get("toRoot"); tr != "" && tr != rt.Name {
+		rootsMu.RLock()
+		dt = roots[tr]
+		rootsMu.RUnlock()
+		if dt == nil {
+			httpErr(w, 404, "no_root", "옮길 연결이 없음")
+			return
+		}
+	}
+	if _, ex := statRel(dt, to); ex {
 		httpErr(w, 409, "exists", "옮길 자리에 이미 있음")
 		return
 	}
-	dst := filepath.Join(rt.Dir, filepath.FromSlash(to))
+	dst := filepath.Join(dt.Dir, filepath.FromSlash(to))
 	os.MkdirAll(filepath.Dir(dst), 0777)
-	if err := os.Rename(filepath.Join(rt.Dir, filepath.FromSlash(from)), dst); err != nil {
-		httpErr(w, 500, "io", err.Error())
-		return
+	srcAbs := filepath.Join(rt.Dir, filepath.FromSlash(from))
+	if err := os.Rename(srcAbs, dst); err != nil {
+		if !errors.Is(err, syscall.EXDEV) {
+			httpErr(w, 500, "io", err.Error())
+			return
+		}
+		// 다른 공유 폴더(btrfs 하위 볼륨)는 rename 이 안 됨 → 복사(reflink) 뒤 원본 지움 (xcopy.go)
+		if err := moveAcross(srcAbs, dst); err != nil {
+			rt.Apply(from)
+			dt.Apply(to)
+			httpErr(w, 500, "io", "다른 공유 폴더로 옮기기: "+err.Error())
+			return
+		}
 	}
-	moveVersions(rt, from, to)
+	moveVersionsTo(rt, from, dt, to)
 	rt.Apply(from)
-	rt.Apply(to)
-	e, _ := statRel(rt, to)
+	dt.Apply(to)
+	e, _ := statRel(dt, to)
 	writeJSON(w, r, e)
 }
 

@@ -1,7 +1,7 @@
 // activity.go — 동기화 기록: PC 앱이 NAS 에 한 일(올림·받음·지움·이름 바꿈·폴더 만듦·되살림)을 NAS 에 남기고 관리 콘솔에서 봄
 //
-//   기록 파일: <MYDRIVE_STATE>/activity/YYYY-MM.jsonl (한 줄에 하나, 24개월 넘은 달은 지움)
-//   GET /v1/admin/activity?root=&pc=&act=&q=&before=&limit=   최근 것부터 (before: 이 시각(ns)보다 앞의 것)
+//	기록 파일: <MYDRIVE_STATE>/activity/YYYY-MM.jsonl (한 줄에 하나, 24개월 넘은 달은 지움)
+//	GET /v1/admin/activity?root=&pc=&act=&q=&before=&limit=   최근 것부터 (before: 이 시각(ns)보다 앞의 것)
 package main
 
 import (
@@ -105,7 +105,7 @@ func logged(h http.HandlerFunc) http.HandlerFunc {
 		}
 		q := r.URL.Query()
 		e := actEntry{T: time.Now().UnixNano(), PC: reqPC(r), Root: q.Get("root"), Path: q.Get("path")}
-		e.IP = r.RemoteAddr
+		e.IP = clientIP(r)
 		if i := strings.LastIndex(e.IP, ":"); i > 0 {
 			e.IP = strings.Trim(e.IP[:i], "[]")
 		}

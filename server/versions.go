@@ -1,17 +1,21 @@
 // versions.go — 이전 버전 보관 (덮어쓰기·지우기 전에 옛 판을 남김)
 //
 // 자리: <공유 폴더>/#mydrive-versions/<파일 경로>/<바뀐 시각 ns>
-//   같은 디스크 안의 하드 링크라서 복사하지 않고, 공간은 옛 판 크기만큼만 듦.
+//
+//	같은 디스크 안의 하드 링크라서 복사하지 않고, 공간은 옛 판 크기만큼만 듦.
+//
 // 보관 규칙 (시놀로지 드라이브처럼 둘 중 고름):
-//   지능형(intelli, 기본): 하루 안: 모두 / 30일 안: 하루에 하나 / 그 뒤: 한 주에 하나 → 오래된 시점도 골고루 남음
-//   먼저 들어온 것부터(fifo): 가장 최근 판부터 maxCount 개
-//   둘 다: keepDays 지나면 지움 / 파일마다 최대 maxCount 개
+//
+//	지능형(intelli, 기본): 하루 안: 모두 / 30일 안: 하루에 하나 / 그 뒤: 한 주에 하나 → 오래된 시점도 골고루 남음
+//	먼저 들어온 것부터(fifo): 가장 최근 판부터 maxCount 개
+//	둘 다: keepDays 지나면 지움 / 파일마다 최대 maxCount 개
 //
 // API
-//   GET  /v1/versions?root=&path=        그 파일의 이전 판 목록 (새것부터)
-//   GET  /v1/version?root=&path=&id=     이전 판 내용 받기
-//   POST /v1/restore?root=&path=&id=     이전 판을 지금 판으로 (지금 판은 또 하나의 버전으로 남김)
-//   GET  /v1/deleted?root=               지워졌지만 버전이 남은 파일 목록
+//
+//	GET  /v1/versions?root=&path=        그 파일의 이전 판 목록 (새것부터)
+//	GET  /v1/version?root=&path=&id=     이전 판 내용 받기
+//	POST /v1/restore?root=&path=&id=     이전 판을 지금 판으로 (지금 판은 또 하나의 버전으로 남김)
+//	GET  /v1/deleted?root=               지워졌지만 버전이 남은 파일 목록
 package main
 
 import (
@@ -215,8 +219,11 @@ func pruneAll(rt *Root) {
 }
 
 // 이름이 바뀌거나 옮겨진 파일·폴더의 버전도 따라 옮김
-func moveVersions(rt *Root, from, to string) {
-	src, dst := verDir(rt, from), verDir(rt, to)
+func moveVersions(rt *Root, from, to string) { moveVersionsTo(rt, from, rt, to) }
+
+// moveVersionsTo: 파일을 다른 연결로 옮길 때 지난 판도 함께 옮김
+func moveVersionsTo(sr *Root, from string, dr *Root, to string) {
+	src, dst := verDir(sr, from), verDir(dr, to)
 	if _, err := os.Lstat(src); err != nil {
 		return
 	}
@@ -224,7 +231,9 @@ func moveVersions(rt *Root, from, to string) {
 		return // 이미 있으면 섞지 않음
 	}
 	os.MkdirAll(filepath.Dir(dst), 0777)
-	os.Rename(src, dst)
+	if os.Rename(src, dst) != nil && sr != dr {
+		moveAcross(src, dst) // 다른 공유 폴더: 복사(reflink) 뒤 지움
+	}
 }
 
 // 버전 폴더의 크기 합 (관리 창용)

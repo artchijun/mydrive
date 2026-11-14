@@ -174,6 +174,7 @@ void Engine::Save() {
     FlushFileBuffers(h); CloseHandle(h);
     if (ok) MoveFileExW(tmp.c_str(), f.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
     dirty_ = false;
+    RebuildIdx();
 }
 
 void Engine::Load() {
@@ -193,6 +194,7 @@ void Engine::Load() {
     for (uint64_t k = 0; k < n && !rd.bad; k++) { std::string p = rd.S(); RemoteE e; rd.T(e); remote[p] = e; }
     if (rd.bad) { LOG("[%s] 상태 파일이 손상됨 — 처음부터 맞춤 (지우지 않고 비교만)", cfg_.name.c_str()); return; }
     epoch_ = ep; seq_ = sq; base_ = std::move(base); remote_ = std::move(remote);
+    RebuildIdx();
 }
 
 // ---------- NAS 목록 ----------
@@ -588,6 +590,102 @@ bool Engine::DetectRenames() {
     return any;
 }
 
+// ---------- 동기화 작업 사이 옮기기 ----------
+//   PC 에서 한 작업 폴더(예: C:\BACK)의 항목을 다른 작업 폴더(C:\DOWNLOAD)로 옮기면, 올리기·지우기 대신 NAS 안에서 바로 옮김
+//   (/v1/move ... toRoot). 같은 볼륨 안에서 옮기면 Windows 파일 번호(FileId)가 그대로라 '사라진 것 = 새로 생긴 것'을 알아봄.
+//   - 받는 쪽(새로 생긴 쪽): 다른 작업이 맞춰 둔 파일 번호이고 그쪽 자리에서는 사라졌으면 → NAS 에서 옮기고 바로 '맞춰짐'
+//   - 보내는 쪽(사라진 쪽): 그 파일 번호가 지금 다른 작업 폴더 안에 있으면 → 받는 쪽이 옮길 때까지 NAS 에서 지우지 않고 기다림 (최대 1분)
+//   전에는 지우고(NAS 휴지통) 새로 올렸음 → 온라인 전용(자리표시) 파일은 내용이 PC 에 없어 올리지 못하고 막혔음.
+static std::mutex g_engMu;            // g_engs 보호 (이것을 잡은 채로는 다른 엔진의 idxMu_ 만 잡음 — mu_ 는 잡지 않음)
+static std::vector<Engine*> g_engs;   // 지금 돌고 있는 연결들
+
+void Engine::RebuildIdx() {
+    std::unordered_map<uint64_t, std::pair<std::string, BaseE>> m;
+    m.reserve(base_.size());
+    for (auto& [p, b] : base_) if (b.lid) m.emplace(b.lid, std::make_pair(p, b));
+    std::lock_guard<std::mutex> g(idxMu_);
+    lidIdx_.swap(m);
+}
+
+bool Engine::OwnsMissing(uint64_t lid, std::string* p, BaseE* b) {
+    std::pair<std::string, BaseE> e;
+    {
+        std::lock_guard<std::mutex> g(idxMu_);
+        auto f = lidIdx_.find(lid);
+        if (f == lidIdx_.end()) return false;
+        e = f->second;
+    }
+    if (GetFileAttributesW(Abs(cfg_.localRoot, e.first).c_str()) != INVALID_FILE_ATTRIBUTES) return false;   // 원래 자리에도 있음 → 옮긴 것 아님
+    DWORD er = GetLastError();
+    if (er != ERROR_FILE_NOT_FOUND && er != ERROR_PATH_NOT_FOUND) return false;
+    *p = e.first; *b = e.second;
+    return true;
+}
+
+bool Engine::MovedElsewhere(uint64_t lid) {
+    std::wstring root = PlainRoot(cfg_.localRoot);
+    HANDLE hr = CreateFileW(root.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (hr == INVALID_HANDLE_VALUE) return false;
+    FILE_ID_DESCRIPTOR d{}; d.dwSize = sizeof d; d.Type = FileIdType; d.FileId.QuadPart = (LONGLONG)lid;
+    // 속성만 읽음 (자리표시 파일을 받지 않게 재분석 지점 그대로)
+    HANDLE h = OpenFileById(hr, &d, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    CloseHandle(hr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::vector<wchar_t> buf(4096);
+    DWORD n = GetFinalPathNameByHandleW(h, buf.data(), (DWORD)buf.size(), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (!n || n >= buf.size()) return false;
+    std::wstring path(buf.data(), n);
+    if (path.compare(0, 4, L"\\\\?\\") == 0) path = path.substr(4);
+    std::lock_guard<std::mutex> g(g_engMu);
+    for (Engine* e : g_engs) {
+        if (e == this) continue;
+        std::wstring r = PlainRoot(e->cfg().localRoot);
+        if (path.size() > r.size() && _wcsnicmp(path.c_str(), r.c_str(), r.size()) == 0 && path[r.size()] == L'\\') return true;
+    }
+    return false;
+}
+
+bool Engine::CrossMoveIn(const std::string& p, const LocalE& l) {
+    if (!l.id) return false;
+    std::string src, sp; BaseE sb;
+    {
+        std::lock_guard<std::mutex> g(g_engMu);
+        for (Engine* e : g_engs)
+            if (e != this && !e->stop_ && e->OwnsMissing(l.id, &sp, &sb)) { src = e->cfg().name; break; }
+    }
+    if (src.empty()) return false;
+    // 서버가 다른 연결로 옮기기(toRoot)를 알아야 함 (0.6.3 부터 — 공유 폴더가 달라도 reflink 복사로). 예전 서버는 toRoot 를 모르고 같은 연결 안에서 옮겨 버림
+    static std::atomic<int> s_srvOK{-1};
+    if (s_srvOK < 0) {
+        Resp v = http_.Req(L"GET", "/v1/ping", {});
+        int a = 0, b2 = 0, c = 0;
+        if (v.ok() && sscanf_s(v.body.c_str(), "mydrived %d.%d.%d", &a, &b2, &c) == 3) s_srvOK = (a * 10000 + b2 * 100 + c) >= 603 ? 1 : 0;
+        else if (v.ok()) s_srvOK = 0;
+    }
+    if (s_srvOK != 1) return false;
+    // 옮긴 뒤 고친 파일은 평소대로 (NAS 에 있는 것은 고치기 전 판)
+    if (l.d != sb.d || (!l.d && (l.s != sb.ls || !SameTime(l.m, sb.lm)))) return false;
+    Resp res = http_.Req(L"POST", "/v1/move", {{"root", src}, {"from", sp}, {"to", p}, {"toRoot", cfg_.name}, {"if", sb.d ? std::string("dir") : CondB(sb)}}, nullptr, 900);   // 큰 폴더는 NAS 에서 복사가 걸릴 수 있음
+    if (!res.ok()) {
+        Event("작업 사이 옮기기 안 됨", p, src + ": " + sp + " — " + (res.error.empty() ? std::to_string(res.status) : res.error) + " · 평소대로 맞춤");
+        return false;
+    }
+    json j = json::parse(res.body, nullptr, false);
+    RemoteE nr = j.is_discarded() ? RemoteE{} : FromJ(j);
+    nr.d = sb.d;
+    if (j.is_discarded()) { nr.s = sb.rs; nr.m = sb.rm; nr.i = sb.ri; }
+    remote_[p] = nr;
+    SetBase(p, l, nr);
+    if (l.d) xAdopt_[p] = GetTickCount64() + 180000;   // 아래 항목: NAS 목록이 따라오면 받기·올리기 없이 맞춤
+    InSync(p, l.d); cloud::RefreshShell(Abs(cfg_.localRoot, p));
+    stats.moved++;
+    Event("⇄ 작업 사이 옮김", p, "← " + src + ": " + sp + " · NAS 안에서 바로");
+    std::lock_guard<std::mutex> g(g_engMu);
+    for (Engine* e : g_engs) if (e != this && e->cfg().name == src) e->Kick();   // 보내는 쪽이 마지막 상태 기록을 정리하게
+    return true;
+}
+
 // ---------- 한 번 맞추기 ----------
 bool Engine::RunPass() {
     std::unique_lock<std::recursive_mutex> L(mu_);   // 작은 파일을 옮기는 동안만 풀어 줌
@@ -622,6 +720,9 @@ bool Engine::RunPass() {
     std::map<std::string, Canceled> canceled; { std::lock_guard<std::mutex> g(xMu_); canceled = canceled_; }
     std::set<std::string> flightAnc;                 // 큰 파일 통로에서 옮기는 중인 파일의 위 폴더
     for (auto& f : inflight_) for (std::string q = Parent(f); !q.empty(); q = Parent(q)) flightAnc.insert(q);
+    // 동기화 작업 사이 옮기기: 이번 차례에 기다리는 것(xOutNow) / 다른 작업에 없다고 확인한 것(xOutNo, 그 아래는 다시 확인 안 함)
+    std::set<std::string> xOutNow, xOutNo;
+    for (auto x = xAdopt_.begin(); x != xAdopt_.end();) x = GetTickCount64() > x->second ? xAdopt_.erase(x) : std::next(x);
     for (auto& p : all) {
         auto li = local_.find(p); auto ri = remote_.find(p); auto bi = base_.find(p);
         const LocalE* l = li == local_.end() ? nullptr : &li->second;
@@ -647,6 +748,31 @@ bool Engine::RunPass() {
             if (b) { base_.erase(p); dirty_ = true; }
             for (std::string q = Parent(p); !q.empty(); q = Parent(q)) { if (l) exclUnderL.insert(q); if (r) exclUnderR.insert(q); }
             continue;
+        }
+        // 동기화 작업 사이 옮기기 — 받는 쪽: 새로 생긴 항목이 다른 작업에서 옮겨 온 것이면 NAS 안에서 옮김
+        if (!b && l) {
+            bool underX = false;
+            for (auto& [xp, until] : xAdopt_) if (p != xp && Under(p, xp)) { underX = true; break; }
+            if (underX) {   // 방금 옮겨 온 폴더 안: NAS 목록이 따라오면 그대로 맞춤, 아직이면 잠깐 기다림
+                if (r && r->d == l->d && (l->d || r->s == l->s)) { SetBase(p, *l, *r); InSync(p, l->d); continue; }
+                if (!r) { uint64_t t = GetTickCount64() + 1500; if (!retryAt_ || t < retryAt_) retryAt_ = t; continue; }
+            } else if (!r && CrossMoveIn(p, *l)) { any = true; continue; }
+        }
+        // 동기화 작업 사이 옮기기 — 보내는 쪽: 사라진 항목이 지금 다른 작업 폴더 안에 있으면, 그쪽이 NAS 안에서 옮길 때까지 지우지 않음
+        if (b && !l && r && b->lid && !r->d == !b->d) {
+            bool wait = false;
+            for (std::string q = Parent(p); !q.empty() && !wait; q = Parent(q)) if (xOutNow.count(q)) wait = true;   // 위 폴더째 옮겨 감
+            bool parentGone = false;
+            for (std::string q = Parent(p); !q.empty() && !parentGone; q = Parent(q)) if (xOutNo.count(q)) parentGone = true;
+            if (!wait && !parentGone) { if (MovedElsewhere(b->lid)) wait = true; else xOutNo.insert(p); }
+            if (wait) {
+                auto [w, fresh] = xOutWait_.emplace(p, GetTickCount64());
+                if (GetTickCount64() - w->second < 60000) {
+                    xOutNow.insert(p);
+                    uint64_t t = GetTickCount64() + 2000; if (!retryAt_ || t < retryAt_) retryAt_ = t;
+                    continue;
+                }
+            }
         }
         bool lc, rc;   // 바뀌었나
         if (!b) { lc = l != nullptr; rc = r != nullptr; }
@@ -702,6 +828,7 @@ bool Engine::RunPass() {
         }
     }
 
+    for (auto x = xOutWait_.begin(); x != xOutWait_.end();) x = xOutNow.count(x->first) ? std::next(x) : xOutWait_.erase(x);
     // 대량 삭제 확인: 지울 항목 수(아래 항목 포함)가 한도를 넘으면 그 방향의 삭제는 멈추고 확인을 기다림
     int nDelL = 0, nDelR = 0;
     for (auto& it : items) { if (it.a == DelL) nDelL++; if (it.a == DelR) nDelR++; }
@@ -1263,6 +1390,7 @@ void Engine::CloudStop() { cloud::Disconnect(cc_); }
 
 void Engine::Start() {
     stop_ = false;
+    { std::lock_guard<std::mutex> g(g_engMu); if (std::find(g_engs.begin(), g_engs.end(), this) == g_engs.end()) g_engs.push_back(this); }
     CloudStart();
     for (int i = 0; i < 2; i++) bigWorkers_.emplace_back([this] { BigWorker(); });
     loop_ = std::thread([this] { LoopMain(); });
@@ -1270,6 +1398,7 @@ void Engine::Start() {
     watchThread_ = std::thread([this] { WatchMain(); });
 }
 void Engine::Stop() {
+    { std::lock_guard<std::mutex> g(g_engMu); g_engs.erase(std::remove(g_engs.begin(), g_engs.end(), this), g_engs.end()); }
     if (stop_.exchange(true)) return;
     { std::lock_guard<std::mutex> g(qMu_); bigQ_.clear(); }
     qCv_.notify_all();

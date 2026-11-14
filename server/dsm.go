@@ -1,15 +1,15 @@
 // dsm.go — DSM 계정으로 들어오기 (토큰을 손으로 옮기지 않게)
 //
-//  1) PC 연결:  POST /v1/pair {"account","passwd","otp","pc"}
+//  1. PC 연결:  POST /v1/pair {"account","passwd","otp","pc"}
 //     서버가 DSM 에 그 계정으로 로그인해 보고, DSM 관리자면 그 PC 전용 토큰을 만들어 돌려줌 (DSM 세션은 바로 닫음).
 //     비밀번호는 서버에 남기지 않음. PC 전용 토큰은 해시만 저장 → 관리 콘솔에서 PC별로 끊을 수 있음.
-//  2) 관리 콘솔: DSM 메뉴에서 열면 브라우저가 DSM 로그인 쿠키(id)를 함께 보냄 → 서버가 DSM 에 "이 세션이 관리자인가"를 물음.
+//  2. 관리 콘솔: DSM 메뉴에서 열면 브라우저가 DSM 로그인 쿠키(id)를 함께 보냄 → 서버가 DSM 에 "이 세션이 관리자인가"를 물음.
 //     쿠키로 들어올 때는 화면이 붙이는 X-Mydrive-Console 머리글이 있어야 함 (다른 사이트가 몰래 부르는 것을 막음).
 //
 // DSM 주소: MYDRIVE_DSM_URL (없으면 컨테이너의 기본 게이트웨이 = NAS 자신의 :5000)
 //
-//   GET  /v1/admin/devices                 PC 전용 토큰 목록
-//   POST /v1/admin/devices {"revoke":id}   그 PC 끊기
+//	GET  /v1/admin/devices                 PC 전용 토큰 목록
+//	POST /v1/admin/devices {"revoke":id}   그 PC 끊기
 package main
 
 import (
@@ -252,7 +252,7 @@ func hPair(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 405, "method", "POST 만")
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r)
 	if tooManyFails(ip) {
 		httpErr(w, 429, "too_many", "실패가 많아 10분 동안 막았습니다. 잠시 뒤 다시 해 보세요.")
 		return
@@ -333,7 +333,7 @@ func dsmVerifyAdmin(ip, account, passwd, otp string) (user string, st int, kind,
 	}
 	j, err := dsmCall(p)
 	if err != nil {
-		return "", 502, "dsm", "DSM에 닿지 않음: "+err.Error()
+		return "", 502, "dsm", "DSM에 닿지 않음: " + err.Error()
 	}
 	if ok, _ := j["success"].(bool); !ok {
 		code := dsmErrCode(j)
@@ -372,8 +372,9 @@ func dsmVerifyAdmin(ip, account, passwd, otp string) (user string, st int, kind,
 }
 
 // ---------- 관리 콘솔: DSM 계정으로 로그인 → 30일 쿠키 ----------
-//   POST /v1/admin/login  {"account","passwd","otp"}   (토큰 없이 들어오는 길)
-//   POST /v1/admin/logout
+//
+//	POST /v1/admin/login  {"account","passwd","otp"}   (토큰 없이 들어오는 길)
+//	POST /v1/admin/logout
 type ConsoleSess struct {
 	Hash  string `json:"hash"`
 	User  string `json:"user"`
@@ -407,7 +408,7 @@ func hConsoleLogin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 405, "method", "POST 만")
 		return
 	}
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	ip := clientIP(r)
 	if tooManyFails(ip) {
 		httpErr(w, 429, "too_many", "실패가 많아 10분 동안 막았습니다. 잠시 뒤 다시 해 보세요.")
 		return

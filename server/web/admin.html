@@ -220,6 +220,9 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
 <script>
 const ICON_FOLDER = `{{FOLDER}}`;
 const $ = (id) => document.getElementById(id);
+// DSM 창 안에서는 DSM 주소의 중계 프로그램(md.cgi?u=경로)을 거쳐 들어옴 → 서버 주소를 그쪽으로 바꿔 부름
+const PROXY = /\.cgi$/.test(location.pathname) ? location.pathname + '?u=' : '';
+const U = (p) => PROXY ? PROXY + encodeURIComponent(p) : p;
 let TOKEN = '';
 try { TOKEN = localStorage.getItem('mdAdmin') || ''; } catch (e) {}
 let INFO = null, browsePath = '', browseBase = '';
@@ -234,7 +237,7 @@ async function api(path, body) {
   const h = { 'X-Mydrive-Console': '1' };   // DSM 로그인으로 들어올 때 필요 (다른 사이트가 몰래 부르지 못하게)
   if (TOKEN) h['Authorization'] = 'Bearer ' + TOKEN;
   if (body) h['Content-Type'] = 'application/json';
-  const r = await fetch(path, { method: body ? 'POST' : 'GET', headers: h, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
+  const r = await fetch(U(path), { method: body ? 'POST' : 'GET', headers: h, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
   const j = await r.json().catch(() => ({}));
   if (r.status === 401) { showLogin(); throw new Error(TOKEN ? '관리 토큰이 맞지 않습니다' : '다시 로그인해 주세요'); }
   if (!r.ok) throw new Error(j.msg || ('오류 ' + r.status));
@@ -255,7 +258,7 @@ async function dsmLogin() {
   if (!b.account || !b.passwd) { toast('DSM 아이디와 비밀번호를 넣어 주세요', true); return; }
   $('dsmBtn').disabled = true; $('dsmBtn').textContent = '확인 중…';
   try {
-    const r = await fetch('/v1/admin/login', { method: 'POST', headers: { 'X-Mydrive-Console': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(b), credentials: 'same-origin' });
+    const r = await fetch(U('/v1/admin/login'), { method: 'POST', headers: { 'X-Mydrive-Console': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(b), credentials: 'same-origin' });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { if (j.error === 'otp') { $('otpRow').style.display = ''; $('dsmOtp').focus(); } throw new Error(j.msg || ('오류 ' + r.status)); }
     $('dsmPass').value = ''; $('dsmOtp').value = ''; TOKEN = ''; WHO = j.user || ''; start();
@@ -267,7 +270,7 @@ $('dsmBtn').onclick = dsmLogin;
 $('logoutBtn').onclick = async () => {
   try { localStorage.removeItem('mdAdmin'); } catch (e) {}
   TOKEN = '';
-  try { await fetch('/v1/admin/logout', { method: 'POST', headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' }); } catch (e) {}
+  try { await fetch(U('/v1/admin/logout'), { method: 'POST', headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' }); } catch (e) {}
   showLogin();
 };
 
@@ -412,7 +415,7 @@ function start() { $('login').style.display = 'none'; $('app').style.display = '
 (async () => {
   const saved = TOKEN; TOKEN = '';
   try {
-    const w = await fetch('/v1/admin/whoami', { headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' });
+    const w = await fetch(U('/v1/admin/whoami'), { headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' });
     if (w.ok) { WHO = (await w.json()).user || ''; return start(); }
     const j = await w.json().catch(() => ({}));
     // DSM 세션은 브라우저 IP에 묶여 있어서(코드 119) 서버가 대신 확인할 수 없음 → 그때는 조용히 로그인 화면만

@@ -4,7 +4,7 @@
 #   설치: DSM → 패키지 센터 → 수동 설치 → 이 파일
 import hashlib, io, json, os, shutil, tarfile, time
 
-VERSION = "0.4.0-0001"
+VERSION = "0.5.0-0001"
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
 NOW = int(time.time())
@@ -23,7 +23,7 @@ def add_dir(tar, src, arc, exec_files=False):
         for f in sorted(files):
             data = open(os.path.join(root, f), "rb").read()
             if exec_files: data = data.replace(b"\r\n", b"\n")   # 셸 스크립트는 LF
-            add_bytes(tar, base + "/" + f, data, 0o755 if exec_files else 0o644)
+            add_bytes(tar, base + "/" + f, data, 0o755 if (exec_files or f.endswith(".cgi")) else 0o644)   # md.cgi: 실행 파일(중계)
 
 UI_CONFIG = {
     "Mydrive.js": {

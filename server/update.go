@@ -1,11 +1,12 @@
 // update.go — PC 앱 새 판 배포 (내려주기만 함)
 //
-//   GET /v1/update/latest   {"version","file","size","sha256","notes"}  (새 판이 없으면 version 이 빈 값)
-//   GET /v1/update/file     latest.json 에 적힌 설치 파일 (Range 지원)
+//	GET /v1/update/latest   {"version","file","size","sha256","notes"}  (새 판이 없으면 version 이 빈 값)
+//	GET /v1/update/file     latest.json 에 적힌 설치 파일 (Range 지원)
 //
 // 폴더: MYDRIVE_UPDATES (기본 /app/updates = NAS의 /docker/mydrive/bin/updates, 컨테이너에는 읽기 전용으로 붙음)
-//   latest.json + 설치 파일 하나. 서버에는 올리는 기능이 없음 — 새 판은 File Station 으로 이 폴더에 넣음
-//   (client/release.ps1 이 latest.json 과 설치 파일을 만들어 줌).
+//
+//	latest.json + 설치 파일 하나. 서버에는 올리는 기능이 없음 — 새 판은 File Station 으로 이 폴더에 넣음
+//	(client/release.ps1 이 latest.json 과 설치 파일을 만들어 줌).
 package main
 
 import (

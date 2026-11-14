@@ -19,3 +19,5 @@ server/deploy/compose.yaml
 server/deploy/token.txt
 *.token
 .env
+
+dsm/ui/md.cgi

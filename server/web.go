@@ -1,7 +1,7 @@
 // web.go — 웹 관리 콘솔 (DSM 에서 여는 관리 화면). 페이지는 실행 파일 안에 들어 있음.
 //
-//   GET /admin   관리 콘솔 (로그인은 관리 토큰 — 화면이 /v1/admin/* 를 부름)
-//   GET /        → /admin 으로
+//	GET /admin   관리 콘솔 (로그인은 관리 토큰 — 화면이 /v1/admin/* 를 부름)
+//	GET /        → /admin 으로
 package main
 
 import (
