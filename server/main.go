@@ -39,7 +39,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -86,17 +86,18 @@ func main() {
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
-	mux.HandleFunc("/v1/file", auth(hFile))
-	mux.HandleFunc("/v1/move", auth(hMove))
-	mux.HandleFunc("/v1/mkdir", auth(hMkdir))
+	mux.HandleFunc("/v1/file", auth(logged(hFile)))   // logged: 동기화 기록 (activity.go)
+	mux.HandleFunc("/v1/move", auth(logged(hMove)))
+	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
 	mux.HandleFunc("/v1/hash", auth(hHash))
 	mux.HandleFunc("/v1/versions", auth(hVersions))
 	mux.HandleFunc("/v1/version", auth(hVersion))
-	mux.HandleFunc("/v1/restore", auth(hRestore))
+	mux.HandleFunc("/v1/restore", auth(logged(hRestore)))
 	mux.HandleFunc("/v1/deleted", auth(hDeleted))
 	mux.HandleFunc("/v1/update/latest", auth(hUpdateLatest))   // PC 앱 새 판 (update.go, 내려주기만)
 	mux.HandleFunc("/v1/update/file", auth(hUpdateFile))
 	mux.HandleFunc("/v1/admin/info", adminAuth(hAdminInfo))
+	mux.HandleFunc("/v1/admin/activity", adminAuth(hAdminActivity))
 	mux.HandleFunc("/v1/admin/browse", adminAuth(hAdminBrowse))
 	mux.HandleFunc("/v1/admin/roots", adminAuth(hAdminRoots))
 	mux.HandleFunc("/v1/admin/policy", adminAuth(hAdminPolicy))

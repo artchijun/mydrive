@@ -23,6 +23,7 @@ var adminIcons = map[string]string{
 	"LOG":    `<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>`,
 	"KEY":    `<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M15 8l2 2"/>`,
 	"OUT":    `<path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4M6 12h11"/>`,
+	"ACT":    `<path d="M4 6h16M4 12h16M4 18h10"/><path d="M18 16l2 2 3-4"/>`,
 }
 
 var adminPage = func() string {

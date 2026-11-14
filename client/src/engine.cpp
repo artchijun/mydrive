@@ -540,7 +540,7 @@ bool Engine::DetectRenames() {
                     Resp res = http_.Req(L"POST", "/v1/move", {{"root", cfg_.name}, {"from", p}, {"to", q}, {"if", b.d ? std::string("dir") : CondB(b)}});
                     if (res.ok()) {
                         Rekey(p, q);
-                        InSync(q, b.d);   // 이름을 바꾸면 Windows 가 '맞춰짐' 표시를 지움 → 다시 붙임 (안 그러면 탐색기에 계속 '보류 중')
+                        InSync(q, b.d); cloud::RefreshShell(Abs(cfg_.localRoot, q));   // 이름을 바꾸면 Windows 가 '맞춰짐' 표시를 지움 → 다시 붙임 (안 그러면 탐색기에 계속 '보류 중')
                         json j = json::parse(res.body, nullptr, false);
                         if (!j.is_discarded()) { RemoteE nr = FromJ(j); remote_[q] = nr; base_[q].ri = nr.i; base_[q].rm = nr.m; }
                         stats.moved++; any = true;
@@ -563,7 +563,7 @@ bool Engine::DetectRenames() {
                     if (!par.empty()) SHCreateDirectoryExW(nullptr, Abs(cfg_.localRoot, par).c_str() + 4, nullptr);
                     if (MoveFileExW(Abs(cfg_.localRoot, p).c_str(), Abs(cfg_.localRoot, q).c_str(), 0)) {
                         Rekey(p, q);
-                        InSync(q, b.d);
+                        InSync(q, b.d); cloud::RefreshShell(Abs(cfg_.localRoot, q));
                         stats.moved++; any = true;
                         Event("↓ 이름 바꿈", p, "→ " + q);
                     } else Event("이름 바꾸기 실패", p, "코드 " + std::to_string(GetLastError()));
@@ -950,7 +950,7 @@ void Engine::HealInSync() {
     int fixed = 0;
     for (auto& [p, d] : list) {
         if (stop_) return;
-        if (cloud::InSyncState(Abs(cfg_.localRoot, p), d) == 0) { InSync(p, d); fixed++; }
+        if (cloud::InSyncState(Abs(cfg_.localRoot, p), d) == 0) { InSync(p, d); if (fixed < 500) cloud::RefreshShell(Abs(cfg_.localRoot, p)); fixed++; }
     }
     if (fixed) Event("✔ 맞춰짐 표시 고침", cfg_.name, std::to_string(fixed) + "개 — 이름을 바꾸거나 옮긴 뒤 빠져 있던 표시");
 }

@@ -294,6 +294,10 @@ static HRESULT Transfer(const CF_CALLBACK_INFO* ci, NTSTATUS st, const void* buf
     return CfExecute(&oi, &op);
 }
 
+void RefreshShell(const std::wstring& path) {
+    std::wstring p = path.compare(0, 4, L"\\\\?\\") == 0 ? path.substr(4) : path;
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, p.c_str(), nullptr);
+}
 int InSyncState(const std::wstring& path, bool dir) {
     HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            dir ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);

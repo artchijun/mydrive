@@ -57,6 +57,14 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
 .log { font: 12.5px/1.6 Consolas, "D2Coding", monospace; color: var(--sub); white-space: pre-wrap; max-height: 560px; overflow: auto; padding: 14px 18px; }
 .log .e { color: var(--red); }
 .empty { color: var(--muted); padding: 22px 18px; text-align: center; }
+.filters { padding: 12px 18px; border-bottom: 1px solid var(--line); }
+.filters select, .filters input { background: #14171c; border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; color: var(--text); font: inherit; }
+.filters input { max-width: 260px; }
+#actT td { padding: 7px 14px; font-size: 13px; }
+#actT td.p { word-break: break-all; }
+.act { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; white-space: nowrap; }
+.a-up { background: #1d3557; color: #8fb8ff; } .a-down { background: #18392c; color: #6fe0a8; } .a-del { background: #3a2226; color: #ff9aa0; }
+.a-mv { background: #3a3020; color: #f2c27a; } .a-dir { background: #2a2f3a; color: var(--sub); } .a-rs { background: #2c2440; color: #c4a8ff; }
 .toast { position: fixed; right: 24px; bottom: 24px; background: #26324a; border: 1px solid #3b5f99; padding: 10px 16px; border-radius: 10px; display: none; max-width: 420px; }
 .toast.err { background: #3a2226; border-color: #7a3a42; }
 .modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; place-items: center; padding: 16px; }
@@ -102,6 +110,7 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
   <aside class="side">
     <div class="brand"><div class="logo">{{SYNC}}</div><div><b>Mydrive</b><span id="ver">관리 콘솔</span></div></div>
     <button class="nav on" data-p="over">{{HOME}}개요</button>
+    <button class="nav" data-p="act">{{ACT}}동기화 기록</button>
     <button class="nav" data-p="roots">{{FOLDER}}동기화 폴더</button>
     <button class="nav" data-p="ver">{{HIST}}버전 보관</button>
     <button class="nav" data-p="pcs">{{PC}}접속한 PC</button>
@@ -116,6 +125,22 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
       <div class="cards" id="stats"></div>
       <div class="panel"><h2>동기화 폴더<span class="sp"></span><button class="btn sm" data-go="roots">관리</button></h2><table id="rootsMini"></table></div>
       <div class="panel"><h2>최근 접속한 PC<span class="sp"></span><button class="btn sm" data-go="pcs">모두 보기</button></h2><table id="pcsMini"></table></div>
+    </section>
+
+    <section id="p-act" style="display:none">
+      <h1>동기화 기록</h1><p class="lead">PC 앱이 NAS에 한 일입니다 — 어느 PC가 언제 무엇을 올리고, 받고, 지우고, 옮겼는지. NAS에 24개월 동안 남깁니다.</p>
+      <div class="panel">
+        <div class="filters row">
+          <select id="fRoot" title="동기화 폴더(작업)만 골라 봅니다"><option value="">모든 폴더</option></select>
+          <select id="fPC" title="이 PC가 한 일만 봅니다"><option value="">모든 PC</option></select>
+          <select id="fAct" title="이 종류만 봅니다"><option value="">모든 동작</option><option>올림</option><option>받음</option><option>지움</option><option>이름 바꿈</option><option>옮김</option><option>폴더 만듦</option><option>되살림</option></select>
+          <input id="fQ" type="text" placeholder="경로·파일 이름 찾기" title="경로나 파일 이름에 이 글자가 들어 있는 것만">
+          <span class="sp" style="flex:1"></span>
+          <button class="btn sm" id="actBtn" title="새 기록을 다시 읽습니다">새로 고침</button>
+        </div>
+        <table id="actT"></table>
+        <div class="row" style="justify-content:center;padding:10px"><button class="btn sm" id="actMore" style="display:none">더 보기</button></div>
+      </div>
     </section>
 
     <section id="p-roots" style="display:none">
@@ -243,7 +268,7 @@ function show(p) {
   document.querySelectorAll('.nav[data-p]').forEach(b => b.classList.toggle('on', b.dataset.p === p));
   document.querySelectorAll('main > section').forEach(s => s.style.display = s.id === 'p-' + p ? '' : 'none');
 }
-document.querySelectorAll('.nav[data-p]').forEach(b => b.onclick = () => show(b.dataset.p));
+document.querySelectorAll('.nav[data-p]').forEach(b => b.onclick = () => { show(b.dataset.p); if (b.dataset.p === 'act') loadAct(false); });
 document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => show(b.dataset.go));
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).classList.remove('on'));
 
@@ -259,6 +284,34 @@ function renderDevs(ds) {
   });
 }
 $('logBtn').onclick = refresh;
+
+// ---------- 동기화 기록 ----------
+let ACT = [], ACTMORE = false, actRootsFilled = false;
+const ACTCLS = { '올림': 'a-up', '받음': 'a-down', '지움': 'a-del', '이름 바꿈': 'a-mv', '옮김': 'a-mv', '폴더 만듦': 'a-dir', '되살림': 'a-rs' };
+function when(ns) { const d = new Date(ns / 1e6), t = new Date(); const hm = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); return d.toDateString() === t.toDateString() ? hm : d.toLocaleDateString() + ' ' + hm; }
+async function loadAct(append) {
+  const ps = new URLSearchParams({ root: $('fRoot').value, pc: $('fPC').value, act: $('fAct').value, q: $('fQ').value.trim(), limit: 200 });
+  if (append && ACT.length) ps.set('before', ACT[ACT.length - 1].t);
+  try {
+    const j = await api('/v1/admin/activity?' + ps);
+    ACT = append ? ACT.concat(j.items) : j.items; ACTMORE = j.more;
+    const cur = $('fPC').value;
+    $('fPC').innerHTML = '<option value="">모든 PC</option>' + (j.pcs || []).map(p => `<option ${p === cur ? 'selected' : ''}>${esc(p)}</option>`).join('');
+    if (!actRootsFilled && INFO) { actRootsFilled = true; $('fRoot').innerHTML = '<option value="">모든 폴더</option>' + INFO.roots.map(r => `<option>${esc(r.name)}</option>`).join(''); }
+    renderAct();
+  } catch (e) { toast(e.message, true); }
+}
+function renderAct() {
+  $('actT').innerHTML = ACT.length ? '<tr><th>시각</th><th>PC</th><th>폴더</th><th>동작</th><th>경로</th><th style="text-align:right">크기</th></tr>' + ACT.map(e =>
+    `<tr><td class="sub" style="white-space:nowrap">${when(e.t)}</td><td>${esc(e.pc)}</td><td class="sub">${esc(e.root)}</td><td><span class="act ${ACTCLS[e.act] || ''}">${esc(e.act)}</span></td>` +
+    `<td class="p">${esc(e.path)}${e.to ? ' <span class="sub">→ ' + esc(e.to) + '</span>' : ''}</td><td class="sub" style="text-align:right;white-space:nowrap">${e.size ? size(e.size) : ''}</td></tr>`).join('')
+    : '<tr><td class="empty">기록이 없습니다. (서버 0.6.0부터 남깁니다)</td></tr>';
+  $('actMore').style.display = ACTMORE ? '' : 'none';
+}
+['fRoot', 'fPC', 'fAct'].forEach(id => $(id).onchange = () => loadAct(false));
+let actQT = 0; $('fQ').oninput = () => { clearTimeout(actQT); actQT = setTimeout(() => loadAct(false), 350); };
+$('actBtn').onclick = () => loadAct(false);
+$('actMore').onclick = () => loadAct(true);
 
 function render() {
   const i = INFO;
