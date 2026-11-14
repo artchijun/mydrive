@@ -94,6 +94,8 @@ public:
     void ConfirmMassDelete() { confirmDelete_ = true; Kick(); }
     void RestoreMassDelete() { restoreDelete_ = true; Kick(); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
+    // NAS 전체 목록을 새로 받아 PC 가 들고 있는 목록을 바로잡음 ([NAS 다시 확인], 올리기가 'NAS에도 다른 판'으로 거절될 때)
+    void ResyncRemote() { resync_ = true; Kick(); }
     bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
     void ClearCanceled() { std::lock_guard<std::mutex> g(xMu_); canceled_.clear(); }   // [지금 동기화]: 취소한 것도 다시 맞춤
     // 일시 중지: minutes 동안 (0 = 다시 시작)
@@ -180,6 +182,8 @@ private:
     HANDLE watchDir_ = INVALID_HANDLE_VALUE;
     bool dirty_ = false;
     int lastHeld_ = -1;
+    std::atomic<bool> resync_{false};
+    uint64_t lastResync_ = 0;
     std::mutex cfMu_;
     std::vector<std::string> newConf_;
     std::vector<HeldDir> heldDirs_; int heldGroups_ = 0;

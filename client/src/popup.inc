@@ -262,7 +262,7 @@ static void RescanNow() {
             json j = res.ok() ? json::parse(res.body, nullptr, false) : json();
             if (j.is_object()) changed += j.value("changed", 0); else fail++;
         }
-        for (auto& e : g_engines) e->Kick();
+        for (auto& e : g_engines) e->ResyncRemote();   // 서버 쪽을 다시 훑은 뒤, PC 가 들고 있는 NAS 목록도 통째로 새로 받음
         SYSTEMTIME st; GetLocalTime(&st);
         wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         LOG("NAS 다시 확인 (아이콘): %d개 연결, %d개 바뀜, %d개 실패", (int)roots.size(), changed, fail);

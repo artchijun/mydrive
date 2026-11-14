@@ -205,8 +205,10 @@ static RemoteE FromJ(const json& j) {
 void Engine::ApplyRemoteEntry(const std::string& p, const RemoteE& e) { remote_[p] = e; }
 
 bool Engine::RefreshRemote() {
+    bool force = resync_.exchange(false);
+    if (force) LOG("[%s] NAS 전체 목록을 새로 받음 (들고 있던 목록 바로잡기)", cfg_.name.c_str());
     for (int round = 0; round < 50; round++) {
-        if (!epoch_.empty()) {
+        if (!epoch_.empty() && !force) {
             Resp r = http_.Req(L"GET", "/v1/changes", {{"root", cfg_.name}, {"epoch", epoch_}, {"since", std::to_string(seq_)}});
             if (!r.ok()) { stats.online = false; LOG("[%s] NAS 연결 실패: %s %d", cfg_.name.c_str(), r.error.c_str(), r.status); return false; }
             stats.online = true;
@@ -233,6 +235,7 @@ bool Engine::RefreshRemote() {
         remote_.clear();
         for (auto& e : j["entries"]) ApplyRemoteEntry(e["p"], FromJ(e));
         epoch_ = j["epoch"]; seq_ = j["seq"]; dirty_ = true;
+        if (force) { force = false; Event("↻ NAS 목록 새로 받음", cfg_.name, std::to_string(remote_.size()) + "개"); }
         // 다시 받은 뒤에도 그 사이 변경을 이어 받도록 한 번 더 돈다
     }
     return true;
@@ -373,7 +376,13 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
     EndXfer(p);
     if (xs->gone) { Event("⏹ 올리기 멈춤", p, "올리는 중에 PC에서 지움 — NAS에는 올리지 않음"); return false; }
     if (xs->cancel) { Event("⏹ 취소함", p, "올리기 — 파일이 바뀌거나 [지금 동기화]를 누르면 다시 맞춤"); return false; }
-    if (r.status == 409) { Event("충돌", p, "그사이 NAS에서도 바뀜 — 다음 차례에 둘 다 남김"); return false; }
+    if (r.status == 409) {
+        Event("충돌", p, "그사이 NAS에서도 바뀜 — NAS 목록을 다시 받아 둘 다 남김");
+        // PC 가 들고 있는 NAS 목록이 어긋났을 수 있음 → 전체 목록을 새로 받음 (2분에 한 번까지). 안 그러면 같은 올리기를 계속 되풀이함
+        uint64_t now = GetTickCount64();
+        if (!lastResync_ || now - lastResync_ > 120000) { lastResync_ = now; resync_ = true; }
+        return false;
+    }
     if (!r.ok()) { stats.errors++; Event("올리기 실패", p, r.error.empty() ? std::to_string(r.status) + " " + r.body : r.error); return false; }
     json j = json::parse(r.body, nullptr, false);
     RemoteE re = FromJ(j);
