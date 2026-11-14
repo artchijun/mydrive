@@ -21,3 +21,5 @@ server/deploy/token.txt
 .env
 
 dsm/ui/md.cgi
+
+/build/
