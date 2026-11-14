@@ -35,6 +35,7 @@ struct Conn {
     std::vector<std::string> keep;    // 항상 이 PC에 둘 폴더 (나머지는 요청 시 받기)
     bool web = false;                 // 받는 방식 '웹드라이브처럼 사용': PC에 파일을 두지 않고 NAS 를 드라이브로 붙임 (webdrive.cpp)
     std::wstring mount;               // 웹드라이브를 붙일 드라이브 문자 ("M:"). 비어 있으면 local 폴더에 붙임
+    bool off = false;                 // 웹드라이브 연결을 끊어 둠 ([연결 끊기] / [연결])
 };
 struct AppCfg {
     std::wstring server = L"http://192.168.0.6:8642";
@@ -111,6 +112,7 @@ static void LoadCfg() {
         x.keep = c.value("keepDirs", std::vector<std::string>());
         x.web = c.value("mode", std::string()) == "webdrive";
         x.mount = W(c.value("mount", std::string()));
+        x.off = c.value("off", false);
         g_cfg.conns.push_back(x);
     }
     // 예전 '우선순위 높음' 짝은 맨 위로 (이제는 목록 순서 = 우선순위)
@@ -125,7 +127,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -223,27 +225,30 @@ static void StopEngines() {
 }
 static std::wstring WebMount(const Conn& c) { return c.mount.empty() ? c.local : c.mount; }
 static void RemoveOldUserVerbs();   // tools.inc
+static void StartWebDrive(const Conn& c) {
+    if (c.name.empty() || WebMount(c).empty()) return;
+    WebDriveCfg wc; wc.name = c.name; wc.serverUrl = ActiveServer(); wc.token = g_cfg.token;
+    wc.mount = WebMount(c); wc.cacheDir = g_dataDir + L"\\webdrive";
+    auto w = std::make_shared<WebDrive>(wc);
+    std::wstring cname = W(c.name);
+    w->onEvent = [cname](const std::string& k, const std::string& p, const std::string& x) {
+        SYSTEMTIME st; GetLocalTime(&st);
+        wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        std::lock_guard<std::mutex> g(g_evMu);
+        g_evPending.push_back(EvRow{t, cname, W(k), W(p), W(x)});
+        if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
+    };
+    w->Start();
+    g_webdrives.push_back(std::move(w));
+}
 static void StartEngines() {
     StopEngines();
     SetRateLimit((int64_t)g_cfg.upKBps * 1024, (int64_t)g_cfg.downKBps * 1024);
     g_skipMask = (unsigned)g_cfg.skipMask;
     int rank = 0;
     for (auto& c : g_cfg.conns) {
-        if (c.web) {   // 웹드라이브: 엔진(동기화) 없이 NAS 를 드라이브로 붙임
-            if (c.name.empty() || WebMount(c).empty()) continue;
-            WebDriveCfg wc; wc.name = c.name; wc.serverUrl = ActiveServer(); wc.token = g_cfg.token;
-            wc.mount = WebMount(c); wc.cacheDir = g_dataDir + L"\\webdrive";
-            auto w = std::make_shared<WebDrive>(wc);
-            std::wstring cname = W(c.name);
-            w->onEvent = [cname](const std::string& k, const std::string& p, const std::string& x) {
-                SYSTEMTIME st; GetLocalTime(&st);
-                wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-                std::lock_guard<std::mutex> g(g_evMu);
-                g_evPending.push_back(EvRow{t, cname, W(k), W(p), W(x)});
-                if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
-            };
-            w->Start();
-            g_webdrives.push_back(std::move(w));
+        if (c.web) {   // 웹드라이브: 엔진(동기화) 없이 NAS 를 드라이브로 붙임 (끊어 둔 것은 그대로)
+            if (!c.off) StartWebDrive(c);
             continue;
         }
         if (c.name.empty() || c.local.empty()) continue;
@@ -635,7 +640,8 @@ enum { IDS_SERVER = 500, IDS_TOKEN, IDS_TEST, IDS_TESTRES, IDS_LIST, IDS_ROOT, I
        IDS_LIMIT, IDS_STARTUP, IDS_SAVE, IDS_CANCEL, IDS_TAB, IDS_PICK, IDS_PRIO, IDS_HIGH, IDS_EXCL, IDS_MAXSIZE,
        IDS_QUIET, IDS_DEFER, IDS_RESCAN, IDS_UP, IDS_DOWN, IDS_ONDEMAND, IDS_KEEP, IDS_AUTOFREE, IDS_SERVERALT, IDS_PAIR, IDS_PAIRINFO, IDS_HINT,
        IDS_SELLOCAL, IDS_SELBROWSE, IDS_MODEALL, IDS_MOVEUP, IDS_MOVEDN, IDS_ADDPAIR, IDS_PICK2,
-       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD, IDS_SKTMP, IDS_SKLOCK, IDS_SKINI, IDS_SKTHUMB, IDS_SKDOT };
+       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD, IDS_SKTMP, IDS_SKLOCK, IDS_SKINI, IDS_SKTHUMB, IDS_SKDOT, IDS_WEBTOGGLE };
+static HWND s_webBtn;   // 웹드라이브 [연결 끊기] / [연결]
 #define WM_APP_TESTED (WM_APP + 10)
 #define WM_APP_PICKED (WM_APP + 11)
 static HWND s_tab, s_server, s_token, s_test, s_testRes, s_list, s_root, s_local, s_browse, s_add, s_remove, s_limit, s_startup, s_tip;
@@ -758,6 +764,7 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
         default: st = L"연결 안 됨"; sc = RGB(0xFF, 0x6B, 0x74); break;
         }
     }
+    if (c.web && c.off) { st = L"끊김"; sc = kSub; }
     if (c.web) for (auto& w : g_webdrives) if (w->cfg().name == c.name) {
         if (!w->Mounted()) { st = w->Online() ? L"붙이는 중" : L"연결 안 됨"; sc = w->Online() ? RGB(0x6C, 0xA8, 0xF0) : RGB(0xFF, 0x6B, 0x74); }
         else if (!w->Online()) { st = L"NAS 연결 안 됨"; sc = RGB(0xFF, 0x6B, 0x74); }
@@ -814,6 +821,14 @@ static void DrawLegend(DRAWITEMSTRUCT* d) {
 static void ShowConnOptions() {   // 도구 단추 켜고 끄기
     bool on = s_sel >= 0 && s_sel < (int)s_conns.size();
     for (HWND c : {s_pick2, s_remove}) if (c) EnableWindow(c, on);
+    if (s_webBtn) {   // 고른 작업이 웹드라이브일 때만: 지금 붙어 있으면 [연결 끊기], 아니면 [연결]
+        bool web = on && s_conns[s_sel].web;
+        bool live = false;
+        if (web) for (auto& w : g_webdrives) if (w->cfg().name == s_conns[s_sel].name) live = true;
+        SetWindowTextW(s_webBtn, live ? L"\xE8CD연결 끊기" : L"\xE8CE연결");
+        ShowWindow(s_webBtn, web ? SW_SHOW : SW_HIDE);
+        InvalidateRect(s_webBtn, nullptr, TRUE);
+    }
     if (s_moveUp) EnableWindow(s_moveUp, on && s_sel > 0);
     if (s_moveDn) EnableWindow(s_moveDn, on && s_sel + 1 < (int)s_conns.size());
 }
@@ -1006,6 +1021,9 @@ static void CreateSettingsControls(HWND h) {
         s_addPair = tool(L"\xE710만들기", IDS_ADDPAIR, s_cx, tw, false);
         s_pick2 = tool(L"\xE70F편집", IDS_PICK2, s_cx + tw + S(8), tw, false);
         s_remove = tool(L"\xE74D제거", IDS_REMOVE, s_cx + 2 * (tw + S(8)), tw, false);
+        s_webBtn = tool(L"\xE8CD연결 끊기", IDS_WEBTOGGLE, s_cx + 3 * (tw + S(8)), S(98), false);   // 위·아래 단추와 겹치지 않게
+        ShowWindow(s_webBtn, SW_HIDE);
+        AddTip(s_tip, s_webBtn, L"웹드라이브 연결을 끊거나 다시 붙입니다 (바로 적용, [저장] 필요 없음).\n끊으면 드라이브가 탐색기에서 사라지고, 고치던 파일은 먼저 NAS로 올린 뒤 끊습니다. 다음에 Mydrive를 켜도 끊긴 채로 둡니다.");
         s_moveUp = tool(L"\xE70E", IDS_MOVEUP, s_cx + s_cw - 2 * bw - S(6), bw, true);
         s_moveDn = tool(L"\xE70D", IDS_MOVEDN, s_cx + s_cw - bw, bw, true);
         SetPropW(s_addPair, L"accent", (HANDLE)1);
@@ -2012,6 +2030,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetTextColor(dc, col);
         return (LRESULT)g_brDark;
     }
+    case WM_TIMER: if (wp == 7) { KillTimer(h, 7); InvalidateRect(s_list, nullptr, TRUE); ShowConnOptions(); } return 0;   // 웹드라이브 연결 바꾼 뒤 상태 칸
     case WM_APP_TESTED: OnTested((std::pair<int, std::string>*)lp); return 0;
     case WM_NOTIFY: {
         auto* nm = (NMHDR*)lp;
@@ -2036,6 +2055,28 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         case IDS_ADDPAIR: OpenTask(h, -1); break;
+        case IDS_WEBTOGGLE:
+            if (s_sel >= 0 && s_sel < (int)s_conns.size() && s_conns[s_sel].web) {
+                Conn& c = s_conns[s_sel];
+                auto it = std::find_if(g_webdrives.begin(), g_webdrives.end(), [&](auto& w) { return w->cfg().name == c.name; });
+                bool saved = false;
+                for (auto& gc : g_cfg.conns) if (gc.name == c.name) saved = true;
+                if (it != g_webdrives.end()) {
+                    SetCursor(LoadCursorW(nullptr, IDC_WAIT));
+                    (*it)->Stop();   // 고치던 파일은 올리고 떼어 냄
+                    g_webdrives.erase(it);
+                    c.off = true;
+                } else {
+                    c.off = false;
+                    if (saved) StartWebDrive(c);
+                    else MessageBoxW(h, L"새로 만든 작업은 [저장]을 누르면 붙습니다.", L"Mydrive", MB_ICONINFORMATION);
+                }
+                for (auto& gc : g_cfg.conns) if (gc.name == c.name) gc.off = c.off;   // 바로 적용: 다른 칸은 [저장] 때까지 그대로
+                if (saved) SaveCfg();
+                ShowConnOptions(); FillConnList();
+                SetTimer(h, 7, 2500, nullptr);   // 붙는 데 1~2초 — 상태 칸 다시 그리기
+            }
+            break;
         case IDS_REMOVE: {
             int i = s_sel;
             if (i >= 0 && i < (int)s_conns.size()) {
