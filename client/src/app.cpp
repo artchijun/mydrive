@@ -176,6 +176,10 @@ static UINT g_dpi = 96;
 static std::vector<std::shared_ptr<Engine>> g_engines;   // shared: 상태 보기 창이 다른 스레드에서 잠시 붙잡을 수 있음
 
 struct EvRow { std::wstring time, conn, kind, path, extra; int64_t ts = 0; int cat = 0; };
+// 엔진 스레드 → 화면 스레드: 기록을 여기 모아 두고 알림은 한 번만 (한 건마다 보내면 메시지 큐가 넘치고 창이 멈춤)
+static std::mutex g_evMu;
+static std::vector<EvRow> g_evPending;
+static bool g_evPosted = false;
 static std::deque<EvRow> g_events;   // 최근 것이 앞
 static const size_t MAX_EVENTS = 1000;
 
@@ -232,8 +236,9 @@ static void StartEngines() {
         e->onEvent = [cname](const std::string& k, const std::string& p, const std::string& x) {
             SYSTEMTIME st; GetLocalTime(&st);
             wchar_t t[32]; swprintf(t, 32, L"%04d-%02d-%02d %02d:%02d:%02d", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-            auto* r = new EvRow{t, cname, W(k), W(p), W(x)};
-            if (!PostMessageW(g_main, WM_APP_EVENT, 0, (LPARAM)r)) delete r;
+            std::lock_guard<std::mutex> g(g_evMu);
+            g_evPending.push_back(EvRow{t, cname, W(k), W(p), W(x)});
+            if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;   // 쌓인 것을 한 번에 가져가라는 알림 하나만
         };
         e->Start();
         g_engines.push_back(std::move(e));
@@ -386,7 +391,7 @@ static LRESULT CALLBACK MainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp == 4) { UpdateTick(); return 0; }
         Tick();
         return 0;
-    case WM_APP_EVENT: { auto* r = (EvRow*)lp; AddEvent(r); delete r; return 0; }
+    case WM_APP_EVENT: DrainEvents(); return 0;
     case WM_APP_SHOW: Popup_Show(); return 0;
     case WM_APP_QUIT: DestroyWindow(h); return 0;
     case WM_APP_TRAY:

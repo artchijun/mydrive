@@ -234,8 +234,10 @@ bool Register(const std::wstring& id, const std::wstring& path, const std::wstri
                 std::wstring curPath = cur.Path() ? std::wstring(cur.Path().Path()) : L"";
                 bool samePath = _wcsicmp(curPath.c_str(), Plain(path).c_str()) == 0;
                 if (!samePath) LOG("탐색기 등록 폴더가 바뀜: %s → %s", U(curPath).c_str(), U(Plain(path)).c_str());
-                if (!samePath || cur.AllowPinning() || cur.ProtectionMode() != StorageProviderProtectionMode::Personal || std::wstring(cur.DisplayNameResource()) != display)
-                    StorageProviderSyncRootManager::Unregister(FullId(id));
+                // 주의: 등록을 풀면 Windows 가 그 폴더의 온라인 전용 자리표시 파일을 모두 치움.
+                //   AllowPinning 은 false 로 등록해도 Windows 가 true 로 돌려줘서, 예전에는 켤 때마다 풀었다가 다시 등록했음
+                //   (→ 온라인 전용 파일이 사라지고, 그것을 'PC에서 지움'으로 오해). 이제는 폴더가 바뀐 경우에만 풂.
+                if (!samePath) StorageProviderSyncRootManager::Unregister(FullId(id));
             } catch (...) {}
             StorageProviderSyncRootManager::Register(info);
             return true;

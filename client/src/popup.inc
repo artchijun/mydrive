@@ -115,19 +115,33 @@ static void LoadActivity() {
     for (auto it = g_events.rbegin(); it != g_events.rend(); ++it) if (it->ts >= NowTs() - 61) g_minute.push_back({it->ts, it->cat});
     g_actFile = _wfopen(ActPath().c_str(), L"ab");
 }
-static void AddEvent(EvRow* r) {
+static void AddEvent(EvRow* r, bool flush = true) {
     r->extra = NiceExtra(r->extra);
     r->ts = TsOf(r->time); r->cat = Classify(r->kind);
     if (g_actFile) {
         std::string line = U(r->time + L"\t" + r->conn + L"\t" + r->kind + L"\t" + r->path + L"\t" + r->extra) + "\n";
-        fputs(line.c_str(), g_actFile); fflush(g_actFile);
+        fputs(line.c_str(), g_actFile); if (flush) fflush(g_actFile);
     }
     if (r->cat == C_UP || r->cat == C_DOWN || r->cat == C_MOVE) { g_lastFile = r->path; g_lastConn = r->conn; }
     g_minute.push_back({r->ts, r->cat});   // 1분 수는 목록 길이 제한과 따로 셈
     while (!g_minute.empty() && g_minute.front().first < r->ts - 61) g_minute.pop_front();
     g_events.push_front(std::move(*r));
     while (g_events.size() > MAX_EVENTS) g_events.pop_back();
-    Popup_Invalidate();
+    if (flush) Popup_Invalidate();
+}
+// 엔진이 모아 둔 기록을 한 번에 처리 (한 번에 최대 5000건 — 더 있으면 다음 차례에, 그 사이 창은 계속 반응)
+static void DrainEvents() {
+    std::vector<EvRow> batch;
+    {
+        std::lock_guard<std::mutex> g(g_evMu);
+        size_t n = std::min<size_t>(g_evPending.size(), 5000);
+        batch.assign(std::make_move_iterator(g_evPending.begin()), std::make_move_iterator(g_evPending.begin() + n));
+        g_evPending.erase(g_evPending.begin(), g_evPending.begin() + n);
+        g_evPosted = !g_evPending.empty() && PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;
+    }
+    for (auto& r : batch) AddEvent(&r, false);
+    if (g_actFile) fflush(g_actFile);
+    if (!batch.empty()) Popup_Invalidate();
 }
 
 static std::wstring LocalPathOf(const std::wstring& conn, const std::wstring& rel) {
@@ -1018,10 +1032,25 @@ static void OnClick(int id) {
     else if (id == H_NOWCOPY && !g_lastFile.empty()) CopyText(LocalPathOf(g_lastConn, g_lastFile));
     else if (id == H_CONFIRMDEL) {
         int64_t held = 0; for (auto& e : g_engines) held += e->stats.heldDeletes;
-        if (MessageBoxW(g_pop, Fmt(L"%lld개 항목을 반대쪽에서도 지웁니다.\n\nPC에서 지워지는 파일은 휴지통으로, NAS에서 지워지는 파일은 #recycle 폴더로 옮겨지므로 나중에 되살릴 수 있습니다.\n\n계속할까요?", held).c_str(),
-                        L"Mydrive · 대량 삭제 확인", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2 | MB_TOPMOST) == IDYES) {
-            for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->ConfirmMassDelete();
-            AddAlert(A_CONFIRM, Fmt(L"대량 삭제 %lld개를 확인함 — 반대쪽에서도 지움", held));
+        std::wstring main = Fmt(L"한쪽에서 %lld개가 한꺼번에 사라졌습니다", held);
+        TASKDIALOG_BUTTON btns[] = {
+            {101, L"되살리기 (권장)\n직접 지운 적이 없다면: 아무것도 지우지 않고, 사라진 쪽에 다시 만듭니다."},
+            {102, L"반대쪽에서도 지우기\n직접 지운 게 맞다면: PC는 휴지통으로, NAS는 #recycle 폴더로 옮깁니다 (나중에 되살릴 수 있음)."}};
+        TASKDIALOGCONFIG tc{sizeof tc};
+        tc.hwndParent = g_pop; tc.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        tc.pszWindowTitle = L"Mydrive · 대량 삭제 확인"; tc.pszMainIcon = TD_WARNING_ICON;
+        tc.pszMainInstruction = main.c_str();
+        tc.pszContent = L"지우기 전에 멈춰 두었습니다. 탐색기 연동을 다시 등록하거나 폴더를 옮기면, 지우지 않았는데도 이렇게 보일 수 있습니다.";
+        tc.pButtons = btns; tc.cButtons = 2; tc.nDefaultButton = 101; tc.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        int btn = 0;
+        if (SUCCEEDED(TaskDialogIndirect(&tc, &btn, nullptr, nullptr))) {
+            if (btn == 101) {
+                for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->RestoreMassDelete();
+                AddAlert(A_CONFIRM, Fmt(L"대량 삭제 %lld개를 지우지 않고 되살림", held));
+            } else if (btn == 102) {
+                for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->ConfirmMassDelete();
+                AddAlert(A_CONFIRM, Fmt(L"대량 삭제 %lld개를 확인함 — 반대쪽에서도 지움", held));
+            }
         }
     }
     else if (id >= H_SUMCHIP && id < H_SUMCHIP + 4) { int ms[] = {10, 30, 60, 360}; g_sumMins = ms[id - H_SUMCHIP]; }

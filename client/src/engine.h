@@ -92,6 +92,7 @@ public:
     void Start();                         // 감시하며 계속 맞추기 (스레드)
     void Stop();
     void ConfirmMassDelete() { confirmDelete_ = true; Kick(); }
+    void RestoreMassDelete() { restoreDelete_ = true; Kick(); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
     // 일시 중지: minutes 동안 (0 = 다시 시작)
     void Pause(int minutes) { pausedUntil_ = minutes > 0 ? GetTickCount64() + (uint64_t)minutes * 60000 : 0; Kick(); }
@@ -139,7 +140,7 @@ private:
     std::string epoch_;
     int64_t seq_ = 0;
     std::atomic<int64_t> polledSeq_{0};
-    std::atomic<bool> stop_{false}, confirmDelete_{false};
+    std::atomic<bool> stop_{false}, confirmDelete_{false}, restoreDelete_{false};
     std::atomic<uint64_t> pausedUntil_{0};
     HANDLE wake_ = nullptr;
     // 상태(local_/remote_/base_)를 여러 통로가 함께 쓰므로 잠금

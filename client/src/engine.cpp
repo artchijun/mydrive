@@ -664,6 +664,19 @@ bool Engine::RunPass() {
     // 대량 삭제 확인: 지울 항목 수(아래 항목 포함)가 한도를 넘으면 그 방향의 삭제는 멈추고 확인을 기다림
     int nDelL = 0, nDelR = 0;
     for (auto& it : items) { if (it.a == DelL) nDelL++; if (it.a == DelR) nDelR++; }
+    // [되살리기]: 한도를 넘은 쪽의 삭제를 하지 않고, 마지막 상태 기록을 잊어 '한쪽에만 있음'으로 다시 맞춤
+    //   NAS 삭제 보류(PC에서 사라짐) → PC에 다시 만듦(필요할 때 받기면 자리표시) / PC 삭제 보류(NAS에서 사라짐) → NAS에 다시 올림
+    if (restoreDelete_.exchange(false)) {
+        bool rr = nDelR > cfg_.massDeleteLimit, rl = nDelL > cfg_.massDeleteLimit;
+        int n = 0;
+        for (auto& it : items) {
+            if (!((it.a == DelR && rr) || (it.a == DelL && rl))) continue;
+            base_.erase(it.p); dirty_ = true; n++;
+            if (it.a == DelR) { auto ri = remote_.find(it.p); it.a = (ri != remote_.end() && ri->second.d) ? MkL : Down; nDelR--; }
+            else { auto li = local_.find(it.p); it.a = (li != local_.end() && li->second.d) ? MkR : Up; nDelL--; }
+        }
+        if (n) Event("↺ 되살림", cfg_.name, std::to_string(n) + "개 — 지우지 않고 사라진 쪽에 다시 만듦");
+    }
     bool holdL = nDelL > cfg_.massDeleteLimit && !confirmDelete_;
     bool holdR = nDelR > cfg_.massDeleteLimit && !confirmDelete_;
     stats.heldDeletes = (holdL ? nDelL : 0) + (holdR ? nDelR : 0);
