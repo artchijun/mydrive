@@ -1064,7 +1064,7 @@ bool Engine::RunPass() {
         for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) { if (l) newUnderL.insert(q); if (r) newUnderR.insert(q); }
     }
     for (auto& it : dirs) {
-        if (stop_) return any;
+        if (stop_ || Paused()) return any;
         auto& p = it.p;
         switch (it.a) {
         case MkR: any |= MkdirRemote(p); break;
@@ -1088,7 +1088,7 @@ bool Engine::RunPass() {
     const int64_t kBig = 8LL * 1024 * 1024;
     std::vector<Job> smallJobs;
     for (auto& it : files) {
-        if (stop_) return any;
+        if (stop_ || Paused()) return any;
         auto& p = it.p;
         // 다른 프로그램이 쓰는 중이면 이번엔 건너뜀 (잠시 뒤 다시) — 뒤의 파일은 그대로 진행
         {
@@ -1157,7 +1157,7 @@ bool Engine::RunPass() {
         const size_t kBatchN = 32;
         auto tiny = [&](const Job& j) { return j.kind == Job::Up && j.size <= kTiny && batchOk_ && UpRateLimit() <= 0; };
         auto work = [&] {
-            for (size_t k; !stop_ && (k = next++) < smallJobs.size();) {
+            for (size_t k; !stop_ && !Paused() && (k = next++) < smallJobs.size();) {   // 멈추면 줄에 남은 것은 다음 차례로
                 while (UpperBusy(cfg_.rank) && !stop_) Sleep(200);   // 우선순위 '높음' 연결이 먼저
                 if (!tiny(smallJobs[k])) {
                     if (RunJob(smallJobs[k])) anyJob = true;
@@ -1199,7 +1199,7 @@ bool Engine::RunPass() {
             qCv_.notify_one();
         }
         for (auto& p : dehy) {
-            if (stop_) return any;
+            if (stop_ || Paused()) return any;
             std::wstring a = Abs(cfg_.localRoot, p);
             if (!cloud::Dehydrate(a)) continue;   // 쓰는 중이면 다음에
             if (cloud::IsUnpinned(local_[p].a)) cloud::ClearPin(a, false);
@@ -1208,7 +1208,7 @@ bool Engine::RunPass() {
             any = true;
         }
         for (auto& p : autoFree) {
-            if (stop_) return any;
+            if (stop_ || Paused()) return any;
             if (!cloud::Dehydrate(Abs(cfg_.localRoot, p))) continue;   // 열려 있으면 그대로 둠
             LocalE now; if (StatLocal(p, now)) local_[p] = now;
             Event("☁ 자동 공간 확보 (오래 안 씀)", p, std::to_string(now.s) + " B");
@@ -1216,7 +1216,7 @@ bool Engine::RunPass() {
         }
         for (auto& p : unpinDirs) cloud::ClearPin(Abs(cfg_.localRoot, p), true);
         if (!unregister_) ApplyKeepDirs();
-        for (auto& p : conv) { if (stop_) return any; InSync(p, local_[p].d); }
+        for (auto& p : conv) { if (stop_ || Paused()) return any; InSync(p, local_[p].d); }
         if (conv.size() >= 2000) any = true;   // 더 남음 → 곧 이어서
         std::vector<std::string> retry;
         { std::lock_guard<std::mutex> g(spMu_); retry.assign(syncPending_.begin(), syncPending_.end()); }
@@ -1258,7 +1258,7 @@ bool Engine::RunPass() {
             for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) keep.insert(q);
     std::set<std::string> gone;
     for (auto& it : dels) {
-        if (stop_) return any;
+        if (stop_ || Paused()) return any;
         auto& p = it.p;
         if (keep.count(p)) { Event("폴더 유지", p, "안에 새로 생기거나 고친 파일이 있음"); stats.pending--; continue; }
         if ((it.a == DelL && exclUnderL.count(p)) || (it.a == DelR && exclUnderR.count(p))) { Event("폴더 유지", p, "필터로 뺀 파일이 들어 있음"); stats.pending--; continue; }
@@ -1447,6 +1447,7 @@ void Engine::BigWorker() {
         {
             RankGuard hg(cfg_.rank);
             while (UpperBusy(cfg_.rank) && !stop_) Sleep(200);
+            while (Paused() && !stop_) WaitForSingleObject(wake_, 1000);   // 멈춘 동안 큰 파일 통로도 쉼 (줄은 그대로 두었다가 이어서)
             if (!stop_) RunJob(j);
         }
         { std::lock_guard<std::recursive_mutex> g(mu_); inflight_.erase(j.p); }

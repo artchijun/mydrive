@@ -37,7 +37,12 @@ struct Conn {
     std::wstring mount;               // 웹드라이브를 붙일 드라이브 문자 ("M:"). 비어 있으면 local 폴더에 붙임
     bool off = false;                 // 웹드라이브 연결을 끊어 둠 ([연결 끊기] / [연결])
     bool paused = false;              // 이 작업만 '다시 시작할 때까지' 멈춤 (앱을 다시 켜도 유지)
+    int64_t pauseUntil = 0;           // 시간을 정한 멈춤이 끝나는 시각 (1970년부터 ms). 앱을 다시 켜거나 업데이트해도 남은 시간만큼 이어 감
 };
+static int64_t NowEpochMs() {
+    FILETIME ft; GetSystemTimeAsFileTime(&ft);
+    return (int64_t)((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000ULL) - 11644473600000LL;
+}
 struct AppCfg {
     std::wstring server = L"http://192.168.0.6:8642";
     std::wstring serverAlt;     // 집 밖에서 쓸 주소 (예: Tailscale http://100.x.x.x:8642). 집 주소가 안 될 때 자동으로 씀
@@ -115,6 +120,7 @@ static void LoadCfg() {
         x.mount = W(c.value("mount", std::string()));
         x.off = c.value("off", false);
         x.paused = c.value("paused", false);
+        x.pauseUntil = c.value("pauseUntil", (int64_t)0);
         g_cfg.conns.push_back(x);
     }
     // 예전 '우선순위 높음' 짝은 맨 위로 (이제는 목록 순서 = 우선순위)
@@ -129,7 +135,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}, {"paused", c.paused}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}, {"paused", c.paused}, {"pauseUntil", c.pauseUntil}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -280,6 +286,7 @@ static void StartEngines() {
             if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;   // 쌓인 것을 한 번에 가져가라는 알림 하나만
         };
         if (c.paused) e->Pause(-1);
+        else if (c.pauseUntil > NowEpochMs()) e->PauseMs((uint64_t)(c.pauseUntil - NowEpochMs()));
         e->Start();
         g_engines.push_back(std::move(e));
     }

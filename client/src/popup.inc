@@ -225,8 +225,10 @@ static void LoadAlerts() {
 static bool AnyPaused() { for (auto& e : g_engines) if (e->Paused()) return true; return false; }
 static bool AllPaused() { if (g_engines.empty()) return false; for (auto& e : g_engines) if (!e->Paused()) return false; return true; }
 // 작업 하나만 멈춤/다시 시작 ('다시 시작할 때까지'는 설정에 남겨 앱을 다시 켜도 유지)
-static void SetConnPausedFlag(const std::string& name, bool on) {
-    for (auto& c : g_cfg.conns) if (c.name == name && c.paused != on) { c.paused = on; SaveCfg(); }
+// 설정에 남김: minutes > 0 이면 끝나는 시각, < 0 이면 '다시 시작할 때까지', 0 이면 지움
+static void SetConnPause(Conn& c, int minutes) {
+    c.paused = minutes < 0;
+    c.pauseUntil = minutes > 0 ? NowEpochMs() + (int64_t)minutes * 60000 : 0;
 }
 static std::wstring MinText(int m);
 static std::wstring ClockAfter(uint64_t ms);
@@ -236,7 +238,8 @@ static void PauseConn(int i, int minutes) {
     std::wstring nm = W(e.cfg().name);
     bool was = e.Paused();
     e.Pause(minutes);
-    SetConnPausedFlag(e.cfg().name, minutes < 0);
+    for (auto& c : g_cfg.conns) if (c.name == e.cfg().name) SetConnPause(c, minutes);
+    SaveCfg();
     if (minutes > 0) AddAlert(A_PAUSE, L"'" + nm + L"' 작업만 " + MinText(minutes) + L" 동안 멈춤 (" + ClockAfter((uint64_t)minutes * 60000) + L"까지)", e.cfg().localRoot);
     else if (minutes < 0) AddAlert(A_PAUSE, L"'" + nm + L"' 작업만 다시 시작할 때까지 멈춤", e.cfg().localRoot);
     else if (was) AddAlert(A_RESUME, L"'" + nm + L"' 작업을 다시 시작함", e.cfg().localRoot);
@@ -253,7 +256,8 @@ static std::wstring MinText(int m) { return m % 60 == 0 ? Fmt(L"%d시간", m / 6
 static void PauseAll(int minutes) {
     bool was = AnyPaused();
     for (auto& e : g_engines) e->Pause(minutes);
-    for (auto& c : g_cfg.conns) if (c.paused) { c.paused = false; SaveCfg(); }   // 전체 멈춤·다시 시작이 작업별 멈춤보다 우선
+    for (auto& c : g_cfg.conns) if (!c.web) SetConnPause(c, minutes);   // 전체 멈춤·다시 시작이 작업별 멈춤보다 우선, 앱을 다시 켜도 유지
+    SaveCfg();
     if (minutes > 0) AddAlert(A_PAUSE, MinText(minutes) + L" 동안 동기화를 멈춤 (" + ClockAfter((uint64_t)minutes * 60000) + L"까지)");
     else if (was) AddAlert(A_RESUME, L"동기화를 다시 시작함");
     Popup_Invalidate();
