@@ -161,7 +161,7 @@ private:
     int lastHeld_ = -1;
     int rootSync_ = 0;   // 맨 위 폴더에 알린 상태: 0 아직, 1 맞춰짐, 2 맞추는 중
     std::map<std::string, std::pair<std::string, uint64_t>> waitNote_;   // 기다리는 파일 → (알린 내용, 처음 본 시각) — xMu_ 로 보호
-    struct XState { bool up; int64_t total; std::atomic<int64_t> done{0}; uint64_t start; std::atomic<bool> cancel{false}; int64_t sigS = -1, sigM = 0; };
+    struct XState { bool up; int64_t total; std::atomic<int64_t> done{0}; uint64_t start; std::atomic<bool> cancel{false}, gone{false}; int64_t sigS = -1, sigM = 0; };   // gone: 올리는 중에 PC에서 지움
     struct Canceled { bool up; int64_t s, m; };   // 취소한 파일: 그 판(크기·시각)이 그대로인 동안은 다시 옮기지 않음
     std::map<std::string, Canceled> canceled_;   // xMu_ 로 보호
     struct FailInfo { int n = 0; uint64_t first = 0, last = 0; std::string msg; };

@@ -352,6 +352,7 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
                           Abs(cfg_.localRoot, p), &xs->done);
     t_xferStop = nullptr;
     EndXfer(p);
+    if (xs->gone) { Event("⏹ 올리기 멈춤", p, "올리는 중에 PC에서 지움 — NAS에는 올리지 않음"); return false; }
     if (xs->cancel) { Event("⏹ 취소함", p, "올리기 — 파일이 바뀌거나 [지금 동기화]를 누르면 다시 맞춤"); return false; }
     if (r.status == 409) { Event("충돌", p, "그사이 NAS에서도 바뀜 — 다음 차례에 둘 다 남김"); return false; }
     if (!r.ok()) { stats.errors++; Event("올리기 실패", p, r.error.empty() ? std::to_string(r.status) + " " + r.body : r.error); return false; }
@@ -360,7 +361,9 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
     LocalE now;
     {
         std::lock_guard<std::recursive_mutex> g(mu_);
-        if (StatLocal(p, now) && now.s == l.s && SameTime(now.m, l.m)) SetBase(p, now, re);
+        bool here = StatLocal(p, now);
+        if (here && now.s == l.s && SameTime(now.m, l.m)) SetBase(p, now, re);
+        else if (!here) SetBase(p, l, re);   // 다 올린 뒤 지워짐 → 다음 차례에 NAS에서도 지움 (예전에는 PC로 도로 받아 와서 되살아났음)
         else { remote_[p] = re; dirty_ = true; }
     }   // 올리는 사이 또 바뀜 → 다음 차례에 다시 올림
     stats.up++;
@@ -1292,6 +1295,11 @@ void Engine::WatchMain() {
             std::wstring n(e->FileName, e->FileNameLength / sizeof(wchar_t));
             auto s = n.rfind(L'\\');
             if (!SkipLocalName(s == std::wstring::npos ? n : n.substr(s + 1))) real = true;
+            if (e->Action == FILE_ACTION_REMOVED || e->Action == FILE_ACTION_RENAMED_OLD_NAME) {
+                std::string rel = U(n); for (auto& c : rel) if (c == '\\') c = '/';
+                std::lock_guard<std::mutex> g(xMu_);
+                for (auto& [p, x] : xfers_) if (x->up && (p == rel || Under(p, rel))) { x->gone = true; x->cancel = true; }
+            }
             if (!e->NextEntryOffset) break;
             e = (FILE_NOTIFY_INFORMATION*)((char*)e + e->NextEntryOffset);
         }
