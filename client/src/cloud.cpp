@@ -294,7 +294,14 @@ static HRESULT Transfer(const CF_CALLBACK_INFO* ci, NTSTATUS st, const void* buf
     return CfExecute(&oi, &op);
 }
 
+static thread_local std::wstring t_requester;
+std::wstring FetchRequester() { return t_requester; }
 static void CALLBACK OnFetchData(const CF_CALLBACK_INFO* ci, const CF_CALLBACK_PARAMETERS* cp) {
+    t_requester.clear();
+    if (ci->ProcessInfo && ci->ProcessInfo->ImagePath) {   // 누가 내용을 달라고 했는지 (기록에 남김)
+        std::wstring ip = ci->ProcessInfo->ImagePath; size_t s = ip.find_last_of(L"\\/");
+        t_requester = s == std::wstring::npos ? ip : ip.substr(s + 1);
+    }
     FetchFn f;
     { std::lock_guard<std::mutex> g(g_mu); auto it = g_fetch.find(ci->ConnectionKey.Internal); if (it != g_fetch.end()) f = it->second; }
     int64_t off = cp->FetchData.RequiredFileOffset.QuadPart, total = ci->FileSize.QuadPart;
@@ -333,7 +340,7 @@ bool Connect(const std::wstring& path, FetchFn fetch, Connection& out) {
         {CF_CALLBACK_TYPE_CANCEL_FETCH_DATA, OnCancelFetch},
         CF_CALLBACK_REGISTRATION_END};
     CF_CONNECTION_KEY key{};
-    HRESULT hr = CfConnectSyncRoot(Plain(path).c_str(), table, nullptr, CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH, &key);
+    HRESULT hr = CfConnectSyncRoot(Plain(path).c_str(), table, nullptr, CF_CONNECT_FLAG_REQUIRE_FULL_FILE_PATH | CF_CONNECT_FLAG_REQUIRE_PROCESS_INFO, &key);
     if (FAILED(hr)) { LOG("탐색기 연결 실패 %s: 0x%08X", U(path).c_str(), (unsigned)hr); return false; }
     { std::lock_guard<std::mutex> g(g_mu); g_fetch[key.Internal] = std::move(fetch); }
     out.key = key.Internal;

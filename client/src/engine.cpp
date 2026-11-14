@@ -1176,8 +1176,9 @@ bool Engine::CloudFetch(const std::wstring& abs, int64_t off, const std::functio
     xs->done = off;
     Resp res = fetch_.Stream("/v1/file", {{"root", cfg_.name}, {"path", p}}, off, sink, &xs->done);
     EndXfer(p);
-    if (!res.ok()) { Event("받기 실패", p, "탐색기에서 열기 — " + (res.error.empty() ? std::to_string(res.status) : res.error)); return false; }
-    if (off == 0) { stats.down++; Event("↓ 받음", p, std::to_string(total) + " B"); }
+    std::string who = U(cloud::FetchRequester()); if (who.empty()) who = "?";
+    if (!res.ok()) { Event("받기 실패", p, "열 때 받기 — " + who + " — " + (res.error.empty() ? std::to_string(res.status) : res.error)); return false; }
+    if (off == 0) { stats.down++; Event("↓ 받음", p, std::to_string(total) + " B · 열 때 받기 — " + who); }
     return true;
 }
 

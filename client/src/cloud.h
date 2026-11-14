@@ -23,6 +23,8 @@ bool SetRootInSync(const std::wstring& id, const std::wstring& root, bool inSync
 // 열 때 받기: fetch(offset, sink) 가 offset 부터 끝까지 내용을 sink 로 흘려 보냄
 using FetchFn = std::function<bool(const std::wstring& absPath, int64_t offset, const std::function<bool(const char*, size_t)>& sink)>;
 struct Connection { int64_t key = 0; };
+// 지금 '열 때 받기'를 부른 프로그램 이름 (예: explorer.exe) — 받기 콜백 안에서만 뜻이 있음
+std::wstring FetchRequester();
 bool Connect(const std::wstring& path, FetchFn fetch, Connection& out);
 void Disconnect(Connection& c);
 
