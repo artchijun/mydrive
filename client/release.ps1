@@ -21,7 +21,8 @@ Copy-Item "$client\build\setup.exe" $file -Force
 Push-Location (Split-Path $client -Parent)
 try {
     if (git status --porcelain) { throw "커밋하지 않은 변경이 있음 — 먼저 커밋하세요 (version.h 포함)" }
-    git push origin HEAD 2>&1 | Out-Null
+    cmd /c "git push origin HEAD 2>&1" | Out-Null   # git 은 정상 안내도 stderr 로 내보내서 PowerShell 이 오류로 봄
+    if ($LASTEXITCODE -ne 0) { throw "git push 실패" }
     $sha = (git rev-parse HEAD).Trim()
 } finally { Pop-Location }
 
