@@ -363,7 +363,7 @@ static void WatchAlerts(const Overall& o) {
 // ---------- 트레이 창 ----------
 enum Hit {
     H_NONE = 0, H_SET = 1, H_HELP, H_PIN, H_CLOSE, H_TAB0, H_TAB1, H_TAB2, H_SYNCNOW, H_P30, H_P60, H_P180, H_RESUME,
-    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND,
+    H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL,
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -555,10 +555,12 @@ static void DrawHeld(Rect r, int64_t held) {
     Rect in = r.inset(14, 12);
     g_cv.Icon(0xE769, {in.l, in.t, in.l + 16, in.t + 20}, col::Orange(), 14);
     g_cv.Text(Fmt(L"한 번에 %lld개가 지워져서 삭제를 멈췄습니다", held), {in.l + 24, in.t, in.r, in.t + 20}, Hex(0xFFFFD18A), {13, DWRITE_FONT_WEIGHT_SEMI_BOLD});
-    g_cv.Text(L"일부러 지웠으면 [확인하고 지우기], 실수였으면 PC 휴지통이나 NAS #recycle 에서 되살리세요. 다른 동기화는 계속합니다.",
+    g_cv.Text(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [확인하고 지우기]. 다른 동기화는 계속합니다.",
               {in.l + 24, in.t + 22, in.r, in.t + 54}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, true, true});
-    float w = BtnW(L"확인하고 지우기", 0xE74D);
-    Btn(H_CONFIRMDEL, {in.l + 24, in.t + 58, in.l + 24 + w, in.t + 86}, L"확인하고 지우기", 0xE74D,
+    float w1 = BtnW(L"되살리기", 0xE777), w2 = BtnW(L"확인하고 지우기", 0xE74D);
+    Btn(H_RESTOREDEL, {in.l + 24, in.t + 58, in.l + 24 + w1, in.t + 86}, L"되살리기", 0xE777,
+        L"아무것도 지우지 않고, 사라진 쪽에 다시 만듭니다.\nPC에서 사라졌으면 NAS 기준으로 PC에 다시 만들고(필요할 때 받기면 온라인 전용으로), NAS에서 사라졌으면 PC 파일을 다시 올립니다.");
+    Btn(H_CONFIRMDEL, {in.l + 32 + w1, in.t + 58, in.l + 32 + w1 + w2, in.t + 86}, L"확인하고 지우기", 0xE74D,
         L"반대쪽에서도 지웁니다. PC 에서는 휴지통, NAS 에서는 #recycle 로 가므로 나중에 되살릴 수 있습니다.");
 }
 
@@ -1030,6 +1032,11 @@ static void OnClick(int id) {
     else if (id == H_P30) PauseAll(30); else if (id == H_P60) PauseAll(60); else if (id == H_P180) PauseAll(180);
     else if (id == H_NOWOPEN && !g_lastFile.empty()) RevealInExplorer(LocalPathOf(g_lastConn, g_lastFile));
     else if (id == H_NOWCOPY && !g_lastFile.empty()) CopyText(LocalPathOf(g_lastConn, g_lastFile));
+    else if (id == H_RESTOREDEL) {
+        int64_t held = 0; for (auto& e : g_engines) held += e->stats.heldDeletes;
+        for (auto& e : g_engines) if (e->stats.heldDeletes > 0) e->RestoreMassDelete();
+        AddAlert(A_CONFIRM, Fmt(L"대량 삭제 %lld개를 지우지 않고 되살림", held));
+    }
     else if (id == H_CONFIRMDEL) {
         int64_t held = 0; for (auto& e : g_engines) held += e->stats.heldDeletes;
         std::wstring main = Fmt(L"한쪽에서 %lld개가 한꺼번에 사라졌습니다", held);
