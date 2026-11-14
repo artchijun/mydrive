@@ -1,0 +1,60 @@
+# Mydrive
+
+Synology Drive Client를 대신하는 NAS ↔ Windows 폴더 동기화 프로그램.
+
+- **서버** `mydrived` (Go): NAS의 Docker 컨테이너에서 돌며, 공유 폴더 색인·변경 알림·파일 주고받기·이전 버전·휴지통을 맡음. 포트 8642.
+- **PC 앱** `Mydrive.exe` (C++ Win32): 트레이 앱. 양방향 동기화, 탐색기 연동(cfapi: 필요할 때 받기, 상태 아이콘, 오른쪽 클릭 메뉴), 설정 창.
+- **설치 파일** `setup.exe`: 관리자 권한 없이 `%LOCALAPPDATA%\Programs\Mydrive`에 설치.
+
+## 폴더
+
+| 폴더 | 내용 |
+|---|---|
+| `server/` | mydrived 소스 (`main.go` API, `root.go` 색인, `versions.go` 이전 버전, `dsm.go` DSM 계정 연결, `admin.go` 관리 콘솔, `update.go` NAS 경유 새 판 배포 — 예비용, 지금 앱은 GitHub에서 받음) |
+| `server/web/` | 관리 콘솔 화면 (`/admin`) |
+| `server/deploy/` | Container Manager 설정 예시 `compose.example.yaml` (실제 `compose.yaml`은 토큰이 있어 올리지 않음) |
+| `client/src/` | PC 앱 (`app.cpp` 본체·설정 창, `engine.cpp` 동기화 엔진, `cloud.cpp` 탐색기 연동, `http.cpp` 통신, `popup.inc` 트레이 창, `tools.inc` 오른쪽 클릭 메뉴, `update.inc` 자동 업데이트, `setup.cpp` 설치 파일, `version.h` 판 번호) |
+| `client/res/` | 아이콘, 리소스 |
+| `client/*.py, *.ps1` | 시험·화면 캡처 스크립트 |
+
+## 빌드
+
+PC 앱 (Visual Studio 2022 Build Tools 필요):
+
+```powershell
+cd client
+powershell -File package.ps1     # build\ 에 Mydrive.exe, setup.exe → 프로젝트 폴더에 "YYYYMMDD HHMM Mydrive 설치.exe"
+```
+
+서버 (Go 1.22+):
+
+```powershell
+cd server
+$env:GOOS='linux'; $env:GOARCH='amd64'; $env:CGO_ENABLED='0'
+go build -trimpath -ldflags '-s -w' -o build\mydrived .
+```
+
+## 서버 배포
+
+1. `build\mydrived`를 NAS의 `/docker/mydrive/bin/`에 넣음 (File Station).
+2. `POST /v1/admin/restart` (관리 토큰) → 컨테이너가 다시 켜지면서 새 실행 파일을 씀.
+3. 확인: `GET /v1/ping` → `mydrived 0.5.0`
+
+## PC 앱 업데이트 (자동)
+
+새 판은 이 저장소의 **GitHub Releases**에서 받음 (로그인 필요 없음).
+
+1. `client/src/version.h`의 판 번호를 올리고 커밋.
+2. `powershell -File client\release.ps1 -Notes "바뀐 점 한 줄"` → 빌드 → push → 릴리스 `v<판>`을 만들고 `Mydrive-setup-<판>.exe`를 붙임.
+3. 각 PC의 Mydrive가 6시간마다 `api.github.com/repos/artchijun/mydrive/releases/latest`를 확인 → 새 판이면 받아서 GitHub가 알려 준 SHA-256과 맞춰 보고 `/quiet /tray`로 설치 → 다시 켬.
+   - 설정 → 업데이트: [지금 확인] [지금 업데이트], "새 판이 나오면 자동으로 설치"(기본 켬)
+   - 자동 설치는 동기화가 쉬고 있을 때만 함. 끄면 알림만 띄우고 트레이 메뉴에 "새 판 설치"가 생김.
+
+## 시험 스크립트
+
+토큰은 스크립트에 적지 않음. 실행 전에 환경 변수로:
+
+```powershell
+$env:MYDRIVE_TOKEN = '<동기화 토큰>'
+python client\test_cloud.py
+```

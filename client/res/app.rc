@@ -1,0 +1,42 @@
+#include <windows.h>
+#pragma code_page(65001)
+#include "version.h"
+1 ICON "mydrive.ico"
+101 ICON "tray_ok.ico"
+102 ICON "tray_sync.ico"
+103 ICON "tray_pause.ico"
+104 ICON "tray_warn.ico"
+105 ICON "tray_err.ico"
+201 ICON "menu_sync.ico"
+202 ICON "menu_pause.ico"
+203 ICON "menu_resume.ico"
+204 ICON "menu_skip.ico"
+205 ICON "menu_status.ico"
+206 ICON "menu_versions.ico"
+207 ICON "menu_deleted.ico"
+208 ICON "menu_copy.ico"
+209 ICON "menu_keep.ico"
+210 ICON "menu_free.ico"
+1 RT_MANIFEST "app.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MYDRIVE_VERSION_RC
+ PRODUCTVERSION MYDRIVE_VERSION_RC
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041204b0"
+    BEGIN
+      VALUE "FileDescription", "Mydrive — NAS 동기화"
+      VALUE "ProductName", "Mydrive"
+      VALUE "FileVersion", MYDRIVE_VERSION_STR
+      VALUE "ProductVersion", MYDRIVE_VERSION_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x412, 1200
+  END
+END

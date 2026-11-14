@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mydrive 관리 콘솔</title>
+<style>
+:root {
+  --bg: #121418; --side: #171a20; --card: #1e222a; --card2: #252a33; --line: #2e343f;
+  --text: #e8eaed; --sub: #b4b9c2; --muted: #7d8592;
+  --blue: #5b9dff; --green: #3ecf8e; --orange: #f2a65a; --red: #ef6b73;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+  font: 14px/1.5 "Segoe UI Variable Text", "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif; }
+button, input { font: inherit; color: inherit; }
+svg.i { width: 18px; height: 18px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.app { display: grid; grid-template-columns: 230px 1fr; min-height: 100%; }
+.side { background: var(--side); border-right: 1px solid var(--line); padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 18px; }
+.logo { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #5b9dff, #8b6bff); display: grid; place-items: center; color: #fff; }
+.brand b { font-size: 16px; display: block; } .brand span { color: var(--muted); font-size: 12px; }
+.nav { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 8px; color: var(--sub); cursor: pointer; border: 0; background: none; text-align: left; width: 100%; }
+.nav:hover { background: var(--card); color: var(--text); }
+.nav.on { background: #26324a; color: var(--text); }
+.side .grow { flex: 1; }
+.main { padding: 26px 32px 40px; overflow: auto; }
+h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+.lead { color: var(--muted); margin: 0 0 22px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 18px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.stat b { font-size: 22px; font-weight: 600; display: block; } .stat span { color: var(--muted); font-size: 12.5px; }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-bottom: 18px; overflow: hidden; }
+.panel h2 { font-size: 15px; margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; font-weight: 600; }
+.panel h2 .sp { flex: 1; }
+.panel .body { padding: 6px 18px 14px; }
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12.5px; padding: 8px 18px; border-bottom: 1px solid var(--line); }
+td { padding: 11px 18px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+tr:last-child td { border-bottom: 0; }
+.sub { color: var(--muted); font-size: 12.5px; }
+.btn { background: var(--card2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 14px; cursor: pointer; }
+.btn:hover { background: #2f3542; }
+.btn.pri { background: var(--blue); border-color: var(--blue); color: #fff; }
+.btn.pri:hover { background: #4a8cf0; }
+.btn.danger { color: var(--red); }
+.btn.sm { padding: 4px 10px; font-size: 12.5px; }
+.field { display: grid; grid-template-columns: 170px 1fr; gap: 6px 18px; align-items: start; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.field:last-of-type { border-bottom: 0; }
+.field label { font-weight: 600; padding-top: 6px; cursor: help; }
+.field .desc { color: var(--muted); font-size: 12.5px; grid-column: 2; }
+input[type=text], input[type=number], input[type=password] { background: #14171c; border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; width: 100%; max-width: 420px; }
+input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--green); margin-right: 6px; }
+.dot.old { background: var(--muted); }
+.log { font: 12.5px/1.6 Consolas, "D2Coding", monospace; color: var(--sub); white-space: pre-wrap; max-height: 560px; overflow: auto; padding: 14px 18px; }
+.log .e { color: var(--red); }
+.empty { color: var(--muted); padding: 22px 18px; text-align: center; }
+.toast { position: fixed; right: 24px; bottom: 24px; background: #26324a; border: 1px solid #3b5f99; padding: 10px 16px; border-radius: 10px; display: none; max-width: 420px; }
+.toast.err { background: #3a2226; border-color: #7a3a42; }
+.modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; place-items: center; padding: 16px; }
+.modal.on { display: grid; }
+.dlg { background: var(--card); border: 1px solid var(--line); border-radius: 14px; width: min(560px, 100%); max-height: 86vh; display: flex; flex-direction: column; }
+.dlg h3 { margin: 0; padding: 16px 20px; border-bottom: 1px solid var(--line); font-size: 16px; }
+.dlg .body { padding: 14px 20px; overflow: auto; }
+.dlg .foot { padding: 12px 20px; border-top: 1px solid var(--line); display: flex; gap: 8px; justify-content: flex-end; }
+.crumb { color: var(--sub); font-size: 13px; margin-bottom: 8px; word-break: break-all; }
+.crumb a { color: var(--blue); cursor: pointer; }
+.dirs { border: 1px solid var(--line); border-radius: 10px; max-height: 320px; overflow: auto; }
+.dirs div { padding: 8px 12px; cursor: pointer; display: flex; gap: 8px; align-items: center; border-bottom: 1px solid var(--line); }
+.dirs div:last-child { border-bottom: 0; }
+.dirs div:hover { background: var(--card2); }
+.dirs svg.i { color: #e9b949; }
+.login { max-width: 420px; margin: 12vh auto; }
+.token { font: 13px Consolas, monospace; background: #14171c; border: 1px solid var(--line); border-radius: 8px; padding: 10px; word-break: break-all; user-select: all; }
+* { scrollbar-width: thin; scrollbar-color: #3a414d transparent; }
+@media (max-width: 760px) { .app { grid-template-columns: 1fr; } .side { flex-direction: row; overflow-x: auto; scrollbar-width: none; border-right: 0; border-bottom: 1px solid var(--line); } .brand, .side .grow { display: none; } .nav { width: auto; white-space: nowrap; } .main { padding: 18px 16px; } .field { grid-template-columns: 1fr; } .field .desc { grid-column: 1; } }
+</style>
+</head>
+<body>
+<div id="login" class="login card" style="display:none">
+  <div class="brand"><div class="logo">{{SYNC}}</div><div><b>Mydrive 관리 콘솔</b><span>NAS 동기화 서버</span></div></div>
+  <div class="desc" style="margin:0 0 14px">NAS(DSM) <b>관리자 계정</b>으로 들어갑니다. 한 번 들어오면 이 브라우저는 30일 동안 기억합니다.</div>
+  <div class="field" style="grid-template-columns:1fr"><label title="DSM에 로그인할 때 쓰는 아이디입니다. administrators 그룹에 든 계정만 들어올 수 있습니다.">DSM 아이디</label>
+    <input id="dsmUser" type="text" autocomplete="username" placeholder="예: admin"></div>
+  <div class="field" style="grid-template-columns:1fr"><label title="비밀번호는 서버가 DSM에 확인만 하고 저장하지 않습니다.">비밀번호</label>
+    <input id="dsmPass" type="password" autocomplete="current-password"></div>
+  <div class="field" id="otpRow" style="grid-template-columns:1fr;display:none"><label title="DSM 2단계 인증을 켠 계정이면 인증 앱의 6자리 숫자를 넣습니다.">2단계 인증 코드</label>
+    <input id="dsmOtp" inputmode="numeric" autocomplete="one-time-code" placeholder="6자리"></div>
+  <div class="desc" id="loginWhy" style="margin:0 0 12px;color:var(--sub)"></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn pri" id="dsmBtn">들어가기</button></div>
+  <details style="margin-top:16px"><summary class="desc" style="cursor:pointer">관리 토큰으로 들어가기</summary>
+    <div class="field" style="grid-template-columns:1fr;margin-top:10px"><label title="서버의 관리 토큰(MYDRIVE_ADMIN_TOKEN)입니다. PC 앱이 쓰는 동기화 토큰과는 다릅니다.">관리 토큰</label>
+      <input id="tok" type="password" placeholder="관리 토큰을 붙여 넣으세요" autocomplete="off">
+      <div class="desc" style="grid-column:1">이 브라우저에만 기억합니다. 공용 PC에서는 다 쓴 뒤 [로그아웃]을 누르세요.</div></div>
+    <div class="row" style="justify-content:flex-end"><button class="btn" id="loginBtn">토큰으로 들어가기</button></div>
+  </details>
+</div>
+
+<div id="app" class="app" style="display:none">
+  <aside class="side">
+    <div class="brand"><div class="logo">{{SYNC}}</div><div><b>Mydrive</b><span id="ver">관리 콘솔</span></div></div>
+    <button class="nav on" data-p="over">{{HOME}}개요</button>
+    <button class="nav" data-p="roots">{{FOLDER}}동기화 폴더</button>
+    <button class="nav" data-p="ver">{{HIST}}버전 보관</button>
+    <button class="nav" data-p="pcs">{{PC}}접속한 PC</button>
+    <button class="nav" data-p="log">{{LOG}}서버 기록</button>
+    <button class="nav" data-p="sec">{{KEY}}보안</button>
+    <div class="grow"></div>
+    <button class="nav" id="logoutBtn">{{OUT}}로그아웃</button>
+  </aside>
+  <main class="main">
+    <section id="p-over">
+      <h1>개요</h1><p class="lead">Mydrive 서버 상태입니다. 5초마다 새로 고칩니다.</p>
+      <div class="cards" id="stats"></div>
+      <div class="panel"><h2>동기화 폴더<span class="sp"></span><button class="btn sm" data-go="roots">관리</button></h2><table id="rootsMini"></table></div>
+      <div class="panel"><h2>최근 접속한 PC<span class="sp"></span><button class="btn sm" data-go="pcs">모두 보기</button></h2><table id="pcsMini"></table></div>
+    </section>
+
+    <section id="p-roots" style="display:none">
+      <h1>동기화 폴더</h1><p class="lead">PC 앱이 맞출 수 있는 NAS 폴더입니다. 빼도 NAS의 파일은 그대로 남습니다.</p>
+      <div class="panel"><h2>목록<span class="sp"></span><button class="btn pri sm" id="addBtn">+ 폴더 추가</button></h2><table id="rootsFull"></table></div>
+    </section>
+
+    <section id="p-ver" style="display:none">
+      <h1>버전 보관</h1><p class="lead">파일을 고치거나 지우기 전의 판을 NAS에 남겨 두는 규칙입니다. 시놀로지 드라이브의 '버전 관리'와 같습니다.</p>
+      <div class="panel"><div class="body">
+        <div class="field"><label title="한 파일에 남겨 둘 이전 판의 최대 개수입니다. 넘으면 가장 오래된 판부터 지웁니다. 0이면 개수 제한 없음.">파일마다 최대 판 수</label>
+          <div class="row"><input id="maxCount" type="number" min="0" style="max-width:120px"> <span class="sub">개</span></div>
+          <div class="desc">한 파일에 남길 이전 판의 수. 넘으면 오래된 것부터 지웁니다.</div></div>
+        <div class="field"><label title="이보다 오래된 판은 지웁니다. 하루 안의 판은 모두, 30일 안은 하루에 하나, 그 뒤로는 일주일에 하나씩 남깁니다(시놀로지 '지능형 버전 관리'와 같은 방식).">보관 기간</label>
+          <div class="row"><input id="keepDays" type="number" min="0" style="max-width:120px"> <span class="sub">일</span></div>
+          <div class="desc">이보다 오래된 판은 지웁니다. 하루 안은 모두, 30일 안은 하루 1개, 그 뒤는 주 1개씩 남깁니다.</div></div>
+        <div class="row" style="justify-content:flex-end;padding-top:12px"><button class="btn pri" id="polBtn">저장</button></div>
+      </div></div>
+      <div class="panel"><h2>폴더별 버전 용량</h2><table id="verUse"></table></div>
+    </section>
+
+    <section id="p-pcs" style="display:none">
+      <h1>접속한 PC</h1><p class="lead">서버가 켜진 뒤 접속한 PC 앱입니다. 1분 안에 접속한 PC는 초록 점으로 표시합니다.</p>
+      <div class="panel"><table id="pcsFull"></table></div>
+      <div class="panel"><h2>DSM 계정으로 연결한 PC</h2><p class="sub" style="margin:0 16px 8px">PC 앱에서 [DSM 계정으로 연결]을 하면 그 PC 전용 열쇠가 생깁니다. PC를 잃어버리거나 더 쓰지 않으면 [끊기]로 그 PC만 막을 수 있습니다.</p><table id="devs"></table></div>
+    </section>
+
+    <section id="p-log" style="display:none">
+      <h1>서버 기록</h1><p class="lead">최근 200줄입니다.</p>
+      <div class="panel"><h2>기록<span class="sp"></span><button class="btn sm" id="logBtn">새로 고침</button></h2><div class="log" id="log"></div></div>
+    </section>
+
+    <section id="p-sec" style="display:none">
+      <h1>보안</h1><p class="lead">토큰은 서버에 들어오는 열쇠입니다. 새로 만들면 예전 토큰은 바로 쓸 수 없게 됩니다.</p>
+      <div class="panel"><div class="body">
+        <div class="field"><label title="PC 앱 설정에 토큰을 직접 넣어 연결한 PC가 쓰는 공용 토큰입니다. DSM 계정으로 연결한 PC는 각자 전용 열쇠를 써서 이 토큰과 상관없습니다.">공용 동기화 토큰</label>
+          <div class="row"><button class="btn danger" data-tok="sync">새로 만들기…</button></div>
+          <div class="desc">토큰을 직접 넣어 연결한 PC가 쓰는 토큰입니다. 바꾸면 그런 PC는 새 토큰을 넣거나 DSM 계정으로 다시 연결해야 합니다.</div></div>
+        <div class="field"><label title="이 관리 콘솔에 들어올 때 쓰는 토큰입니다. 새로 만들면 이 브라우저는 새 토큰으로 바로 다시 로그인됩니다.">관리 토큰</label>
+          <div class="row"><button class="btn danger" data-tok="admin">새로 만들기…</button></div>
+          <div class="desc">이 콘솔에 들어오는 토큰입니다. 새 토큰은 한 번만 보여 줍니다.</div></div>
+        <div class="field"><label title="서버 프로그램만 다시 시작합니다(컨테이너가 자동으로 다시 켬). 파일·설정은 그대로입니다.">서버 다시 시작</label>
+          <div class="row"><button class="btn" id="rsBtn">다시 시작…</button></div>
+          <div class="desc">서버만 다시 켭니다. 몇 초 동안 동기화가 멈췄다가 이어집니다.</div></div>
+      </div></div>
+    </section>
+  </main>
+</div>
+
+<div id="mAdd" class="modal"><div class="dlg">
+  <h3>동기화 폴더 추가</h3>
+  <div class="body">
+    <div class="crumb" id="crumb"></div>
+    <div class="dirs" id="dirs"></div>
+    <div class="field" style="grid-template-columns:90px 1fr;margin-top:10px"><label title="PC 앱에서 이 폴더를 부를 이름입니다. 글자·숫자·_·- 로 40자까지.">이름</label>
+      <input id="newName" type="text" placeholder="예: desktop"><div class="desc">PC 앱의 '동기화할 폴더' 목록에 나오는 이름입니다.</div></div>
+    <div class="sub">고른 폴더: <b id="picked" style="color:var(--text)"></b></div>
+  </div>
+  <div class="foot"><button class="btn" data-close="mAdd">취소</button><button class="btn pri" id="addOk">추가</button></div>
+</div></div>
+
+<div id="mTok" class="modal"><div class="dlg">
+  <h3>새 토큰</h3>
+  <div class="body"><p id="tokMsg" style="margin-top:0"></p><div class="token" id="tokVal"></div></div>
+  <div class="foot"><button class="btn" id="copyBtn">복사</button><button class="btn pri" data-close="mTok">닫기</button></div>
+</div></div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const ICON_FOLDER = `{{FOLDER}}`;
+const $ = (id) => document.getElementById(id);
+let TOKEN = '';
+try { TOKEN = localStorage.getItem('mdAdmin') || ''; } catch (e) {}
+let INFO = null, browsePath = '', browseBase = '';
+
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function size(b) { const u = ['B','KB','MB','GB','TB']; let i = 0; b = Number(b) || 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return (i ? b.toFixed(b < 10 ? 1 : 0) : b) + ' ' + u[i]; }
+function ago(ns) { const s = (Date.now() - ns / 1e6) / 1000; if (s < 60) return '방금'; if (s < 3600) return Math.floor(s / 60) + '분 전'; if (s < 86400) return Math.floor(s / 3600) + '시간 전'; return Math.floor(s / 86400) + '일 전'; }
+function uptime(ns) { const s = (Date.now() - ns / 1e6) / 1000; if (s < 3600) return Math.max(1, Math.floor(s / 60)) + '분'; if (s < 86400) return Math.floor(s / 3600) + '시간'; return Math.floor(s / 86400) + '일'; }
+function toast(msg, err) { const t = $('toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : ''); t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500); }
+
+async function api(path, body) {
+  const h = { 'X-Mydrive-Console': '1' };   // DSM 로그인으로 들어올 때 필요 (다른 사이트가 몰래 부르지 못하게)
+  if (TOKEN) h['Authorization'] = 'Bearer ' + TOKEN;
+  if (body) h['Content-Type'] = 'application/json';
+  const r = await fetch(path, { method: body ? 'POST' : 'GET', headers: h, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) { showLogin(); throw new Error(TOKEN ? '관리 토큰이 맞지 않습니다' : '다시 로그인해 주세요'); }
+  if (!r.ok) throw new Error(j.msg || ('오류 ' + r.status));
+  return j;
+}
+
+function showLogin() { clearInterval(timer); $('app').style.display = 'none'; $('login').style.display = 'block'; }
+async function login() {
+  TOKEN = $('tok').value.trim();
+  try { WHO = (await api('/v1/admin/whoami')).user || ''; try { localStorage.setItem('mdAdmin', TOKEN); } catch (e) {} start(); }
+  catch (e) { toast(e.message, true); }
+}
+$('loginBtn').onclick = login;
+$('tok').onkeydown = (e) => { if (e.key === 'Enter') login(); };
+// DSM 아이디·비밀번호로 들어가기 → 서버가 30일 쿠키를 줌
+async function dsmLogin() {
+  const b = { account: $('dsmUser').value.trim(), passwd: $('dsmPass').value, otp: $('dsmOtp').value.trim() };
+  if (!b.account || !b.passwd) { toast('DSM 아이디와 비밀번호를 넣어 주세요', true); return; }
+  $('dsmBtn').disabled = true; $('dsmBtn').textContent = '확인 중…';
+  try {
+    const r = await fetch('/v1/admin/login', { method: 'POST', headers: { 'X-Mydrive-Console': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(b), credentials: 'same-origin' });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { if (j.error === 'otp') { $('otpRow').style.display = ''; $('dsmOtp').focus(); } throw new Error(j.msg || ('오류 ' + r.status)); }
+    $('dsmPass').value = ''; $('dsmOtp').value = ''; TOKEN = ''; WHO = j.user || ''; start();
+  } catch (e) { toast(e.message, true); }
+  finally { $('dsmBtn').disabled = false; $('dsmBtn').textContent = '들어가기'; }
+}
+$('dsmBtn').onclick = dsmLogin;
+['dsmUser', 'dsmPass', 'dsmOtp'].forEach(id => $(id).onkeydown = (e) => { if (e.key === 'Enter') dsmLogin(); });
+$('logoutBtn').onclick = async () => {
+  try { localStorage.removeItem('mdAdmin'); } catch (e) {}
+  TOKEN = '';
+  try { await fetch('/v1/admin/logout', { method: 'POST', headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' }); } catch (e) {}
+  showLogin();
+};
+
+function show(p) {
+  document.querySelectorAll('.nav[data-p]').forEach(b => b.classList.toggle('on', b.dataset.p === p));
+  document.querySelectorAll('main > section').forEach(s => s.style.display = s.id === 'p-' + p ? '' : 'none');
+}
+document.querySelectorAll('.nav[data-p]').forEach(b => b.onclick = () => show(b.dataset.p));
+document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => show(b.dataset.go));
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).classList.remove('on'));
+
+async function refresh() {
+  try { INFO = await api('/v1/admin/info'); render(); } catch (e) { toast(e.message, true); return; }
+  try { const d = await api('/v1/admin/devices'); renderDevs(d.devices || []); } catch (e) {}
+}
+function renderDevs(ds) {
+  $('devs').innerHTML = ds.length ? '<tr><th>PC</th><th>DSM 사용자</th><th>연결한 날</th><th>마지막 사용</th><th></th></tr>' + ds.map(d => `<tr><td><b>${esc(d.pc)}</b></td><td class="sub">${esc(d.user)}</td><td class="sub">${new Date(d.created / 1e6).toLocaleDateString()}</td><td>${d.last ? ago(d.last) : '-'}</td><td style="text-align:right"><button class="btn sm danger" data-rev="${esc(d.id)}" data-pc="${esc(d.pc)}">끊기</button></td></tr>`).join('') : '<tr><td class="empty">아직 없습니다</td></tr>';
+  document.querySelectorAll('[data-rev]').forEach(b => b.onclick = async () => {
+    if (!confirm(`'${b.dataset.pc}' PC의 연결을 끊을까요?\n\n그 PC의 Mydrive는 바로 동기화를 멈춥니다. 다시 쓰려면 그 PC에서 DSM 계정으로 다시 연결하면 됩니다.`)) return;
+    try { await api('/v1/admin/devices', { revoke: b.dataset.rev }); toast('끊었습니다'); refresh(); } catch (e) { toast(e.message, true); }
+  });
+}
+$('logBtn').onclick = refresh;
+
+function render() {
+  const i = INFO;
+  $('ver').textContent = 'mydrived ' + i.version + (WHO ? ' · ' + WHO : '');
+  const files = i.roots.reduce((a, r) => a + r.items, 0), vb = i.roots.reduce((a, r) => a + r.verBytes, 0);
+  const live = i.clients.filter(c => Date.now() - c.last / 1e6 < 60000).length;
+  $('stats').innerHTML = [
+    [uptime(i.started) + '째', '켜져 있음', 'var(--green)'],
+    [i.roots.length + '개', '동기화 폴더'],
+    [files.toLocaleString() + '개', '파일·폴더'],
+    [size(vb), '버전 보관 용량'],
+    [live + '대', '지금 접속한 PC'],
+  ].map(([b, s, c]) => `<div class="card stat"><b style="${c ? 'color:' + c : ''}">${esc(b)}</b><span>${esc(s)}</span></div>`).join('');
+  const head = (full) => `<tr><th>이름 / NAS 폴더</th><th>항목</th><th>버전</th>${full ? '<th></th>' : ''}</tr>`;
+  const row = (r, full) => `<tr><td><b>${esc(r.name)}</b><div class="sub">${esc(r.dir)}</div></td><td>${r.items.toLocaleString()}개</td><td>${size(r.verBytes)} <span class="sub">(${r.verFiles.toLocaleString()}개)</span></td>${full ? `<td style="text-align:right"><button class="btn sm danger" data-rm="${esc(r.name)}">빼기</button></td>` : ''}</tr>`;
+  $('rootsMini').innerHTML = i.roots.length ? head(false) + i.roots.map(r => row(r, false)).join('') : '<tr><td class="empty">아직 없습니다</td></tr>';
+  $('rootsFull').innerHTML = i.roots.length ? head(true) + i.roots.map(r => row(r, true)).join('') : '<tr><td class="empty">아직 없습니다. [+ 폴더 추가]로 NAS 폴더를 고르세요.</td></tr>';
+  $('verUse').innerHTML = head(false) + i.roots.map(r => row(r, false)).join('');
+  document.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => removeRoot(b.dataset.rm));
+  const pcRow = c => `<tr><td><span class="dot ${Date.now() - c.last / 1e6 < 60000 ? '' : 'old'}"></span><b>${esc(c.pc)}</b></td><td class="sub">${esc(c.ip)}</td><td>${ago(c.last)}</td><td class="sub">요청 ${c.calls.toLocaleString()}번</td></tr>`;
+  const pcHead = '<tr><th>PC</th><th>주소</th><th>마지막 접속</th><th></th></tr>';
+  $('pcsMini').innerHTML = i.clients.length ? pcHead + i.clients.slice(0, 5).map(pcRow).join('') : '<tr><td class="empty">아직 접속한 PC가 없습니다</td></tr>';
+  $('pcsFull').innerHTML = i.clients.length ? pcHead + i.clients.map(pcRow).join('') : '<tr><td class="empty">아직 접속한 PC가 없습니다</td></tr>';
+  const lg = $('log'); const atEnd = lg.scrollTop + lg.clientHeight >= lg.scrollHeight - 20;
+  lg.innerHTML = i.log.map(l => `<div class="${/실패|오류|error/i.test(l) ? 'e' : ''}">${esc(l)}</div>`).join('');
+  if (atEnd) lg.scrollTop = lg.scrollHeight;
+  if (document.activeElement !== $('maxCount') && document.activeElement !== $('keepDays')) { $('maxCount').value = i.policy.maxCount; $('keepDays').value = i.policy.keepDays; }
+}
+
+$('polBtn').onclick = async () => {
+  try { await api('/v1/admin/policy', { maxCount: +$('maxCount').value, keepDays: +$('keepDays').value }); toast('버전 보관 규칙을 저장했습니다'); refresh(); }
+  catch (e) { toast(e.message, true); }
+};
+
+async function browse(p) {
+  try {
+    const j = await api('/v1/admin/browse?path=' + encodeURIComponent(p || ''));
+    browsePath = j.path; browseBase = j.base;
+    const rel = j.path.slice(j.base.length).split('/').filter(Boolean);
+    let acc = j.base;
+    const crumbs = [`<a data-b="${esc(j.base)}">NAS</a>`].concat(rel.map(seg => { acc += '/' + seg; return `<a data-b="${esc(acc)}">${esc(seg)}</a>`; }));
+    $('crumb').innerHTML = crumbs.join(' / ');
+    $('dirs').innerHTML = j.dirs.length ? j.dirs.map(d => `<div data-b="${esc(j.path + '/' + d)}">${ICON_FOLDER}${esc(d)}</div>`).join('') : '<div style="cursor:default;color:var(--muted)">하위 폴더 없음</div>';
+    document.querySelectorAll('#crumb [data-b], #dirs [data-b]').forEach(el => el.onclick = () => browse(el.dataset.b));
+    $('picked').textContent = j.path === j.base ? '(공유 폴더 안의 폴더를 고르세요)' : j.path.slice(j.base.length);
+    if (j.path !== j.base && !$('newName').dataset.touched) $('newName').value = rel[rel.length - 1].toLowerCase().replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 40);
+  } catch (e) { toast(e.message, true); }
+}
+$('addBtn').onclick = () => { $('newName').value = ''; delete $('newName').dataset.touched; $('mAdd').classList.add('on'); browse(''); };
+$('newName').oninput = () => $('newName').dataset.touched = '1';
+$('addOk').onclick = async () => {
+  if (browsePath === browseBase) return toast('NAS 폴더를 고르세요', true);
+  try { await api('/v1/admin/roots', { add: { name: $('newName').value.trim(), dir: browsePath } }); $('mAdd').classList.remove('on'); toast('동기화 폴더를 추가했습니다'); refresh(); }
+  catch (e) { toast(e.message, true); }
+};
+async function removeRoot(n) {
+  if (!confirm(`'${n}' 동기화 폴더를 뺄까요?\n\nNAS의 파일은 그대로 남습니다. 이 폴더를 맞추던 PC 앱은 더 이상 맞추지 않습니다.`)) return;
+  try { await api('/v1/admin/roots', { remove: n }); toast('뺐습니다 (파일은 그대로)'); refresh(); } catch (e) { toast(e.message, true); }
+}
+document.querySelectorAll('[data-tok]').forEach(b => b.onclick = async () => {
+  const which = b.dataset.tok, what = which === 'sync' ? '동기화 토큰' : '관리 토큰';
+  if (!confirm(`${what}을 새로 만들까요?\n\n예전 토큰은 바로 쓸 수 없게 됩니다.` + (which === 'sync' ? '\n모든 PC 앱의 설정에 새 토큰을 넣어야 다시 맞춥니다.' : ''))) return;
+  try {
+    const j = await api('/v1/admin/token', { which });
+    if (which === 'admin') { TOKEN = j.token; try { localStorage.setItem('mdAdmin', TOKEN); } catch (e) {} }
+    $('tokMsg').textContent = `새 ${what}입니다. 이 창을 닫으면 다시 볼 수 없으니 지금 복사해 두세요.`;
+    $('tokVal').textContent = j.token; $('mTok').classList.add('on');
+  } catch (e) { toast(e.message, true); }
+});
+$('copyBtn').onclick = () => navigator.clipboard && navigator.clipboard.writeText($('tokVal').textContent).then(() => toast('복사했습니다'));
+$('rsBtn').onclick = async () => {
+  if (!confirm('서버를 다시 시작할까요? 몇 초 동안 동기화가 멈췄다가 이어집니다.')) return;
+  try { await api('/v1/admin/restart', {}); } catch (e) {}
+  toast('다시 시작하는 중…'); setTimeout(refresh, 5000);
+};
+
+let timer = null, WHO = '';
+function start() { $('login').style.display = 'none'; $('app').style.display = ''; refresh(); clearInterval(timer); timer = setInterval(refresh, 5000); }
+// 처음: DSM 관리자 로그인(쿠키)으로 들어올 수 있는지 먼저 보고, 안 되면 저장해 둔 관리 토큰, 그것도 없으면 로그인 화면
+(async () => {
+  const saved = TOKEN; TOKEN = '';
+  try {
+    const w = await fetch('/v1/admin/whoami', { headers: { 'X-Mydrive-Console': '1' }, credentials: 'same-origin' });
+    if (w.ok) { WHO = (await w.json()).user || ''; return start(); }
+    const j = await w.json().catch(() => ({}));
+    // DSM 세션은 브라우저 IP에 묶여 있어서(코드 119) 서버가 대신 확인할 수 없음 → 그때는 조용히 로그인 화면만
+    if (j.msg && /관리자 계정이 아닙니다/.test(j.msg)) $('loginWhy').textContent = j.msg;
+  } catch (e) {}
+  TOKEN = saved;
+  if (TOKEN) { try { WHO = (await api('/v1/admin/whoami')).user || ''; } catch (e) { return; } start(); } else showLogin();
+})();
+</script>
+</body>
+</html>

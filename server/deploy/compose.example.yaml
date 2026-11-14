@@ -1,0 +1,27 @@
+# Synology Container Manager 프로젝트 예시. 실제 값은 compose.yaml 에 (GitHub 에 올리지 않음)
+#   토큰 만들기: openssl rand -base64 24 | tr -d '/+=' | cut -c1-32
+services:
+  mydrived:
+    image: alpine:3.20
+    container_name: mydrived
+    command: ["/bin/sh", "-c", "cp /app/mydrived /tmp/mydrived && chmod +x /tmp/mydrived && exec /tmp/mydrived"]
+    user: "1026:100"
+    group_add:
+      - "101"
+    environment:
+      MYDRIVE_TOKEN: "<동기화 토큰 32자>"
+      MYDRIVE_ADMIN_TOKEN: "<관리 콘솔 토큰 32자>"
+      MYDRIVE_ROOTS: "test=/data/MydriveTest"
+      MYDRIVE_STATE: /state
+      MYDRIVE_NAS_BASE: /nas
+      MYDRIVE_RESCAN: 15m
+      MYDRIVE_FSYNC: "0"
+      # MYDRIVE_UPDATES: /app/updates   # PC 앱 새 판 폴더 (기본값, = /docker/mydrive/bin/updates)
+    volumes:
+      - /volume1/docker/mydrive/bin:/app:ro
+      - /volume1/docker/mydrive/state:/state
+      - /volume1/docker/mydrive/MydriveTest:/data/MydriveTest
+      - /volume1:/nas
+    ports:
+      - "8642:8642"
+    restart: unless-stopped

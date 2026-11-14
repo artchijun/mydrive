@@ -1,0 +1,28 @@
+#include <windows.h>
+#pragma code_page(65001)
+#include "version.h"
+1 ICON "mydrive.ico"
+1 RT_MANIFEST "app.manifest"
+10 RCDATA "build\\Mydrive.exe"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION MYDRIVE_VERSION_RC
+ PRODUCTVERSION MYDRIVE_VERSION_RC
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "041204b0"
+    BEGIN
+      VALUE "FileDescription", "Mydrive 설치"
+      VALUE "ProductName", "Mydrive"
+      VALUE "FileVersion", MYDRIVE_VERSION_STR
+      VALUE "ProductVersion", MYDRIVE_VERSION_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x412, 1200
+  END
+END

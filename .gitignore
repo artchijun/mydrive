@@ -1,0 +1,21 @@
+# 빌드 결과
+client/build/
+server/build/
+server/mydrived
+*.obj
+*.res
+*.pdb
+*.ilk
+__pycache__/
+*.pyc
+
+# 설치 파일·패키지 (GitHub 에는 소스만)
+*.exe
+*.spk
+_이전 설치파일/
+
+# 비밀 값 (토큰이 들어 있음) — 예시: server/deploy/compose.example.yaml
+server/deploy/compose.yaml
+server/deploy/token.txt
+*.token
+.env
