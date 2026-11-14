@@ -614,7 +614,7 @@ bool Engine::RunPass() {
         const RemoteE* r = ri == remote_.end() ? nullptr : &ri->second;
         const BaseE* b = bi == base_.end() ? nullptr : &bi->second;
         if (r && (BadWinName(p) || SkipRemoteRel(p))) {
-            if (!l && !b) { if (warned_.insert(p).second) Event("건너뜀", p, "Windows 에서 쓸 수 없는 이름"); }
+            if (!l && !b) { if (warned_.insert(p).second) Event("건너뜀", p, BadWinName(p) ? "Windows 에서 쓸 수 없는 이름" : "임시·잠금 파일이라 맞추지 않음 (.tmp · ~$ · desktop.ini · Thumbs.db)"); }
             continue;
         }
         // NAS 에 대소문자만 다른 이름이 둘 이상 (Windows 에서는 같은 이름): 정렬해서 첫 것만 맞추고 나머지는 건너뜀
