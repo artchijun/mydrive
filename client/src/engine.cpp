@@ -232,6 +232,8 @@ bool Engine::RefreshRemote() {
 // ---------- 로컬 폴더 훑기 (폴더 하나를 한 번에 읽는 방식: 이름·크기·시각·파일 번호를 같이 받음) ----------
 bool Engine::ScanLocal() {
     std::map<std::string, LocalE> out;
+    std::vector<std::string> exclPlain;
+    int64_t nowNs; { FILETIME ft; GetSystemTimeAsFileTime(&ft); nowNs = FtToNs(ft); }
     std::vector<std::string> stack{""};
     std::vector<char> buf(256 * 1024);
     DWORD attr = GetFileAttributesW(Abs(cfg_.localRoot, "").c_str());
@@ -265,6 +267,10 @@ bool Engine::ScanLocal() {
                 // 링크(정션 등)는 따라가지 않음. 단, 탐색기 연동의 자리표시 파일(클라우드 파일)은 보통 파일처럼 다룸
                 // (FILE_ATTRIBUTE_REPARSE_POINT 이면 EaSize 칸에 재분석 태그가 들어 있음)
                 bool link = (e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud::IsCloudReparse(e->FileAttributes, e->EaSize);
+                // 체크로 뺀 종류의 보통 파일(자리표시 아님): 1분 넘게 그대로면 탐색기 표시만 고칠 대상 (저장 중인 임시 파일은 건드리지 않음)
+                if (!(e->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) && !AlwaysSkipName(n) &&
+                    (SkipKind(n) & g_skipMask.load()) && nowNs - FtToNs(*(FILETIME*)&e->LastWriteTime) > 60000000000LL && exclPlain.size() < 500)
+                    exclPlain.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
                 if (n != L"." && n != L".." && !SkipLocalName(n) && !link) {
                     std::string rel = dir.empty() ? U(n) : dir + "/" + U(n);
                     LocalE l;
@@ -289,6 +295,7 @@ bool Engine::ScanLocal() {
         CloseHandle(h);
     }
     local_ = std::move(out);
+    exclPlain_ = std::move(exclPlain);
     return true;
 }
 
@@ -926,6 +933,13 @@ bool Engine::RunPass() {
     { std::lock_guard<std::mutex> g(xMu_); stats.waiting = (int)waitNote_.size(); }
     if (dirty_) Save();
     SaveOpened();
+    // 뺀 파일 때문에 폴더가 탐색기에 '동기화 중'으로 남지 않게: 그 파일을 '이 PC에만 · 맞춰짐'으로 표시
+    if (cloudOn_ && !unregister_ && !exclPlain_.empty()) {
+        int n = 0;
+        for (auto& p : exclPlain_) if (!stop_ && cloud::MarkExcluded(Abs(cfg_.localRoot, p))) n++;
+        if (n) LOG("[%s] 동기화에서 뺀 파일 %d개를 탐색기에 '이 PC에만'으로 표시", cfg_.name.c_str(), n);
+        exclPlain_.clear();
+    }
     if (!healed_ && !stop_) { healed_ = true; L.unlock(); HealInSync(); }
     return any;
 }

@@ -298,6 +298,17 @@ void RefreshShell(const std::wstring& path) {
     std::wstring p = path.compare(0, 4, L"\\\\?\\") == 0 ? path.substr(4) : path;
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT, p.c_str(), nullptr);
 }
+bool MarkExcluded(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;   // 다른 프로그램이 쓰는 중 → 다음에
+    char id[] = "x";
+    HRESULT hr = CfConvertToPlaceholder(h, id, 1, CF_CONVERT_FLAG_MARK_IN_SYNC, nullptr, nullptr);
+    if (SUCCEEDED(hr)) hr = CfSetPinState(h, CF_PIN_STATE_PINNED, CF_SET_PIN_FLAG_NONE, nullptr);
+    CloseHandle(h);
+    if (SUCCEEDED(hr)) RefreshShell(path);
+    return SUCCEEDED(hr);
+}
 int InSyncState(const std::wstring& path, bool dir) {
     HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                            dir ? FILE_FLAG_BACKUP_SEMANTICS : 0, nullptr);

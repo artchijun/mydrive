@@ -47,6 +47,7 @@ struct AppCfg {
     int quietSec = 2, maxDeferSec = 30, rescanMin = 5;
     int upKBps = 0, downKBps = 0;
     bool autoUpdate = true;     // 새 판이 나오면 자동으로 설치
+    int skipMask = 15;          // 맞추지 않을 임시·시스템 파일 종류 (1 .tmp, 2 잠금 파일, 4 desktop.ini, 8 Thumbs.db)
 };
 static AppCfg g_cfg;
 static std::wstring g_activeServer;   // 지금 쓰는 주소 (비어 있으면 g_cfg.server)
@@ -97,6 +98,7 @@ static void LoadCfg() {
     g_cfg.upKBps = j.value("upKBps", 0);
     g_cfg.downKBps = j.value("downKBps", 0);
     g_cfg.autoUpdate = j.value("autoUpdate", true);
+    g_cfg.skipMask = j.value("skipBuiltin", 15);
     g_cfg.conns.clear();
     for (auto& c : j.value("connections", json::array())) {
         Conn x; x.name = c.value("name", std::string()); x.local = W(c.value("local", std::string()));
@@ -115,7 +117,7 @@ static void SaveCfg() {
     j["server"] = U(g_cfg.server); j["serverAlt"] = U(g_cfg.serverAlt); j["token"] = g_cfg.token; j["pairUser"] = g_cfg.pairUser; j["massDeleteLimit"] = g_cfg.limit; j["startWithWindows"] = g_cfg.startup;
     j["excludes"] = U(g_cfg.excludes); j["maxFileSizeMB"] = g_cfg.maxSizeMB; j["autoFreeDays"] = g_cfg.autoFreeDays;
     j["quietSec"] = g_cfg.quietSec; j["maxDeferSec"] = g_cfg.maxDeferSec; j["rescanMin"] = g_cfg.rescanMin;
-    j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate;
+    j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
         j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}});
@@ -212,6 +214,7 @@ static void RemoveOldUserVerbs();   // tools.inc
 static void StartEngines() {
     StopEngines();
     SetRateLimit((int64_t)g_cfg.upKBps * 1024, (int64_t)g_cfg.downKBps * 1024);
+    g_skipMask = (unsigned)g_cfg.skipMask;
     int rank = 0;
     for (auto& c : g_cfg.conns) {
         if (c.name.empty() || c.local.empty()) continue;
@@ -591,7 +594,7 @@ enum { IDS_SERVER = 500, IDS_TOKEN, IDS_TEST, IDS_TESTRES, IDS_LIST, IDS_ROOT, I
        IDS_LIMIT, IDS_STARTUP, IDS_SAVE, IDS_CANCEL, IDS_TAB, IDS_PICK, IDS_PRIO, IDS_HIGH, IDS_EXCL, IDS_MAXSIZE,
        IDS_QUIET, IDS_DEFER, IDS_RESCAN, IDS_UP, IDS_DOWN, IDS_ONDEMAND, IDS_KEEP, IDS_AUTOFREE, IDS_SERVERALT, IDS_PAIR, IDS_PAIRINFO, IDS_HINT,
        IDS_SELLOCAL, IDS_SELBROWSE, IDS_MODEALL, IDS_MOVEUP, IDS_MOVEDN, IDS_ADDPAIR, IDS_PICK2,
-       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD };
+       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD, IDS_SKTMP, IDS_SKLOCK, IDS_SKINI, IDS_SKTHUMB };
 #define WM_APP_TESTED (WM_APP + 10)
 #define WM_APP_PICKED (WM_APP + 11)
 static HWND s_tab, s_server, s_token, s_test, s_testRes, s_list, s_root, s_local, s_browse, s_add, s_remove, s_limit, s_startup, s_tip;
@@ -599,6 +602,7 @@ static HWND s_onDemand, s_keep, s_autoFree, s_serverAlt, s_pair, s_pairInfo, s_h
 static HWND s_selLocal, s_selBrowse, s_selHead, s_empty, s_modeAll, s_moveUp, s_moveDn, s_addPair;
 static HWND s_legend, s_pick2;
 static HWND s_updCheck, s_updInst, s_updRes, s_autoUpd;   // 업데이트 메뉴
+static HWND s_sk[4];   // 맞추지 않을 임시·시스템 파일 종류
 static void OpenTask(HWND owner, int idx);   // 동기화 작업 만들기(-1) / 편집   // 탐색기 상태 아이콘 설명
 static std::vector<std::wstring> s_names;   // NAS 폴더 이름 ([연결 시험] 때 받아 둠)   // 고른 짝의 PC 폴더 · 제목 · 빈 목록 안내
 static HWND s_pick, s_pickInfo, s_prio, s_high, s_excl, s_maxsize, s_quiet, s_defer, s_rescan, s_up, s_down;
@@ -998,7 +1002,24 @@ static void CreateSettingsControls(HWND h) {
               L"파일 이름이나 경로 중 폴더 이름 하나라도 맞으면 뺍니다.\n"
               L"· *.bak → 확장자가 bak 인 파일\n· node_modules → 그 이름의 폴더 전체\n· ~* → ~ 로 시작하는 이름\n"
               L"뺀 것은 양쪽 모두 건드리지 않습니다 (지우지도 옮기지도 않음).\n"
-              L"늘 빼는 것: desktop.ini, Thumbs.db, ~$ 로 시작하는 Office 임시 파일, .tmp", {s_excl}, eh);
+              L"임시 파일·잠금 파일 같은 종류는 아래 '임시·시스템 파일'에서 체크로 고릅니다.", {s_excl}, eh);
+    {
+        const wchar_t* sk[4] = {L"임시 파일  (*.tmp)", L"오피스 잠금 파일  (~$*, .~lock.*)", L"폴더 설정 파일  (desktop.ini)", L"축소판 캐시  (Thumbs.db)"};
+        int cw2 = (s_cw - S(12)) / 2;
+        for (int i = 0; i < 4; i++) {
+            s_sk[i] = SCtl(h, L"BUTTON", sk[i], BS_AUTOCHECKBOX | WS_TABSTOP, IDS_SKTMP + i);
+            MakeChk(s_sk[i]); ChkSet(s_sk[i], ((g_cfg.skipMask >> i) & 1) != 0);
+            MoveWindow(s_sk[i], s_cx + (i % 2) * (cw2 + S(12)), y + (i / 2) * (eh + S(4)), cw2, eh, TRUE);
+        }
+        y = Field(h, y, L"임시·시스템 파일", L"체크한 종류는 맞추지 않고 이 PC에만 둡니다 (탐색기에는 '항상 이 장치에'로 보여 폴더가 '동기화 중'으로 남지 않음).\n"
+                  L"늘 빼는 것 (바꿀 수 없음): Mydrive가 받는 동안 쓰는 임시 파일 .mydrive-tmp-…, 시놀로지 내부 폴더 #recycle · @eaDir · #snapshot · @tmp · .SynologyWorkingDirectory",
+                  L"프로그램이 저장하거나 문서를 여는 동안 잠깐 만드는 파일들입니다. 맞추면 몇 초 사이에 올렸다 지우기를 되풀이하거나 충돌 사본이 생기기 쉽습니다.\n"
+                  L"· 임시 파일: 저장하는 도중에 쓰는 .tmp (끝나면 보통 사라짐)\n"
+                  L"· 오피스 잠금 파일: Word·Excel·PowerPoint·리브레오피스가 문서를 열 때 만드는 ~$문서.docx, .~lock.문서#\n"
+                  L"· 폴더 설정 파일: 폴더 아이콘·보기 설정 (PC마다 달라도 됨)\n"
+                  L"· 축소판 캐시: 예전 Windows가 폴더마다 만드는 미리 보기 모음\n"
+                  L"체크를 풀면 그 종류도 NAS와 맞춥니다. 뺀 파일은 NAS에 없으니 '공간 확보'로 비우지 않습니다.", {s_sk[0], s_sk[1], s_sk[2], s_sk[3]}, eh * 2 + S(4));
+    }
     s_maxsize = NumEdit(h, g_cfg.maxSizeMB, IDS_MAXSIZE, s_cx, y, nw);
     Unit(h, L"MB  (0 = 제한 없음)", ux, y);
     y = Field(h, y, L"최대 파일 크기", L"이보다 큰 파일은 맞추지 않습니다.",
@@ -1361,6 +1382,7 @@ static void SaveSettings(HWND h) {
     g_cfg.downKBps = std::max(0, num(s_down, 0));
     g_cfg.startup = ChkGet(s_startup);
     g_cfg.autoUpdate = ChkGet(s_autoUpd);
+    g_cfg.skipMask = 0; for (int i = 0; i < 4; i++) if (ChkGet(s_sk[i])) g_cfg.skipMask |= 1 << i;
     SaveCfg(); ApplyStartup();
     StartEngines();
     g_navCheckAt = GetTickCount64() + 20000;   // 탐색 연동을 켜거나 끈 연결의 왼쪽 목록 항목 (Windows가 만든 뒤에 확인)
@@ -1792,6 +1814,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDS_PICK: case IDS_PICK2: if (s_sel >= 0) OpenTask(h, s_sel); break;
         case IDS_STARTUP: ChkSet(s_startup, !ChkGet(s_startup)); break;
         case IDS_AUTOUPD: ChkSet(s_autoUpd, !ChkGet(s_autoUpd)); break;
+        case IDS_SKTMP: case IDS_SKLOCK: case IDS_SKINI: case IDS_SKTHUMB: { HWND b = s_sk[LOWORD(wp) - IDS_SKTMP]; ChkSet(b, !ChkGet(b)); break; }
         case IDS_UPDCHECK: UpdateCheck(true); break;
         case IDS_UPDINST: UpdateInstallNow(); break;
         case 900: case 901: case 902: case 903: case 904: ShowPage(LOWORD(wp) - 900); if (LOWORD(wp) == 904) Settings_UpdateUi(); break;

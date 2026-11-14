@@ -29,6 +29,8 @@ std::wstring FetchRequester();
 int InSyncState(const std::wstring& path, bool dir);
 // 탐색기에 그 항목의 상태 아이콘을 바로 다시 그리라고 알림 (몇 개만 고칠 때 — 많이 부르면 탐색기가 바빠짐)
 void RefreshShell(const std::wstring& path);
+// 동기화에서 뺀 보통 파일: 자리표시로 바꾸고 '맞춰짐' + '항상 이 장치에 유지' (NAS에 없으니 절대 비우지 않음)
+bool MarkExcluded(const std::wstring& path);
 bool Connect(const std::wstring& path, FetchFn fetch, Connection& out);
 void Disconnect(Connection& c);
 

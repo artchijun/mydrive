@@ -9,6 +9,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <mutex>
+#include <atomic>
 
 namespace md {
 
@@ -83,17 +84,23 @@ inline bool BadWinName(const std::string& rel) {
     return false;
 }
 
-// 동기화하지 않는 이름 (임시·잠금 파일)
-inline bool SkipLocalName(const std::wstring& n) {
+// 동기화하지 않는 이름
+//   늘 빼는 것 (설정으로 바꿀 수 없음): Mydrive 가 받는 동안 쓰는 임시 파일, 시놀로지 내부 폴더
+//   설정 '임시·시스템 파일' 체크로 고르는 종류 (g_skipMask 비트): 1 .tmp / 2 오피스·리브레오피스 잠금 / 4 desktop.ini / 8 Thumbs.db
+inline std::atomic<unsigned> g_skipMask{15};
+inline bool AlwaysSkipName(const std::wstring& n) {
     if (n.rfind(L".mydrive-tmp-", 0) == 0) return true;
-    if (n.rfind(L"~$", 0) == 0) return true;          // 오피스 잠금 파일
-    if (n.rfind(L".~lock.", 0) == 0) return true;     // 리브레오피스 잠금 파일
-    if (_wcsicmp(n.c_str(), L"desktop.ini") == 0 || _wcsicmp(n.c_str(), L"Thumbs.db") == 0) return true;
-    if (n == L"#recycle" || n == L"@eaDir" || n == L"#snapshot" || n == L".SynologyWorkingDirectory") return true;
-    size_t l = n.size();
-    if (l > 4 && _wcsicmp(n.c_str() + l - 4, L".tmp") == 0) return true;
-    return false;
+    return n == L"#recycle" || n == L"@eaDir" || n == L"#snapshot" || n == L"@tmp" || n == L".SynologyWorkingDirectory";
 }
+inline unsigned SkipKind(const std::wstring& n) {
+    size_t l = n.size();
+    if (l > 4 && _wcsicmp(n.c_str() + l - 4, L".tmp") == 0) return 1;
+    if (n.rfind(L"~$", 0) == 0 || n.rfind(L".~lock.", 0) == 0) return 2;
+    if (_wcsicmp(n.c_str(), L"desktop.ini") == 0) return 4;
+    if (_wcsicmp(n.c_str(), L"Thumbs.db") == 0) return 8;
+    return 0;
+}
+inline bool SkipLocalName(const std::wstring& n) { return AlwaysSkipName(n) || (SkipKind(n) & g_skipMask.load()) != 0; }
 inline bool SkipRemoteRel(const std::string& rel) {
     std::wstring w = W(Leaf(rel));
     return SkipLocalName(w);

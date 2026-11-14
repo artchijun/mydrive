@@ -286,6 +286,8 @@ static void ShellCmd(const std::wstring& cmd, const std::wstring& path) {
     }
     if (cmd == L"keep" || cmd == L"free") {   // 여러 개를 고르면 하나씩 불림 → 실패할 때만 알림
         bool keep = cmd == L"keep";
+        { size_t s = path.find_last_of(L"\\/"); std::wstring leaf = s == std::wstring::npos ? path : path.substr(s + 1);
+          if (!keep && SkipLocalName(leaf)) { TrayBalloon(L"공간 확보", leaf + L"\n동기화에서 뺀 파일이라 NAS에 없습니다. 비우면 내용이 사라지므로 하지 않았습니다.", NIIF_WARNING); return; } }
         if (!cloud::SetKeep(path, keep))
             TrayBalloon(keep ? L"항상 이 장치에 유지" : L"공간 확보", ShowRel(cp.conn, cp.rel) + L"\n바꾸지 못했습니다 (파일이 열려 있거나 아직 맞추는 중).", NIIF_WARNING);
         if (e) e->Kick();

@@ -137,6 +137,7 @@ private:
     bool CloudFetch(const std::wstring& abs, int64_t off, const std::function<bool(const char*, size_t)>& sink);
     uint8_t ParentPin(const std::string& p) const;
     std::map<std::string, LocalE> local_;
+    std::vector<std::string> exclPlain_;   // 이번에 훑으며 본, 체크로 뺀 보통 파일 (탐색기 표시만 고침)
     std::map<std::string, RemoteE> remote_;
     std::map<std::string, BaseE> base_;
     std::string epoch_;
