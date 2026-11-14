@@ -47,7 +47,7 @@ struct AppCfg {
     int quietSec = 2, maxDeferSec = 30, rescanMin = 5;
     int upKBps = 0, downKBps = 0;
     bool autoUpdate = true;     // 새 판이 나오면 자동으로 설치
-    int skipMask = 15;          // 맞추지 않을 임시·시스템 파일 종류 (1 .tmp, 2 잠금 파일, 4 desktop.ini, 8 Thumbs.db)
+    int skipMask = 15;          // 맞추지 않을 임시·시스템 파일 종류 (1 .tmp, 2 잠금 파일, 4 desktop.ini, 8 Thumbs.db, 16 점으로 시작하는 폴더 — 기본은 맞춤)
 };
 static AppCfg g_cfg;
 static std::wstring g_activeServer;   // 지금 쓰는 주소 (비어 있으면 g_cfg.server)
@@ -594,7 +594,7 @@ enum { IDS_SERVER = 500, IDS_TOKEN, IDS_TEST, IDS_TESTRES, IDS_LIST, IDS_ROOT, I
        IDS_LIMIT, IDS_STARTUP, IDS_SAVE, IDS_CANCEL, IDS_TAB, IDS_PICK, IDS_PRIO, IDS_HIGH, IDS_EXCL, IDS_MAXSIZE,
        IDS_QUIET, IDS_DEFER, IDS_RESCAN, IDS_UP, IDS_DOWN, IDS_ONDEMAND, IDS_KEEP, IDS_AUTOFREE, IDS_SERVERALT, IDS_PAIR, IDS_PAIRINFO, IDS_HINT,
        IDS_SELLOCAL, IDS_SELBROWSE, IDS_MODEALL, IDS_MOVEUP, IDS_MOVEDN, IDS_ADDPAIR, IDS_PICK2,
-       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD, IDS_SKTMP, IDS_SKLOCK, IDS_SKINI, IDS_SKTHUMB };
+       IDS_UPDCHECK, IDS_UPDINST, IDS_UPDRES, IDS_AUTOUPD, IDS_SKTMP, IDS_SKLOCK, IDS_SKINI, IDS_SKTHUMB, IDS_SKDOT };
 #define WM_APP_TESTED (WM_APP + 10)
 #define WM_APP_PICKED (WM_APP + 11)
 static HWND s_tab, s_server, s_token, s_test, s_testRes, s_list, s_root, s_local, s_browse, s_add, s_remove, s_limit, s_startup, s_tip;
@@ -602,7 +602,7 @@ static HWND s_onDemand, s_keep, s_autoFree, s_serverAlt, s_pair, s_pairInfo, s_h
 static HWND s_selLocal, s_selBrowse, s_selHead, s_empty, s_modeAll, s_moveUp, s_moveDn, s_addPair;
 static HWND s_legend, s_pick2;
 static HWND s_updCheck, s_updInst, s_updRes, s_autoUpd;   // 업데이트 메뉴
-static HWND s_sk[4];   // 맞추지 않을 임시·시스템 파일 종류
+static HWND s_sk[5];   // 맞추지 않을 임시·시스템 파일 종류
 static void OpenTask(HWND owner, int idx);   // 동기화 작업 만들기(-1) / 편집   // 탐색기 상태 아이콘 설명
 static std::vector<std::wstring> s_names;   // NAS 폴더 이름 ([연결 시험] 때 받아 둠)   // 고른 짝의 PC 폴더 · 제목 · 빈 목록 안내
 static HWND s_pick, s_pickInfo, s_prio, s_high, s_excl, s_maxsize, s_quiet, s_defer, s_rescan, s_up, s_down;
@@ -1004,9 +1004,10 @@ static void CreateSettingsControls(HWND h) {
               L"뺀 것은 양쪽 모두 건드리지 않습니다 (지우지도 옮기지도 않음).\n"
               L"임시 파일·잠금 파일 같은 종류는 아래 '임시·시스템 파일'에서 체크로 고릅니다.", {s_excl}, eh);
     {
-        const wchar_t* sk[4] = {L"임시 파일  (*.tmp)", L"오피스 잠금 파일  (~$*, .~lock.*)", L"폴더 설정 파일  (desktop.ini)", L"축소판 캐시  (Thumbs.db)"};
+        const wchar_t* sk[5] = {L"임시 파일  (*.tmp)", L"오피스 잠금 파일  (~$*, .~lock.*)", L"폴더 설정 파일  (desktop.ini)", L"축소판 캐시  (Thumbs.db)",
+                                L"점(.)으로 시작하는 폴더  (.git, .vscode …)"};
         int cw2 = (s_cw - S(12)) / 2;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 5; i++) {
             s_sk[i] = SCtl(h, L"BUTTON", sk[i], BS_AUTOCHECKBOX | WS_TABSTOP, IDS_SKTMP + i);
             MakeChk(s_sk[i]); ChkSet(s_sk[i], ((g_cfg.skipMask >> i) & 1) != 0);
             MoveWindow(s_sk[i], s_cx + (i % 2) * (cw2 + S(12)), y + (i / 2) * (eh + S(4)), cw2, eh, TRUE);
@@ -1018,7 +1019,9 @@ static void CreateSettingsControls(HWND h) {
                   L"· 오피스 잠금 파일: Word·Excel·PowerPoint·리브레오피스가 문서를 열 때 만드는 ~$문서.docx, .~lock.문서#\n"
                   L"· 폴더 설정 파일: 폴더 아이콘·보기 설정 (PC마다 달라도 됨)\n"
                   L"· 축소판 캐시: 예전 Windows가 폴더마다 만드는 미리 보기 모음\n"
-                  L"체크를 풀면 그 종류도 NAS와 맞춥니다. 뺀 파일은 NAS에 없으니 '공간 확보'로 비우지 않습니다.", {s_sk[0], s_sk[1], s_sk[2], s_sk[3]}, eh * 2 + S(4));
+                  L"· 점(.)으로 시작하는 폴더: .git · .vscode · .cache 처럼 프로그램이 쓰는 숨은 폴더 — 그 폴더 안의 모든 것을 뺍니다 (기본은 맞춤)\n"
+                  L"체크를 풀면 그 종류도 NAS와 맞춥니다. 뺀 파일은 NAS에 없으니 '공간 확보'로 비우지 않습니다.\n"
+                  L"이미 맞춘 것을 나중에 빼면 양쪽 파일은 그대로 두고 더 이상 맞추지만 않습니다.", {s_sk[0], s_sk[1], s_sk[2], s_sk[3], s_sk[4]}, eh * 3 + S(8));
     }
     s_maxsize = NumEdit(h, g_cfg.maxSizeMB, IDS_MAXSIZE, s_cx, y, nw);
     Unit(h, L"MB  (0 = 제한 없음)", ux, y);
@@ -1382,7 +1385,7 @@ static void SaveSettings(HWND h) {
     g_cfg.downKBps = std::max(0, num(s_down, 0));
     g_cfg.startup = ChkGet(s_startup);
     g_cfg.autoUpdate = ChkGet(s_autoUpd);
-    g_cfg.skipMask = 0; for (int i = 0; i < 4; i++) if (ChkGet(s_sk[i])) g_cfg.skipMask |= 1 << i;
+    g_cfg.skipMask = 0; for (int i = 0; i < 5; i++) if (ChkGet(s_sk[i])) g_cfg.skipMask |= 1 << i;
     SaveCfg(); ApplyStartup();
     StartEngines();
     g_navCheckAt = GetTickCount64() + 20000;   // 탐색 연동을 켜거나 끈 연결의 왼쪽 목록 항목 (Windows가 만든 뒤에 확인)
@@ -1814,7 +1817,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDS_PICK: case IDS_PICK2: if (s_sel >= 0) OpenTask(h, s_sel); break;
         case IDS_STARTUP: ChkSet(s_startup, !ChkGet(s_startup)); break;
         case IDS_AUTOUPD: ChkSet(s_autoUpd, !ChkGet(s_autoUpd)); break;
-        case IDS_SKTMP: case IDS_SKLOCK: case IDS_SKINI: case IDS_SKTHUMB: { HWND b = s_sk[LOWORD(wp) - IDS_SKTMP]; ChkSet(b, !ChkGet(b)); break; }
+        case IDS_SKTMP: case IDS_SKLOCK: case IDS_SKINI: case IDS_SKTHUMB: case IDS_SKDOT: { HWND b = s_sk[LOWORD(wp) - IDS_SKTMP]; ChkSet(b, !ChkGet(b)); break; }
         case IDS_UPDCHECK: UpdateCheck(true); break;
         case IDS_UPDINST: UpdateInstallNow(); break;
         case 900: case 901: case 902: case 903: case 904: ShowPage(LOWORD(wp) - 900); if (LOWORD(wp) == 904) Settings_UpdateUi(); break;

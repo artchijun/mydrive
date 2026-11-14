@@ -30,6 +30,13 @@ static bool Under(const std::string& p, const std::string& dir) {
 // 제외 규칙: 이름 패턴(경로의 어느 부분이든), 선택 동기화로 뺀 폴더, 최대 크기
 bool Engine::Excluded(const std::string& p, bool d, int64_t size) const {
     if (!d && cfg_.maxFileSize > 0 && size > cfg_.maxFileSize) return true;
+    if (g_skipMask.load() & 16) {   // 점(.)으로 시작하는 폴더: 그 폴더와 안의 모든 것 (마지막 칸은 폴더일 때만)
+        for (size_t i = 0; i < p.size();) {
+            size_t j = p.find('/', i); bool last = j == std::string::npos; if (last) j = p.size();
+            if (p[i] == '.' && (!last || d)) return true;
+            i = j + 1;
+        }
+    }
     for (auto& s : cfg_.skipDirs) if (Under(p, s)) return true;
     if (!cfg_.excludes.empty()) {
         for (size_t i = 0; i <= p.size();) {
@@ -283,7 +290,7 @@ bool Engine::ScanLocal() {
                     uint8_t own = ownPin(l.a);
                     l.pin = own ? own : parentPin;
                     // 이름 패턴·선택 동기화로 뺀 것은 아예 보지 않음 (크기 제한은 맞출 때 양쪽을 함께 봄)
-                    if (!Excluded(rel, true, 0)) {
+                    if (!Excluded(rel, l.d, 0)) {   // 크기 0 으로 물어 크기 제한은 여기서 보지 않음 (맞출 때 양쪽을 함께 봄)
                         out[rel] = l;
                         if (l.d) { stack.push_back(rel); dirPin[rel] = l.pin; }
                     }

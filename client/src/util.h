@@ -87,6 +87,7 @@ inline bool BadWinName(const std::string& rel) {
 // 동기화하지 않는 이름
 //   늘 빼는 것 (설정으로 바꿀 수 없음): Mydrive 가 받는 동안 쓰는 임시 파일, 시놀로지 내부 폴더
 //   설정 '임시·시스템 파일' 체크로 고르는 종류 (g_skipMask 비트): 1 .tmp / 2 오피스·리브레오피스 잠금 / 4 desktop.ini / 8 Thumbs.db
+//   16 점(.)으로 시작하는 폴더와 그 안 전체 (.git, .vscode …) — 경로를 봐야 해서 Engine::Excluded 에서 처리
 inline std::atomic<unsigned> g_skipMask{15};
 inline bool AlwaysSkipName(const std::wstring& n) {
     if (n.rfind(L".mydrive-tmp-", 0) == 0) return true;
