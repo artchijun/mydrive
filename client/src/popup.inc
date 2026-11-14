@@ -95,14 +95,19 @@ static void Popup_Invalidate();
 
 static std::deque<std::pair<int64_t, int>> g_minute;   // (시각, 종류) 최근 1분
 static std::wstring g_lastFile, g_lastConn;   // 마지막으로 처리한 파일
-static void LoadActivity() {
-    auto lines = ReadLines(ActPath());
-    // 요약(최대 6시간)에 쓰도록 넉넉히 두되, 너무 커지면 최근 것만 남김
+static size_t g_actLines = 0;   // activity.log 줄 수 (대략)
+// 요약(최대 6시간)에 쓰도록 넉넉히 두되, 너무 커지면 최근 것만 남김 — 시작할 때와 켜져 있는 동안 모두
+static void TrimActivity(std::vector<std::string>& lines) {
     if (lines.size() > 60000) {
         lines.erase(lines.begin(), lines.end() - 30000);
         FILE* w = _wfopen(ActPath().c_str(), L"wb");
         if (w) { for (auto& l : lines) { fputs(l.c_str(), w); fputc('\n', w); } fclose(w); }
     }
+    g_actLines = lines.size();
+}
+static void LoadActivity() {
+    auto lines = ReadLines(ActPath());
+    TrimActivity(lines);
     size_t from = lines.size() > MAX_EVENTS ? lines.size() - MAX_EVENTS : 0;
     for (size_t k = lines.size(); k-- > from;) {
         std::vector<std::wstring> c; SplitTabs(W(lines[k]), c, 5);
@@ -121,6 +126,7 @@ static void AddEvent(EvRow* r, bool flush = true) {
     if (g_actFile) {
         std::string line = U(r->time + L"\t" + r->conn + L"\t" + r->kind + L"\t" + r->path + L"\t" + r->extra) + "\n";
         fputs(line.c_str(), g_actFile); if (flush) fflush(g_actFile);
+        g_actLines++;
     }
     if (r->cat == C_UP || r->cat == C_DOWN || r->cat == C_MOVE) { g_lastFile = r->path; g_lastConn = r->conn; }
     g_minute.push_back({r->ts, r->cat});   // 1분 수는 목록 길이 제한과 따로 셈
@@ -141,6 +147,12 @@ static void DrainEvents() {
     }
     for (auto& r : batch) AddEvent(&r, false);
     if (g_actFile) fflush(g_actFile);
+    if (g_actFile && g_actLines > 60000) {   // 오래 켜 두면 끝없이 커지지 않게 (요약 계산이 파일 전체를 읽음)
+        fclose(g_actFile);
+        auto lines = ReadLines(ActPath());
+        TrimActivity(lines);
+        g_actFile = _wfopen(ActPath().c_str(), L"ab");
+    }
     if (!batch.empty()) Popup_Invalidate();
 }
 

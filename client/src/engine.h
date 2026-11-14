@@ -112,6 +112,7 @@ public:
     bool Paused() const { return pausedUntil_ > GetTickCount64(); }
     uint64_t PausedLeftMs() const { uint64_t t = pausedUntil_, n = GetTickCount64(); return t > n ? t - n : 0; }
     std::atomic<bool> busy{false};
+    std::atomic<int> bigN{0};   // 큰 파일 통로에 줄 섰거나 옮기는 중인 수 (상태 표시용)
     const Config& cfg() const { return cfg_; }
     Stats stats;
     // 창에 보여 줄 활동 한 줄: 종류, 경로, 덧붙임 (다른 스레드에서 불림)
@@ -189,7 +190,7 @@ private:
     bool RunJob(const Job& j);
     std::thread loop_, pollThread_, watchThread_;
     HANDLE watchDir_ = INVALID_HANDLE_VALUE;
-    bool dirty_ = false;
+    bool dirty_ = false; uint64_t lastSave_ = 0, rkAt_ = 0, prof_[4] = {};   // prof_: 한 번 맞추기 단계별 걸린 시간(ms)
     int lastHeld_ = -1;
     std::atomic<bool> resync_{false};
     uint64_t lastResync_ = 0;

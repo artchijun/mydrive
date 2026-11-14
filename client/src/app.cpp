@@ -304,7 +304,7 @@ static int EngineState(Engine& e) {
     if (e.Paused()) return 2;
     if (e.stats.heldDeletes > 0) return 3;
     if (!e.stats.online && !e.busy) return 4;
-    if (e.busy || e.stats.pending > 0) return 1;
+    if (e.busy || e.stats.pending > 0 || e.bigN > 0) return 1;   // 큰 파일을 따로 옮기는 중이어도 동기화 중
     return 0;
 }
 static const wchar_t* StateText(int s) {

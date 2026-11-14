@@ -382,9 +382,9 @@ bool Engine::Upload(const std::string& p, const LocalE& l, const BaseE* b) {
 bool Engine::UploadDone(const std::string& p, const LocalE& l, const Resp& r, std::vector<std::pair<std::string, bool>>* marks) {
     if (r.status == 409) {
         Event("충돌", p, "그사이 NAS에서도 바뀜 — NAS 목록을 다시 받아 둘 다 남김");
-        // PC 가 들고 있는 NAS 목록이 어긋났을 수 있음 → 전체 목록을 새로 받음 (2분에 한 번까지). 안 그러면 같은 올리기를 계속 되풀이함
+        // PC 가 들고 있는 NAS 목록이 어긋났을 수 있음 → 전체 목록을 새로 받음 (5분에 한 번까지). 안 그러면 같은 올리기를 계속 되풀이함
         uint64_t now = GetTickCount64();
-        if (!lastResync_ || now - lastResync_ > 120000) { lastResync_ = now; resync_ = true; }
+        if (!lastResync_ || now - lastResync_ > 300000) { lastResync_ = now; resync_ = true; }
         return false;
     }
     if (!r.ok()) { stats.errors++; Event("올리기 실패", p, r.error.empty() ? std::to_string(r.status) + " " + r.body : r.error); return false; }
@@ -799,16 +799,20 @@ bool Engine::CrossMoveIn(const std::string& p, const LocalE& l) {
 bool Engine::RunPass() {
     std::unique_lock<std::recursive_mutex> L(mu_);   // 작은 파일을 옮기는 동안만 풀어 줌
     retryAt_ = 0;
+    uint64_t T0 = GetTickCount64(); prof_[0] = prof_[1] = prof_[2] = prof_[3] = 0;
     if (!RefreshRemote()) return false;
     // 다른 연결이 '옮겨진 것 찾기'에 쓸 NAS 파일 색인 (요청이 있을 때만, NAS 목록이 바뀌었을 때만 다시 만듦)
-    if (rkWant_ > GetTickCount64() && rkSeq_ != seq_) {
+    if (rkWant_ > GetTickCount64() && rkSeq_ != seq_ && GetTickCount64() - rkAt_ > 30000) {   // 많이 바뀌는 중에도 30초에 한 번만
+        rkAt_ = GetTickCount64();
         std::unordered_map<std::string, std::string> ix; ix.reserve(remote_.size());
         for (auto& [p, r] : remote_) if (!r.d) ix.emplace(MoveKey(Leaf(p), r.s, r.m), p);
         { std::lock_guard<std::mutex> g(rkMu_); rkIdx_.swap(ix); }
         rkSeq_ = seq_;
     }
+    prof_[0] = GetTickCount64() - T0;
     if (!ScanLocal()) return false;
     bool any = DetectRenames();
+    prof_[1] = GetTickCount64() - T0;
 
     enum Act { None, Up, Down, MkR, MkL, DelR, DelL, Conflict, SyncBase, DropBase, ReplR, ReplL, Compare };   // Repl: 파일↔폴더로 종류가 바뀜
     struct Item { std::string p; Act a; };
@@ -973,12 +977,13 @@ bool Engine::RunPass() {
         }
         if (n) Event("↺ 되살림", cfg_.name, std::to_string(n) + "개 — 지우지 않고 사라진 쪽에 다시 만듦");
     }
+    prof_[2] = GetTickCount64() - T0;
     bool holdL = nDelL > cfg_.massDeleteLimit && !confirmDelete_;
     bool holdR = nDelR > cfg_.massDeleteLimit && !confirmDelete_;
     stats.heldDeletes = (holdL ? nDelL : 0) + (holdR ? nDelR : 0);
     // DSM 에서 다른 공유 폴더로 옮긴 경우: NAS 에서 사라진 파일과 이름·크기·수정 시각이 같은 파일이 다른 연결의 NAS 에 있으면 '옮겨진 것'
     bool movedChanged = false;
-    if (holdL && (GetTickCount64() - movedAt_ > 5000 || stats.heldDeletes != lastHeld_)) {
+    if (holdL && (GetTickCount64() - movedAt_ > 15000 || stats.heldDeletes != lastHeld_)) {
         movedAt_ = GetTickCount64();
         std::map<std::string, std::pair<std::string, std::string>> mt;
         std::map<std::string, int> per;
@@ -996,14 +1001,14 @@ bool Engine::RunPass() {
                 else for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) dirty.insert(q);
             }
         }
-        // 폴더: 안에 옮겨진 파일이 있고 짝 없는 파일이 하나도 없으면 같이 옮겨진 것
+        int n = 0; std::string top; int best = 0;
+        for (auto& [c, k] : per) { n += k; if (k > best) { best = k; top = c; } }
+        // 폴더: 짝 없는 파일이 하나도 없으면 같이 옮겨진 것 (빈 폴더도 — 옮겨진 파일이 하나라도 있을 때)
         for (auto& it : items) {
             if (it.a != DelL || allowDel_.count(it.p)) continue;
             auto bi = base_.find(it.p);
-            if (bi != base_.end() && bi->second.d && hasMatch.count(it.p) && !dirty.count(it.p)) mt[it.p] = {"", ""};
+            if (bi != base_.end() && bi->second.d && !dirty.count(it.p) && (hasMatch.count(it.p) || n > 0)) mt[it.p] = {"", ""};
         }
-        int n = 0; std::string top; int best = 0;
-        for (auto& [c, k] : per) { n += k; if (k > best) { best = k; top = c; } }
         std::lock_guard<std::mutex> g(cfMu_);
         movedChanged = n != movedN_;
         movedTo_.swap(mt); movedN_ = n; movedConn_ = top;
@@ -1175,7 +1180,7 @@ bool Engine::RunPass() {
             }
             j.size = j.ph ? 0 : std::max(j.l.s, j.r.s);
             if (j.size >= kBig && !bigWorkers_.empty()) {
-                inflight_.insert(p);
+                inflight_.insert(p); bigN++;
                 { std::lock_guard<std::mutex> g(qMu_); bigQ_.push_back(j); }
                 qCv_.notify_one();
                 stats.pending--;
@@ -1254,7 +1259,7 @@ bool Engine::RunPass() {
         for (auto& p : hydr) {
             if (inflight_.count(p)) continue;
             Job j; j.kind = Job::Hydrate; j.p = p; j.l = local_[p]; j.r = remote_[p]; j.hasL = true;
-            inflight_.insert(p);
+            inflight_.insert(p); bigN++;
             { std::lock_guard<std::mutex> g(qMu_); bigQ_.push_back(j); }
             qCv_.notify_one();
         }
@@ -1332,10 +1337,12 @@ bool Engine::RunPass() {
         if (it.a == DelR && !holdR) { auto bi = base_.find(p); if (bi != base_.end() && DeleteRemote(p, bi->second)) { gone.insert(p); any = true; } }
         stats.pending--;
     }
+    prof_[3] = GetTickCount64() - T0;
     if (confirmDelete_ && (nDelL || nDelR)) confirmDelete_ = false;
     stats.pending = 0;
     { std::lock_guard<std::mutex> g(xMu_); stats.waiting = (int)waitNote_.size(); }
-    if (dirty_) Save();
+    // 상태 저장은 전체를 다시 쓰므로 바쁜 동안은 30초에 한 번만 (조용해지면·끝날 때는 바로). 저장 전에 꺼져도 다음에 비교로 다시 맞춤
+    if (dirty_ && (!any || GetTickCount64() - lastSave_ > 30000)) { Save(); lastSave_ = GetTickCount64(); }
     SaveOpened();
     // 뺀 파일 때문에 폴더가 탐색기에 '동기화 중'으로 남지 않게: 그 파일을 '이 PC에만 · 맞춰짐'으로 표시
     if (cloudOn_ && !unregister_ && !exclTree_.empty()) {
@@ -1511,7 +1518,7 @@ void Engine::BigWorker() {
             while (Paused() && !stop_) WaitForSingleObject(wake_, 1000);   // 멈춘 동안 큰 파일 통로도 쉼 (줄은 그대로 두었다가 이어서)
             if (!stop_) RunJob(j);
         }
-        { std::lock_guard<std::recursive_mutex> g(mu_); inflight_.erase(j.p); }
+        { std::lock_guard<std::recursive_mutex> g(mu_); inflight_.erase(j.p); } bigN--;
         Kick();
     }
 }
@@ -1708,8 +1715,14 @@ void Engine::LoopMain() {
         while (!stop_ && Paused()) WaitForSingleObject(wake_, (DWORD)std::min<uint64_t>(PausedLeftMs() + 50, 60000));
         if (stop_) break;
         busy = true;
+        uint64_t passAt = GetTickCount64();
         bool changed = RunPass();
+        uint64_t took = GetTickCount64() - passAt;
         busy = false;
+        if (took > 3000 && !prof_[3]) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (중간에 멈춤)", cfg_.name.c_str(), took / 1000.0);
+        else if (took > 3000) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (NAS 목록 %.1f · PC 훑기 %.1f · 비교 %.1f · 옮기기 %.1f · 저장 등 %.1f, PC %zu개)", cfg_.name.c_str(), took / 1000.0,
+                             prof_[0] / 1000.0, (prof_[1] - prof_[0]) / 1000.0, (prof_[2] - prof_[1]) / 1000.0, (prof_[3] - prof_[2]) / 1000.0,
+                             prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size());
         polledSeq_ = seq_;
         if (stop_) break;
         // 바뀐 게 있었으면 곧바로 한 번 더 (연쇄 변경), 없으면 알림이 올 때까지 (최대 재검사 간격)
@@ -1723,6 +1736,9 @@ void Engine::LoopMain() {
             while (!stop_ && GetTickCount64() - t0 < (uint64_t)cfg_.maxDeferSec * 1000 &&
                    WaitForSingleObject(wake_, (DWORD)std::max(1, cfg_.quietSec) * 1000) == WAIT_OBJECT_0) {}
         }
+        // 한 번 맞추기가 오래 걸리는 큰 폴더: 다음 차례까지 그만큼은 쉼 (최대 5초) — 계속 바뀌는 동안 CPU 를 다 쓰지 않게
+        uint64_t gap = std::min<uint64_t>(took, 5000);
+        while (!stop_ && GetTickCount64() - (passAt + took) < gap) Sleep(100);
     }
 }
 

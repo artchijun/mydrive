@@ -46,6 +46,7 @@ type Root struct {
 
 	mu      sync.Mutex
 	idx     map[string]Entry
+	kids    map[string]map[string]struct{} // 폴더 → 바로 아래 항목들 (폴더째 지우거나 다시 볼 때 색인 전체를 훑지 않으려고)
 	epoch   string
 	seq     int64
 	log     []Change
@@ -71,7 +72,59 @@ func (r *Root) Close() {
 	}
 }
 
-const maxLog = 500000
+// 변경 기록은 이만큼만 메모리에 둠 (더 뒤처진 PC 는 전체 목록을 다시 받음). 예전 50만 개는 공유 폴더마다 수십 MB 를 차지했음
+const maxLog = 200000
+
+func parentOf(rel string) string {
+	if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+		return rel[:i]
+	}
+	return ""
+}
+
+// kids 를 색인 전체로 다시 만듦 (색인을 통째로 바꿨을 때만)
+func (r *Root) buildKidsLocked() {
+	r.kids = make(map[string]map[string]struct{}, len(r.idx)/8+1)
+	for p := range r.idx {
+		r.addKidLocked(p)
+	}
+}
+func (r *Root) addKidLocked(p string) {
+	par := parentOf(p)
+	m := r.kids[par]
+	if m == nil {
+		m = map[string]struct{}{}
+		r.kids[par] = m
+	}
+	m[p] = struct{}{}
+}
+func (r *Root) delKidLocked(p string) {
+	par := parentOf(p)
+	if m := r.kids[par]; m != nil {
+		delete(m, p)
+		if len(m) == 0 {
+			delete(r.kids, par)
+		}
+	}
+	delete(r.kids, p)
+}
+
+// rel 아래 모든 항목 (rel 자신은 빼고). 아래 항목 수만큼만 일함
+func (r *Root) subtreeLocked(rel string) []string {
+	var out []string
+	stack := []string{rel}
+	for len(stack) > 0 {
+		d := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for c := range r.kids[d] {
+			out = append(out, c)
+			if r.kids[c] != nil {
+				stack = append(stack, c)
+			}
+		}
+	}
+	return out
+}
 
 // 색인에서 빼는 이름 (시놀로지 내부 폴더, 우리 임시 파일)
 func skipName(name string) bool {
@@ -173,14 +226,21 @@ func OpenRoot(name, dir, stateDir string) (*Root, error) {
 	cur, dirs := r.walk()
 	if old.Epoch == "" || old.Idx == nil {
 		r.epoch, r.seq, r.idx = newEpoch(), 0, cur
+		r.buildKidsLocked()
 		r.oldest = 1
 		r.dirty = true
 	} else {
 		// 꺼져 있던 동안 바뀐 것을 변경 기록으로 이어 붙인다 (PC 앱은 전체를 다시 받지 않아도 됨)
 		r.epoch, r.seq, r.idx = old.Epoch, old.Seq, old.Idx
+		r.buildKidsLocked()
 		r.oldest = r.seq + 1
 		r.diffInto(cur)
 	}
+	r.mu.Lock()
+	if r.kids == nil {
+		r.buildKidsLocked()
+	}
+	r.mu.Unlock()
 	log.Printf("[%s] %s: %d개 항목, 훑는 데 %v (epoch %s, seq %d)", name, dir, len(r.idx), time.Since(t0).Round(time.Millisecond), r.epoch, r.seq)
 	if err := r.startWatch(dirs); err != nil {
 		log.Printf("[%s] 실시간 감시 시작 실패 (%v) — 주기적 비교만 사용", name, err)
@@ -248,9 +308,13 @@ func (r *Root) diffInto(cur map[string]Entry) int {
 func (r *Root) emitLocked(op string, e Entry) {
 	r.seq++
 	if op == "put" {
+		if _, had := r.idx[e.P]; !had {
+			r.addKidLocked(e.P)
+		}
 		r.idx[e.P] = e
 	} else {
 		delete(r.idx, e.P)
+		r.delKidLocked(e.P)
 	}
 	r.log = append(r.log, Change{Q: r.seq, Op: op, E: e})
 	if len(r.log) > maxLog+maxLog/4 { // 넘칠 때마다 통째로 복사하지 않고, 1/4 더 쌓이면 한 번에 잘라 냄
@@ -273,14 +337,18 @@ func (r *Root) Apply(rel string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err != nil || fi.Mode()&fs.ModeSymlink != 0 {
-		// 없어짐: 그 경로와 아래 항목 모두 삭제
-		var gone []string
-		pre := rel + "/"
-		for p := range r.idx {
-			if p == rel || strings.HasPrefix(p, pre) {
-				gone = append(gone, p)
-			}
+		// 없어짐. 파일이었으면 그 한 줄만 지움 — 예전에는 지울 때마다 색인 전체(수십만 개)를 훑어서,
+		// 대량 삭제(DSM 에서 폴더 지우기·옮기기) 때 CPU 를 다 썼음
+		old, ok := r.idx[rel]
+		if !ok {
+			return // 이미 색인에 없음 (위 폴더와 함께 지워졌거나 처음부터 몰랐음)
 		}
+		if !old.D {
+			r.emitLocked("del", old)
+			return
+		}
+		// 폴더: 그 경로와 아래 항목 모두 삭제 (아래 항목만 따라감 — 색인 전체를 훑지 않음)
+		gone := append(r.subtreeLocked(rel), rel)
 		sort.Sort(sort.Reverse(sort.StringSlice(gone)))
 		for _, p := range gone {
 			r.emitLocked("del", r.idx[p])
@@ -288,7 +356,8 @@ func (r *Root) Apply(rel string) {
 		return
 	}
 	e := entryOf(rel, fi)
-	if o, ok := r.idx[rel]; !ok || !same(o, e) {
+	prev, existed := r.idx[rel]
+	if !existed || !same(prev, e) {
 		r.emitLocked("put", e)
 	}
 	if fi.IsDir() {
@@ -329,10 +398,9 @@ func (r *Root) Apply(rel string) {
 				r.emitLocked("put", e)
 			}
 		}
-		pre := rel + "/"
 		var gone []string
-		for p := range r.idx {
-			if strings.HasPrefix(p, pre) {
+		if existed && prev.D { // 새로 생긴 폴더는 색인에 아래 항목이 없음
+			for _, p := range r.subtreeLocked(rel) {
 				if _, ok := sub[p]; !ok {
 					gone = append(gone, p)
 				}

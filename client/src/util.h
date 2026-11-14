@@ -132,7 +132,7 @@ inline bool SkipRemoteAnc(const std::string& rel) {
 class Log {
 public:
     static Log& I() { static Log l; return l; }
-    void Open(const std::wstring& path) { std::lock_guard<std::mutex> g(mu_); f_ = _wfopen(path.c_str(), L"ab"); }
+    void Open(const std::wstring& path) { std::lock_guard<std::mutex> g(mu_); path_ = path; Roll(); }
     template <class... A> void P(const char* fmt, A... a) {
         char buf[2048]; snprintf(buf, sizeof buf, fmt, a...);
         SYSTEMTIME st; GetLocalTime(&st);
@@ -141,10 +141,21 @@ public:
         std::wstring wl = W(line); DWORD w;
         HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (!WriteConsoleW(h, wl.c_str(), (DWORD)wl.size(), &w, nullptr)) { fputs(line, stdout); fflush(stdout); }
-        if (f_) { fputs(line, f_); fflush(f_); }
+        if (f_) { fputs(line, f_); fflush(f_); n_ += strlen(line); if (n_ > kMax) Roll(); }
     }
 private:
-    std::mutex mu_; FILE* f_ = nullptr;
+    static constexpr uint64_t kMax = 20ull << 20;   // 20MB 넘으면 .old.log 로 돌리고 새로 (끝없이 커지지 않게)
+    void Roll() {   // mu_ 잡은 채로
+        if (f_) { fclose(f_); f_ = nullptr; }
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        uint64_t sz = GetFileAttributesExW(path_.c_str(), GetFileExInfoStandard, &a) ? ((uint64_t)a.nFileSizeHigh << 32 | a.nFileSizeLow) : 0;
+        if (sz > kMax && path_.size() > 4) {
+            std::wstring old = path_.substr(0, path_.size() - 4) + L".old.log";
+            if (MoveFileExW(path_.c_str(), old.c_str(), MOVEFILE_REPLACE_EXISTING)) sz = 0;
+        }
+        f_ = _wfopen(path_.c_str(), L"ab"); n_ = sz;
+    }
+    std::mutex mu_; FILE* f_ = nullptr; std::wstring path_; uint64_t n_ = 0;
 };
 #define LOG(...) ::md::Log::I().P(__VA_ARGS__)
 

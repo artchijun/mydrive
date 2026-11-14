@@ -209,6 +209,11 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
   <div class="foot"><button class="btn" data-close="mAdd">취소</button><button class="btn pri" id="addOk">추가</button></div>
 </div></div>
 
+<div id="mAsk" class="modal"><div class="dlg" style="width:min(460px,100%)">
+  <h3 id="askTitle">확인</h3>
+  <div class="body"><p id="askMsg" style="margin:0;white-space:pre-line"></p></div>
+  <div class="foot"><button class="btn" id="askNo">취소</button><button class="btn pri" id="askYes">확인</button></div>
+</div></div>
 <div id="mTok" class="modal"><div class="dlg">
   <h3>새 토큰</h3>
   <div class="body"><p id="tokMsg" style="margin-top:0"></p><div class="token" id="tokVal"></div></div>
@@ -233,6 +238,16 @@ function ago(ns) { const s = (Date.now() - ns / 1e6) / 1000; if (s < 60) return 
 function uptime(ns) { const s = (Date.now() - ns / 1e6) / 1000; if (s < 3600) return Math.max(1, Math.floor(s / 60)) + '분'; if (s < 86400) return Math.floor(s / 3600) + '시간'; return Math.floor(s / 86400) + '일'; }
 function toast(msg, err) { const t = $('toast'); t.textContent = msg; t.className = 'toast' + (err ? ' err' : ''); t.style.display = 'block'; clearTimeout(t._h); t._h = setTimeout(() => t.style.display = 'none', 3500); }
 
+// 확인 창: 브라우저 confirm() 은 DSM 창·내장 브라우저 등에서 안 뜨고 바로 '취소'가 되는 경우가 있어 페이지 안에 직접 띄움
+function ask(msg) {
+  return new Promise(res => {
+    const m = $('mAsk'), lines = String(msg).split('\n');
+    $('askTitle').textContent = lines[0]; $('askMsg').textContent = lines.slice(1).join('\n').replace(/^\n+/, '');
+    const done = v => { m.classList.remove('on'); $('askYes').onclick = $('askNo').onclick = null; res(v); };
+    $('askYes').onclick = () => done(true); $('askNo').onclick = () => done(false);
+    m.classList.add('on'); $('askYes').focus();
+  });
+}
 async function api(path, body) {
   const h = { 'X-Mydrive-Console': '1' };   // DSM 로그인으로 들어올 때 필요 (다른 사이트가 몰래 부르지 못하게)
   if (TOKEN) h['Authorization'] = 'Bearer ' + TOKEN;
@@ -289,7 +304,7 @@ async function refresh() {
 function renderDevs(ds) {
   $('devs').innerHTML = ds.length ? '<tr><th>PC</th><th>DSM 사용자</th><th>연결한 날</th><th>마지막 사용</th><th></th></tr>' + ds.map(d => `<tr><td><b>${esc(d.pc)}</b></td><td class="sub">${esc(d.user)}</td><td class="sub">${new Date(d.created / 1e6).toLocaleDateString()}</td><td>${d.last ? ago(d.last) : '-'}</td><td style="text-align:right"><button class="btn sm danger" data-rev="${esc(d.id)}" data-pc="${esc(d.pc)}">끊기</button></td></tr>`).join('') : '<tr><td class="empty">아직 없습니다</td></tr>';
   document.querySelectorAll('[data-rev]').forEach(b => b.onclick = async () => {
-    if (!confirm(`'${b.dataset.pc}' PC의 연결을 끊을까요?\n\n그 PC의 Mydrive는 바로 동기화를 멈춥니다. 다시 쓰려면 그 PC에서 DSM 계정으로 다시 연결하면 됩니다.`)) return;
+    if (!await ask(`'${b.dataset.pc}' PC의 연결을 끊을까요?\n\n그 PC의 Mydrive는 바로 동기화를 멈춥니다. 다시 쓰려면 그 PC에서 DSM 계정으로 다시 연결하면 됩니다.`)) return;
     try { await api('/v1/admin/devices', { revoke: b.dataset.rev }); toast('끊었습니다'); refresh(); } catch (e) { toast(e.message, true); }
   });
 }
@@ -389,12 +404,12 @@ $('addOk').onclick = async () => {
   catch (e) { toast(e.message, true); }
 };
 async function removeRoot(n) {
-  if (!confirm(`'${n}' 동기화 폴더를 뺄까요?\n\nNAS의 파일은 그대로 남습니다. 이 폴더를 맞추던 PC 앱은 더 이상 맞추지 않습니다.`)) return;
+  if (!await ask(`'${n}' 동기화 폴더를 뺄까요?\n\nNAS의 파일은 그대로 남습니다. 이 폴더를 맞추던 PC 앱은 더 이상 맞추지 않습니다.`)) return;
   try { await api('/v1/admin/roots', { remove: n }); toast('뺐습니다 (파일은 그대로)'); refresh(); } catch (e) { toast(e.message, true); }
 }
 document.querySelectorAll('[data-tok]').forEach(b => b.onclick = async () => {
   const which = b.dataset.tok, what = which === 'sync' ? '동기화 토큰' : '관리 토큰';
-  if (!confirm(`${what}을 새로 만들까요?\n\n예전 토큰은 바로 쓸 수 없게 됩니다.` + (which === 'sync' ? '\n모든 PC 앱의 설정에 새 토큰을 넣어야 다시 맞춥니다.' : ''))) return;
+  if (!await ask(`${what}을 새로 만들까요?\n\n예전 토큰은 바로 쓸 수 없게 됩니다.` + (which === 'sync' ? '\n모든 PC 앱의 설정에 새 토큰을 넣어야 다시 맞춥니다.' : ''))) return;
   try {
     const j = await api('/v1/admin/token', { which });
     if (which === 'admin') { TOKEN = j.token; try { localStorage.setItem('mdAdmin', TOKEN); } catch (e) {} }
@@ -404,7 +419,7 @@ document.querySelectorAll('[data-tok]').forEach(b => b.onclick = async () => {
 });
 $('copyBtn').onclick = () => navigator.clipboard && navigator.clipboard.writeText($('tokVal').textContent).then(() => toast('복사했습니다'));
 $('rsBtn').onclick = async () => {
-  if (!confirm('서버를 다시 시작할까요? 몇 초 동안 동기화가 멈췄다가 이어집니다.')) return;
+  if (!await ask('서버를 다시 시작할까요? 몇 초 동안 동기화가 멈췄다가 이어집니다.')) return;
   try { await api('/v1/admin/restart', {}); } catch (e) {}
   toast('다시 시작하는 중…'); setTimeout(refresh, 5000);
 };

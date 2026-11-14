@@ -45,7 +45,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.8"
+const version = "0.6.9"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -69,7 +69,7 @@ func main() {
 		roots[rc.Name] = r
 	}
 	go func() {
-		for range time.Tick(30 * time.Second) {
+		for range time.Tick(2 * time.Minute) { // 색인 통째 복사·기록은 무거워서 2분마다 (꺼졌다 켜지면 디스크를 다시 훑어 이어 붙이므로 잃는 것 없음)
 			for _, r := range rootList() {
 				r.Save()
 			}
@@ -243,11 +243,16 @@ func hRescan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, r, map[string]any{"changed": n, "ms": time.Since(t0).Milliseconds()})
 }
 
+// 전체 목록·내용 해시는 무거워서 동시에 몇 개만 (PC 여럿이 한꺼번에 처음 맞출 때 NAS 가 버티게)
+var heavySem = make(chan struct{}, 2)
+
 func hSnapshot(w http.ResponseWriter, r *http.Request) {
 	rt := getRoot(w, r)
 	if rt == nil {
 		return
 	}
+	heavySem <- struct{}{}
+	defer func() { <-heavySem }()
 	ep, seq, es := rt.Snapshot()
 	writeJSON(w, r, map[string]any{"epoch": ep, "seq": seq, "entries": es})
 }

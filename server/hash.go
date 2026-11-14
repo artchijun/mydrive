@@ -36,6 +36,8 @@ func hHash(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad_path", "경로가 올바르지 않음")
 		return
 	}
+	heavySem <- struct{}{}
+	defer func() { <-heavySem }()
 	f, err := os.Open(filepath.Join(rt.Dir, filepath.FromSlash(rel)))
 	if err != nil {
 		httpErr(w, 404, "not_found", "파일이 없음")
