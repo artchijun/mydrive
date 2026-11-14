@@ -99,7 +99,9 @@ public:
     bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
     void ClearCanceled() { std::lock_guard<std::mutex> g(xMu_); canceled_.clear(); }   // [지금 동기화]: 취소한 것도 다시 맞춤
     // 일시 중지: minutes 동안 (0 = 다시 시작)
-    void Pause(int minutes) { pausedUntil_ = minutes > 0 ? GetTickCount64() + (uint64_t)minutes * 60000 : 0; Kick(); }
+    // minutes > 0: 그만큼, < 0: 다시 시작할 때까지, 0: 다시 시작
+    void Pause(int minutes) { pausedUntil_ = minutes > 0 ? GetTickCount64() + (uint64_t)minutes * 60000 : minutes < 0 ? (1ull << 62) : 0; Kick(); }
+    bool PausedForever() const { return pausedUntil_ >= (1ull << 62); }
     bool Paused() const { return pausedUntil_ > GetTickCount64(); }
     uint64_t PausedLeftMs() const { uint64_t t = pausedUntil_, n = GetTickCount64(); return t > n ? t - n : 0; }
     std::atomic<bool> busy{false};

@@ -223,7 +223,26 @@ static void LoadAlerts() {
 
 // ---------- 잠시 멈춤 ----------
 static bool AnyPaused() { for (auto& e : g_engines) if (e->Paused()) return true; return false; }
+static bool AllPaused() { if (g_engines.empty()) return false; for (auto& e : g_engines) if (!e->Paused()) return false; return true; }
+// 작업 하나만 멈춤/다시 시작 ('다시 시작할 때까지'는 설정에 남겨 앱을 다시 켜도 유지)
+static void SetConnPausedFlag(const std::string& name, bool on) {
+    for (auto& c : g_cfg.conns) if (c.name == name && c.paused != on) { c.paused = on; SaveCfg(); }
+}
+static std::wstring MinText(int m);
+static std::wstring ClockAfter(uint64_t ms);
+static void PauseConn(int i, int minutes) {
+    if (i < 0 || i >= (int)g_engines.size()) return;
+    Engine& e = *g_engines[i];
+    std::wstring nm = W(e.cfg().name);
+    bool was = e.Paused();
+    e.Pause(minutes);
+    SetConnPausedFlag(e.cfg().name, minutes < 0);
+    if (minutes > 0) AddAlert(A_PAUSE, L"'" + nm + L"' 작업만 " + MinText(minutes) + L" 동안 멈춤 (" + ClockAfter((uint64_t)minutes * 60000) + L"까지)", e.cfg().localRoot);
+    else if (minutes < 0) AddAlert(A_PAUSE, L"'" + nm + L"' 작업만 다시 시작할 때까지 멈춤", e.cfg().localRoot);
+    else if (was) AddAlert(A_RESUME, L"'" + nm + L"' 작업을 다시 시작함", e.cfg().localRoot);
+}
 static uint64_t PausedLeft() { uint64_t m = 0; for (auto& e : g_engines) m = std::max(m, e->PausedLeftMs()); return m; }
+static bool AnyPausedForever() { for (auto& e : g_engines) if (e->PausedForever()) return true; return false; }
 static std::wstring ClockAfter(uint64_t ms) {
     SYSTEMTIME st; GetLocalTime(&st); FILETIME ft; SystemTimeToFileTime(&st, &ft);
     uint64_t v = (((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) + ms * 10000ULL;
@@ -234,6 +253,7 @@ static std::wstring MinText(int m) { return m % 60 == 0 ? Fmt(L"%d시간", m / 6
 static void PauseAll(int minutes) {
     bool was = AnyPaused();
     for (auto& e : g_engines) e->Pause(minutes);
+    for (auto& c : g_cfg.conns) if (c.paused) { c.paused = false; SaveCfg(); }   // 전체 멈춤·다시 시작이 작업별 멈춤보다 우선
     if (minutes > 0) AddAlert(A_PAUSE, MinText(minutes) + L" 동안 동기화를 멈춤 (" + ClockAfter((uint64_t)minutes * 60000) + L"까지)");
     else if (was) AddAlert(A_RESUME, L"동기화를 다시 시작함");
     Popup_Invalidate();
@@ -309,7 +329,7 @@ static Overall GetOverall() {
     o.offline = g_offlineSince && now - g_offlineSince > 20000;   // 잠깐 끊긴 것은 넘김
     if (g_engines.empty()) { o.state = T_NET; o.text = L"연결 없음"; o.color = col::Orange(); }
     else if (!o.stuck.empty() || o.held > 0) { o.state = T_STUCK; o.text = o.held > 0 && o.stuck.empty() ? L"확인 필요" : L"막힘"; o.color = col::Red(); }
-    else if (AnyPaused()) { o.state = T_HOLD; o.text = L"동기화 멈춤"; o.color = col::Hold(); }
+    else if (AllPaused()) { o.state = T_HOLD; o.text = L"동기화 멈춤"; o.color = col::Hold(); }
     else if (o.offline) { o.state = T_NET; o.text = L"연결 안 됨"; o.color = col::Orange(); }
     else if (busy || o.xfers) { o.state = T_SYNC; o.text = L"동기화 중"; o.color = col::Blue(); }
     else { o.state = T_IDLE; o.text = L"대기 중"; o.color = col::Green(); }
@@ -421,6 +441,7 @@ enum Hit {
     H_NONE = 0, H_SET = 1, H_HELP, H_PIN, H_CLOSE, H_TAB0, H_TAB1, H_TAB2, H_SYNCNOW, H_P30, H_P60, H_P180, H_RESUME,
     H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL, H_RESCAN, H_HELDLIST,
     H_HELDDIR = 90,        // + 0..2 (대량 삭제가 일어난 폴더)
+    H_CONNPAUSE = 7800,    // + 연결 번호 (이 작업만 멈춤/다시 시작)
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -485,7 +506,7 @@ static void DrawNow(Rect r, const Overall& o) {
     std::sort(xs.begin(), xs.end(), [](auto& a, auto& b) { return a.second.startTick < b.second.startTick; });
     int ups = 0, downs = 0;
     for (auto& [i, t] : xs) (t.up ? ups : downs)++;
-    if (o.state == T_HOLD) { g = 0xE769; label = L"동기화를 멈췄습니다"; where = ClockAfter(PausedLeft()) + L"에 저절로 다시 시작"; }
+    if (o.state == T_HOLD) { g = 0xE769; label = L"동기화를 멈췄습니다"; where = AnyPausedForever() ? std::wstring(L"다시 시작할 때까지 멈춤 — [지금 동기화]로 다시 시작") : ClockAfter(PausedLeft()) + L"에 저절로 다시 시작"; }
     else if (o.offline) { g = 0xE871; label = L"NAS에 연결할 수 없습니다"; where = ServerHost() + L" — 다시 시도하는 중"; }
     else if (!xs.empty()) {
         g = (ups && downs) ? 0xE895 : ups ? 0xE898 : 0xE896; c = (ups && !downs) ? col::Up() : col::Green(); tile = Alpha(c, 0.14f);
@@ -710,12 +731,12 @@ static float BarHeight() { return 11 + 34 + 8 + (float)g_engines.size() * 24 + 9
 static void DrawBar(Rect r, const Overall& o) {
     Card(r);
     Rect in{r.l + 11, r.t + 9, r.r - 11, r.b - 9};
-    bool paused = AnyPaused();
+    bool paused = AllPaused();   // 몇 작업만 멈췄으면 그 줄에만 표시
     Color ic = paused ? col::Hold() : o.offline ? col::Orange() : col::Muted();
     g_cv.Icon(paused ? 0xE769 : 0xE895, {in.l, in.t, in.l + 18, in.t + 34}, ic, 15);
     std::wstring title = paused ? L"동기화 멈춤" : L"동기화";
     std::wstring text;
-    if (paused) text = ClockAfter(PausedLeft()) + L"까지 멈춤 · 그동안 바뀐 것은 다시 시작할 때 한꺼번에 맞춤";
+    if (paused) text = (AnyPausedForever() ? std::wstring(L"다시 시작할 때까지") : ClockAfter(PausedLeft()) + L"까지") + L" 멈춤 · 그동안 바뀐 것은 다시 시작할 때 한꺼번에 맞춤";
     else if (o.offline) text = L"NAS에 연결할 수 없음 — 15초마다 다시 시도";
     else if (o.pend > 0) text = Fmt(L"맞출 것 %lld개 남음", o.pend);
     else text = L"바뀌면 바로 맞춤";
@@ -750,6 +771,7 @@ static void DrawBar(Rect r, const Overall& o) {
         float nw = g_cv.TextWidth(nm, {12, DWRITE_FONT_WEIGHT_SEMI_BOLD});
         g_cv.Text(nm, {in.l + 26, y, in.l + 26 + nw + 2, y + 22}, col::Text(), {12, DWRITE_FONT_WEIGHT_SEMI_BOLD});
         std::wstring s = StateText(st);
+        if (st == 2) s = e.PausedForever() ? L"멈춤 · 다시 시작할 때까지" : L"멈춤 · " + ClockAfter(e.PausedLeftMs()) + L"까지";
         if (e.stats.pending > 0 && st == 1) s += Fmt(L" · %d개", (int)e.stats.pending);
         if (e.stats.waiting > 0) s += Fmt(L" · 기다림 %d", (int)e.stats.waiting);
         float sw = g_cv.TextWidth(s, {11}) + 4;
@@ -763,15 +785,23 @@ static void DrawBar(Rect r, const Overall& o) {
             g_cv.Text(mode, chip, Hex(0xFF9CC7F0), {10.5f, DWRITE_FONT_WEIGHT_NORMAL, ui::Center});
             mw += 6;
         }
-        g_cv.Text(L"↔  " + e.cfg().localRoot, {in.l + 32 + nw + mw, y, in.r - sw - 6, y + 22}, col::Muted(), {11});
-        g_cv.Text(s, {in.r - sw, y, in.r, y + 22}, dc, {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Right});
+        float pbw = 24;   // 오른쪽 끝: 이 작업만 멈춤 [⏸] / 다시 시작 [▶]
+        g_cv.Text(L"↔  " + e.cfg().localRoot, {in.l + 32 + nw + mw, y, in.r - pbw - sw - 6, y + 22}, col::Muted(), {11});
+        g_cv.Text(s, {in.r - pbw - sw, y, in.r - pbw - 2, y + 22}, dc, {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Right});
         std::wstring tip = L"NAS '" + nm + L"' ↔ " + e.cfg().localRoot;
         if (e.cfg().onDemand) {
             tip += L"\n필요할 때 받기: 목록만 두고 열 때 받음";
             if (!e.cfg().keepDirs.empty()) { tip += L"\n항상 이 PC에 둘 폴더:"; for (auto& k : e.cfg().keepDirs) tip += L"\n  · " + W(k); }
             if (e.cfg().autoFreeDays > 0) tip += Fmt(L"\n%d일 동안 안 연 파일은 자동으로 온라인 전용", e.cfg().autoFreeDays);
         } else tip += L"\n모두 받아 두기: 모든 파일을 이 PC에 둠";
-        g_cv.AddHit(row, H_CONN + i, tip + L"\n누르면 PC 폴더를 엽니다");
+        g_cv.AddHit(row, H_CONN + i, tip + L"\n누르면 PC 폴더를 엽니다 · 오른쪽 클릭: 이 작업만 멈춤");
+        {
+            Rect pb{in.r - pbw + 2, y + 1, in.r, y + 21};
+            bool hot = g_cv.hover == H_CONNPAUSE + i;
+            if (hot) g_cv.Fill(pb, col::White(0.17f), 6);
+            g_cv.Icon(st == 2 ? 0xE768 : 0xE769, pb, st == 2 ? col::Hold() : (hot ? col::Text() : col::Muted()), 11);
+            g_cv.AddHit(pb, H_CONNPAUSE + i, st == 2 ? L"이 작업을 다시 시작합니다 (그동안 바뀐 것을 맞춤)" : L"이 작업만 잠시 멈춥니다 (30분·1시간·3시간·다시 시작할 때까지). 다른 작업은 계속 맞춤");
+        }
         y += 24;
     }
 }
@@ -1098,6 +1128,35 @@ static void KillHolder(int k, int j) {
     for (auto& eng : g_engines) eng->Kick();
     g_stuckViewAt = 0;
 }
+// 작업 하나: 멈춤 시간 고르기 (오른쪽 끝 [⏸] 또는 줄 오른쪽 클릭)
+static void ConnMenu(int i, bool withPath) {
+    if (i < 0 || i >= (int)g_engines.size()) return;
+    Engine& e = *g_engines[i];
+    HMENU m = CreatePopupMenu();
+    if (e.Paused()) AppendMenuW(m, MF_STRING, 10, L"이 작업 다시 시작");
+    else {
+        AppendMenuW(m, MF_STRING, 11, L"이 작업만 30분 멈춤");
+        AppendMenuW(m, MF_STRING, 12, L"이 작업만 1시간 멈춤");
+        AppendMenuW(m, MF_STRING, 13, L"이 작업만 3시간 멈춤");
+        AppendMenuW(m, MF_STRING, 14, L"이 작업만 다시 시작할 때까지 멈춤");
+    }
+    if (withPath) {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, 1, L"PC 폴더 열기");
+        AppendMenuW(m, MF_STRING, 2, L"경로 복사");
+    }
+    POINT pt; GetCursorPos(&pt);
+    int c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_pop, nullptr);
+    DestroyMenu(m);
+    if (c == 10) PauseConn(i, 0);
+    else if (c == 11) PauseConn(i, 30);
+    else if (c == 12) PauseConn(i, 60);
+    else if (c == 13) PauseConn(i, 180);
+    else if (c == 14) PauseConn(i, -1);
+    else if (c == 1) ShellExecuteW(g_pop, L"open", e.cfg().localRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    else if (c == 2) CopyText(e.cfg().localRoot);
+    if (c) Popup_Invalidate();
+}
 static void PathMenu(const std::wstring& path) {
     if (path.empty()) return;
     HMENU m = CreatePopupMenu();
@@ -1171,6 +1230,10 @@ static void OnClick(int id) {
     else if (id == H_SUMREF) g_sum.at = 0;
     else if (id >= H_LOGF && id < H_LOGF + 4) { g_logFilter = id - H_LOGF; g_scrollLog = 0; }
     else if (id == H_LOGOPEN) ShellExecuteW(g_pop, L"open", L"notepad.exe", (L"\"" + AlertPath() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    else if (id >= H_CONNPAUSE && id < H_CONNPAUSE + 100 && id - H_CONNPAUSE < (int)g_engines.size()) {
+        int k = id - H_CONNPAUSE;
+        if (g_engines[k]->Paused()) PauseConn(k, 0); else ConnMenu(k, false);
+    }
     else if (id >= H_HELDDIR && id < H_HELDDIR + 3 && id - H_HELDDIR < (int)g_heldDirAbs.size()) RevealInExplorer(g_heldDirAbs[id - H_HELDDIR]);
     else if (id >= H_CONN && id < H_CONN + 100 && id - H_CONN < (int)g_engines.size()) ShellExecuteW(g_pop, L"open", g_engines[id - H_CONN]->cfg().localRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     else if (id >= H_STUCKCOPY && id < H_STUCKCOPY + 100 && id - H_STUCKCOPY < (int)g_stuckView.size()) CopyText(g_stuckView[id - H_STUCKCOPY].abs);
@@ -1257,7 +1320,8 @@ static LRESULT CALLBACK PopupProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_RBUTTONUP:
         g_cv.hover = HitIdAt(lp);
         if (auto p = PathOfHit(g_cv.hover)) PathMenu(*p);
-        else if (g_cv.hover >= H_CONN && g_cv.hover < H_CONN + 100 && g_cv.hover - H_CONN < (int)g_engines.size()) PathMenu(g_engines[g_cv.hover - H_CONN]->cfg().localRoot);
+        else if (g_cv.hover >= H_CONN && g_cv.hover < H_CONN + 100 && g_cv.hover - H_CONN < (int)g_engines.size()) ConnMenu(g_cv.hover - H_CONN, true);
+        else if (g_cv.hover >= H_CONNPAUSE && g_cv.hover < H_CONNPAUSE + 100) ConnMenu(g_cv.hover - H_CONNPAUSE, false);
         return 0;
     case WM_MOUSEWHEEL: {
         POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}; ScreenToClient(h, &pt);

@@ -36,6 +36,7 @@ struct Conn {
     bool web = false;                 // 받는 방식 '웹드라이브처럼 사용': PC에 파일을 두지 않고 NAS 를 드라이브로 붙임 (webdrive.cpp)
     std::wstring mount;               // 웹드라이브를 붙일 드라이브 문자 ("M:"). 비어 있으면 local 폴더에 붙임
     bool off = false;                 // 웹드라이브 연결을 끊어 둠 ([연결 끊기] / [연결])
+    bool paused = false;              // 이 작업만 '다시 시작할 때까지' 멈춤 (앱을 다시 켜도 유지)
 };
 struct AppCfg {
     std::wstring server = L"http://192.168.0.6:8642";
@@ -113,6 +114,7 @@ static void LoadCfg() {
         x.web = c.value("mode", std::string()) == "webdrive";
         x.mount = W(c.value("mount", std::string()));
         x.off = c.value("off", false);
+        x.paused = c.value("paused", false);
         g_cfg.conns.push_back(x);
     }
     // 예전 '우선순위 높음' 짝은 맨 위로 (이제는 목록 순서 = 우선순위)
@@ -127,7 +129,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}, {"paused", c.paused}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -277,6 +279,7 @@ static void StartEngines() {
             g_evPending.push_back(EvRow{t, cname, W(k), W(p), W(x)});
             if (!g_evPosted) g_evPosted = PostMessageW(g_main, WM_APP_EVENT, 0, 0) != FALSE;   // 쌓인 것을 한 번에 가져가라는 알림 하나만
         };
+        if (c.paused) e->Pause(-1);
         e->Start();
         g_engines.push_back(std::move(e));
     }
@@ -349,7 +352,7 @@ static void Tick() {
     std::wstring tip = L"Mydrive · " + o.text;
     if (o.state == T_STUCK && !o.stuck.empty()) tip += L" — " + Leaf(W(o.stuck[0].second.p));
     else if (!o.xf.empty()) tip += L" — " + Leaf(W(o.xf[0].second.p));
-    else if (o.state == T_HOLD) tip += L" · " + ClockAfter(PausedLeft()) + L"까지";
+    else if (o.state == T_HOLD) tip += AnyPausedForever() ? std::wstring(L" · 다시 시작할 때까지") : L" · " + ClockAfter(PausedLeft()) + L"까지";
     TraySet(o.state, tip);
     Popup_Invalidate();
 }
