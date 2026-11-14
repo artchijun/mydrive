@@ -17,6 +17,7 @@
 208 ICON "menu_copy.ico"
 209 ICON "menu_keep.ico"
 210 ICON "menu_free.ico"
+211 ICON "menu_move.ico"
 1 RT_MANIFEST "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO

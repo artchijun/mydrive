@@ -647,7 +647,7 @@ static HWND s_sk[5];   // 맞추지 않을 임시·시스템 파일 종류
 static void OpenTask(HWND owner, int idx);   // 동기화 작업 만들기(-1) / 편집   // 탐색기 상태 아이콘 설명
 static std::vector<std::wstring> s_names;   // NAS 폴더 이름 ([연결 시험] 때 받아 둠)   // 고른 짝의 PC 폴더 · 제목 · 빈 목록 안내
 static HWND s_pick, s_pickInfo, s_prio, s_high, s_excl, s_maxsize, s_quiet, s_defer, s_rescan, s_up, s_down;
-static const int kPages = 5;
+static const int kPages = 6;   // 0 서버 연결 1 동기화 작업 2 규칙 3 속도와 시작 4 업데이트 5 탐색기 아이콘
 static std::vector<HWND> s_descs, s_labels, s_heads, s_lines, s_page[kPages];
 static HWND s_panel[kPages];
 static int s_panelH[kPages];
@@ -693,6 +693,9 @@ static std::wstring SkipSummary(const Conn& c) {
 }
 // 동기화 작업 표: NAS 폴더 | PC 폴더 | 받는 방식 | 상태  (위에 있는 작업부터 먼저 맞춤)
 static HWND s_thead;
+static void FitConnList();   // 아래: 작업 표를 작업 수만큼 키움 (스크롤 없이 모두 보이게)
+static HWND s_listHint;
+static int s_panelHNow;      // 지금 설정 창의 면 높이
 static void FillConnList() {
     s_filling = true;
     SendMessageW(s_list, LB_RESETCONTENT, 0, 0);
@@ -701,6 +704,7 @@ static void FillConnList() {
     ShowWindow(s_empty, s_conns.empty() ? SW_SHOW : SW_HIDE);
     InvalidateRect(s_list, nullptr, TRUE);
     s_filling = false;
+    FitConnList();
 }
 static void FillRound(HDC dc, RECT r, COLORREF c, int rad);
 struct TaskCols { int nas, pc, mode, st; };
@@ -929,9 +933,9 @@ static void CreateSettingsControls(HWND h) {
     DWORD es = WS_TABSTOP | ES_AUTOHSCROLL;
     s_tabSel = 0;
     // 왼쪽 메뉴
-    const wchar_t* names[kPages] = {L"서버 연결", L"동기화 작업", L"규칙과 저장 공간", L"속도와 시작", L"업데이트"};
-    const wchar_t icons[kPages] = {0xE774, 0xE8B7, 0xE71C, 0xEC4A, 0xE895};
-    const int order[kPages] = {1, 0, 2, 3, 4};   // 왼쪽 메뉴 보이는 순서: 동기화 작업이 맨 위
+    const wchar_t* names[kPages] = {L"서버 연결", L"동기화 작업", L"규칙과 저장 공간", L"속도와 시작", L"업데이트", L"탐색기 아이콘"};
+    const wchar_t icons[kPages] = {0xE774, 0xE8B7, 0xE71C, 0xEC4A, 0xE895, 0xE753};
+    const int order[kPages] = {1, 0, 2, 3, 5, 4};   // 왼쪽 메뉴 보이는 순서: 동기화 작업이 맨 위, 업데이트가 맨 아래
     for (int d = 0; d < kPages; d++) {
         int i = order[d];
         HWND b = Ctl(h, L"BUTTON", names[i], BS_OWNERDRAW | WS_TABSTOP, 900 + i);
@@ -1015,7 +1019,7 @@ static void CreateSettingsControls(HWND h) {
         MoveWindow(s_thead, s_cx, y, s_cw, S(28), TRUE);
         y += S(28);
         const int itemH = S(44);
-        int listH = itemH * std::clamp((int)g_cfg.conns.size(), 2, 5);
+        int listH = itemH * std::max(2, (int)g_cfg.conns.size());   // 작업이 많아도 스크롤 없이 모두 (창이 그만큼 커짐)
         s_list = SCtl(h, L"LISTBOX", L"", LBS_OWNERDRAWFIXED | LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, IDS_LIST);
         SendMessageW(s_list, LB_SETITEMHEIGHT, 0, itemH);
         MoveWindow(s_list, s_cx, y, s_cw, listH, TRUE);
@@ -1027,10 +1031,15 @@ static void CreateSettingsControls(HWND h) {
         SendMessageW(d, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
         MoveWindow(d, s_cx, y, s_cw, S(18), TRUE);
         s_descs.push_back(d);
-        y += S(18) + S(22);
+        s_listHint = d;
+        y += S(18) + S(16);
     }
     s_mark = s_page[1].size();
-    y = Head(h, y, L"탐색기 상태 아이콘");
+    s_panelH[1] = y;
+
+    // ── 6. 탐색기 아이콘 (탐색기 '상태' 칸의 뜻) ──
+    s_curPage = 5; s_mark = 0;
+    y = Head(h, S(22), L"탐색기 상태 아이콘", true);
     {
         const int n = (int)(sizeof kLegend / sizeof kLegend[0]), lh = S(44) * n;
         s_legend = SCtl(h, L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY, 0);
@@ -1038,7 +1047,7 @@ static void CreateSettingsControls(HWND h) {
         AddTip(s_tip, s_legend, L"탐색기 '상태' 칸에 보이는 아이콘의 뜻입니다.\n파일·폴더를 오른쪽 클릭 → Mydrive → 항상 이 장치에 유지 / 공간 확보로 바꿀 수 있습니다.");
         y += lh + S(4);
     }
-    s_panelH[1] = y + S(8);
+    s_panelH[5] = y + S(8);
 
     // ── 3. 규칙과 저장 공간 ──
     s_curPage = 2; s_mark = 0;
@@ -1162,6 +1171,8 @@ static void CreateSettingsControls(HWND h) {
     // 가장 긴 메뉴에 맞추지 않고 보통 크기로 (넘치는 메뉴는 스크롤). 화면이 작으면 그보다 더 줄임
     int panelH = std::min({maxH, S(480), workH - s_barH - S(90)});
     panelH = std::max(panelH, S(300));
+    panelH = std::max(panelH, std::min(s_panelH[1], workH - s_barH - S(90)));   // 동기화 작업 메뉴는 늘 스크롤 없이
+    s_panelHNow = panelH;
     int hh = panelH + s_barH;
     for (int i = 0; i < kPages; i++) {
         MoveWindow(s_panel[i], s_sideW, 0, PW, panelH, TRUE);
@@ -1621,16 +1632,23 @@ static HWND p_web, p_mFolder, p_mDrive, p_letter, p_mLabel, p_wfsp, p_wdesc, p_m
 static void PickTab(HWND h, int k);
 static std::wstring PickLetter() { std::wstring s = GetText(p_letter); return s.size() >= 2 ? s.substr(0, 2) : L""; }
 // 받는 방식 탭: 고른 것 표시 + 웹드라이브면 '연결할 곳' 보이기
+static HWND p_browse, p_gd;
+// 동기화 방식 탭: 받는 방식에 따라 아래 '이 PC의 폴더 / 연결할 곳' 칸을 바꿔 보여 줌
 static void PickModeUi() {
-    ChkSet(p_od, !t_conn.web && t_conn.onDemand); ChkSet(p_all, !t_conn.web && !t_conn.onDemand); ChkSet(p_web, t_conn.web);
-    int sw = t_conn.web ? SW_SHOW : SW_HIDE;
-    for (HWND c : {p_mLabel, p_mFolder, p_mDrive, p_letter, p_wdesc}) ShowWindow(c, sw);
-    ShowWindow(p_mdesc, t_conn.web ? SW_HIDE : SW_SHOW);
-    bool letter = !t_conn.mount.empty();
+    const int x = S(16), CW = S(530), eh = S(28), bw = S(40);
+    bool web = t_conn.web, letter = web && !t_conn.mount.empty();
+    ChkSet(p_od, !web && t_conn.onDemand); ChkSet(p_all, !web && !t_conn.onDemand); ChkSet(p_web, web);
+    SetWindowTextW(p_mLabel, web ? L"연결할 곳" : L"이 PC의 폴더");
+    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wdesc}) ShowWindow(c, web ? SW_SHOW : SW_HIDE);
+    for (HWND c : {p_gd, p_mdesc}) ShowWindow(c, web ? SW_HIDE : SW_SHOW);
+    int ly = web ? S(444) : S(340);
+    MoveWindow(p_local, x, ly, CW - bw - S(6), eh, TRUE); MoveWindow(p_browse, x + CW - bw, ly, bw, eh, TRUE);
+    for (HWND c : {p_local, p_browse}) ShowWindow(c, letter ? SW_HIDE : SW_SHOW);
     ChkSet(p_mFolder, !letter); ChkSet(p_mDrive, letter);
     EnableWindow(p_letter, letter);
-    ShowWindow(p_wfsp, t_conn.web && !WinFspInstalled() ? SW_SHOW : SW_HIDE);
+    ShowWindow(p_wfsp, web && !WinFspInstalled() ? SW_SHOW : SW_HIDE);
     for (HWND c : {p_od, p_all, p_web, p_mFolder, p_mDrive}) InvalidateRect(c, nullptr, TRUE);
+    InvalidateRect(p_mLabel, nullptr, TRUE);
 }
 #define WM_APP_WFSP (WM_APP + 41)
 // WinFsp 설치: GitHub 의 최신 설치 파일(.msi)을 받아 실행 (Windows 가 관리자 승인을 물음)
@@ -1696,20 +1714,21 @@ static void PickLoad(HWND h, const std::string& root) {
     }).detach();
 }
 static std::string PickRootName() { return t_idx >= 0 ? t_conn.name : U(Trim(GetText(p_rootBox))); }
+// 탭: 0 동기화 방식 (NAS 폴더 · 받는 방식 · 이 PC의 폴더/연결할 곳) / 1 받을 폴더 (체크 목록)
 static void PickTab(HWND h, int k) {
     s_dlgTab = k;
-    for (int t = 0; t < 3; t++) for (HWND c : p_pg[t]) ShowWindow(c, t == k ? SW_SHOW : SW_HIDE);
-    for (int t = 0; t < 3; t++) InvalidateRect(GetDlgItem(h, IDP_TAB0 + t), nullptr, TRUE);
-    if (k == 0 && t_conn.web) {
+    for (int t = 0; t < 2; t++) for (HWND c : p_pg[t]) ShowWindow(c, t == k ? SW_SHOW : SW_HIDE);
+    for (int t = 0; t < 2; t++) InvalidateRect(GetDlgItem(h, IDP_TAB0 + t), nullptr, TRUE);
+    if (k == 0) { PickModeUi(); return; }
+    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc, p_local, p_browse, p_gd, p_mdesc}) ShowWindow(c, SW_HIDE);
+    if (t_conn.web) {
         ShowWindow(p_list, SW_HIDE);
         SetWindowTextW(p_info, L"웹드라이브는 NAS 폴더 전체를 드라이브로 보여 줍니다. 여기서 고를 폴더는 없습니다.");
-    } else if (k == 0) {
-        std::string root = PickRootName();
-        if (root.empty()) { p_guard = true; ListView_DeleteAllItems(p_list); p_guard = false; p_loadName.clear(); p_loaded = false; SetWindowTextW(p_info, L"먼저 [일반] 탭에서 NAS 폴더를 고르세요."); }
-        else if (root != p_loadName) PickLoad(h, root);
+        return;
     }
-    if (k == 1) PickModeUi();
-    else for (HWND c : {p_mLabel, p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc}) ShowWindow(c, SW_HIDE);
+    std::string root = PickRootName();
+    if (root.empty()) { p_guard = true; ListView_DeleteAllItems(p_list); p_guard = false; p_loadName.clear(); p_loaded = false; SetWindowTextW(p_info, L"먼저 [동기화 방식] 탭에서 NAS 폴더를 고르세요."); }
+    else if (root != p_loadName) PickLoad(h, root);
 }
 static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     LRESULT dr;
@@ -1719,38 +1738,62 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         p_win = h; p_loaded = false; p_loadName.clear(); p_dirs.clear();
         for (auto& v : p_pg) v.clear();
         RECT pc; GetClientRect(h, &pc); const int ch = pc.bottom, x = S(16), CW = S(530), eh = S(28), bw = S(40);
-        const wchar_t* tn[3] = {L"받을 폴더", L"받는 방식", L"일반"};
-        for (int t = 0; t < 3; t++) {
+        const wchar_t* tn[2] = {L"동기화 방식", L"받을 폴더"};
+        for (int t = 0; t < 2; t++) {
             HWND b = Ctl(h, L"BUTTON", tn[t], BS_OWNERDRAW | WS_TABSTOP, IDP_TAB0 + t);
             SetPropW(b, L"ptab", (HANDLE)(INT_PTR)(t + 1));
-            MoveWindow(b, x + t * S(110), S(8), S(106), S(38), TRUE);
+            MoveWindow(b, x + t * S(118), S(8), S(114), S(38), TRUE);
         }
         HWND ln = Ctl(h, L"STATIC", L"", SS_LEFT, IDP_LINE); MoveWindow(ln, x, S(46), CW, 1, TRUE);
-        // 탭 1: 받을 폴더 (체크 목록 트리)
-        p_list = Ctl(h, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | WS_TABSTOP, IDP_LIST, WS_EX_CLIENTEDGE);
-        ListView_SetExtendedListViewStyle(p_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-        AddCol(p_list, 0, L"이 PC로 받을 폴더", 318); AddCol(p_list, 1, L"항상 이 PC에", 96); AddCol(p_list, 2, L"먼저 맞추기", 90);
-        ListView_SetImageList(p_list, ImageList_Create(1, S(30), ILC_COLOR32, 1, 1), LVSIL_SMALL);   // 줄 높이
-        MoveWindow(p_list, x, S(58), CW, ch - S(58) - S(104), TRUE);
-        p_info = Ctl(h, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDP_INFO);
-        SendMessageW(p_info, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
-        MoveWindow(p_info, x, ch - S(96), CW, S(40), TRUE);
-        p_pg[0] = {p_list, p_info};
-        // 탭 2: 받는 방식
+        p_tip = MakeTip(h);
+
+        // ── 탭 0: 동기화 방식 ──
+        HWND l1 = Ctl(h, L"STATIC", L"NAS 폴더", SS_LEFT | SS_NOPREFIX, 0);
+        SendMessageW(l1, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(l1, x, S(58), CW, S(20), TRUE);
+        if (t_idx < 0) {
+            p_rootBox = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, IDP_ROOT);
+            MoveWindow(p_rootBox, x, S(80), CW, S(220), TRUE);
+            for (auto& n : s_names) {
+                bool used = false; for (auto& c : s_conns) if (W(c.name) == n) used = true;
+                if (!used) SendMessageW(p_rootBox, CB_ADDSTRING, 0, (LPARAM)n.c_str());
+            }
+            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기");
+            s_root = p_rootBox;   // [연결 시험] 결과가 오면 목록이 채워짐
+            if (!Trim(GetText(s_token)).empty()) StartTest(g_settings);
+        } else {
+            p_rootBox = Ctl(h, L"STATIC", W(t_conn.name).c_str(), SS_LEFT | SS_NOPREFIX, IDP_ROOT);
+            MoveWindow(p_rootBox, x, S(84), CW, S(22), TRUE);
+        }
+        HWND lm = Ctl(h, L"STATIC", L"받는 방식", SS_LEFT | SS_NOPREFIX, 0);
+        SendMessageW(lm, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(lm, x, S(120), CW, S(20), TRUE);
         p_od = Ctl(h, L"BUTTON", L"필요할 때 받기\n새 파일은 탐색기에 자리만 두고(구름), 열 때 받음 · PC 공간 절약", BS_OWNERDRAW | WS_TABSTOP, IDP_OD);
         p_all = Ctl(h, L"BUTTON", L"모두 받아 두기\n모든 파일을 이 PC에 받아 둠 (초록 체크) · 인터넷 없어도 열림", BS_OWNERDRAW | WS_TABSTOP, IDP_ALL);
         p_web = Ctl(h, L"BUTTON", L"웹드라이브처럼 사용\nPC에 파일을 두지 않음 · 열 때 NAS에서 바로 읽고 저장하면 바로 올림 · 인터넷 필요", BS_OWNERDRAW | WS_TABSTOP, IDP_WEB);
-        SetPropW(p_od, L"opt", (HANDLE)1); SetPropW(p_all, L"opt", (HANDLE)1); SetPropW(p_web, L"opt", (HANDLE)1);
-        MoveWindow(p_od, x, S(60), CW, S(58), TRUE); MoveWindow(p_all, x, S(124), CW, S(58), TRUE); MoveWindow(p_web, x, S(188), CW, S(58), TRUE);
+        for (HWND b : {p_od, p_all, p_web}) SetPropW(b, L"opt", (HANDLE)1);
+        MoveWindow(p_od, x, S(142), CW, S(50), TRUE); MoveWindow(p_all, x, S(198), CW, S(50), TRUE); MoveWindow(p_web, x, S(254), CW, S(50), TRUE);
+        AddTip(p_tip, p_od, L"탐색기에는 NAS의 모든 파일이 보이지만, 내용은 열 때 받습니다. 받은 파일은 이 PC에 남고, 오른쪽 클릭 → Mydrive → 공간 확보로 다시 비울 수 있습니다.");
+        AddTip(p_tip, p_all, L"NAS의 모든 파일을 이 PC에 받아 둡니다. 인터넷이 없어도 열리지만 PC 공간을 그만큼 씁니다.");
+        AddTip(p_tip, p_web, L"PC에 파일을 받아 두지 않고 NAS 폴더를 드라이브처럼 씁니다. 파일을 열면 NAS에서 바로 읽고, 저장하고 닫으면 바로 NAS로 올립니다. 인터넷(NAS 연결)이 없으면 열리지 않습니다. WinFsp 드라이버가 필요합니다(처음 한 번 설치, 관리자 승인).");
+        p_mLabel = Ctl(h, L"STATIC", L"이 PC의 폴더", SS_LEFT | SS_NOPREFIX, IDP_MLABEL);
+        SendMessageW(p_mLabel, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(p_mLabel, x, S(316), CW, S(20), TRUE);
+        // 동기화(필요할 때·모두 받기): 이 PC의 폴더
+        p_local = Ctl(h, L"EDIT", t_conn.local.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, IDP_LOCAL);
+        SendMessageW(p_local, EM_SETCUEBANNER, TRUE, (LPARAM)L"예: D:\\작업");
+        p_browse = Ctl(h, L"BUTTON", L"\xE838", BS_PUSHBUTTON | WS_TABSTOP, IDP_BROWSE);
+        SetPropW(p_browse, L"ico", (HANDLE)1);
+        AddTip(p_tip, p_local, L"NAS 폴더와 같은 내용으로 맞출 이 PC의 폴더입니다 (웹드라이브면 NAS 내용이 보일 자리).");
+        p_gd = Ctl(h, L"STATIC", t_idx < 0 ? L"없는 폴더면 새로 만듭니다. 이미 파일이 있어도 지우지 않고, 같은 이름·다른 내용이면 둘 다 남깁니다."
+                                         : L"바꾸면 [저장] 뒤 새 폴더에서 처음 맞추기를 다시 합니다. 원래 폴더의 파일은 그대로 남습니다.", SS_LEFT | SS_NOPREFIX, IDP_DESC + 1);
+        SendMessageW(p_gd, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_gd, x, S(374), CW, S(36), TRUE);
+        p_mdesc = Ctl(h, L"STATIC", L"폴더마다 다르게 하려면 [받을 폴더] 탭의 '항상 이 PC에' 칸을 체크하세요.\n탐색기에서 오른쪽 클릭 → Mydrive → 항상 이 장치에 유지 / 공간 확보로도 바꿀 수 있습니다.", SS_LEFT | SS_NOPREFIX, IDP_DESC);
+        SendMessageW(p_mdesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_mdesc, x, S(414), CW, S(44), TRUE);
         // 웹드라이브: 연결할 곳
-        p_mLabel = Ctl(h, L"STATIC", L"연결할 곳", SS_LEFT | SS_NOPREFIX, IDP_MLABEL);
-        SendMessageW(p_mLabel, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(p_mLabel, x, S(258), CW, S(20), TRUE);
-        p_mFolder = Ctl(h, L"BUTTON", L"PC 폴더에 붙이기\n[일반] 탭의 'PC 폴더'로 보임 · 그 폴더는 없거나 비어 있어야 함", BS_OWNERDRAW | WS_TABSTOP, IDP_MFOLDER);
-        p_mDrive = Ctl(h, L"BUTTON", L"새 드라이브 문자로\n탐색기에 네트워크 드라이브로 보임 (PC 폴더는 비워 둬도 됨)", BS_OWNERDRAW | WS_TABSTOP, IDP_MDRIVE);
+        p_mDrive = Ctl(h, L"BUTTON", L"새 드라이브 문자로\n탐색기 '내 PC'에 네트워크 드라이브로 보임", BS_OWNERDRAW | WS_TABSTOP, IDP_MDRIVE);
+        p_mFolder = Ctl(h, L"BUTTON", L"PC 폴더에 붙이기\n아래 폴더 자리에 NAS 내용이 보임 · 그 폴더는 없거나 비어 있어야 함", BS_OWNERDRAW | WS_TABSTOP, IDP_MFOLDER);
         SetPropW(p_mFolder, L"opt", (HANDLE)1); SetPropW(p_mDrive, L"opt", (HANDLE)1);
-        MoveWindow(p_mFolder, x, S(282), CW, S(54), TRUE); MoveWindow(p_mDrive, x, S(342), CW - S(96), S(54), TRUE);
+        MoveWindow(p_mDrive, x, S(340), CW - S(96), S(46), TRUE); MoveWindow(p_mFolder, x, S(392), CW, S(46), TRUE);
         p_letter = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_LETTER);
-        MoveWindow(p_letter, x + CW - S(88), S(356), S(88), S(300), TRUE);
+        MoveWindow(p_letter, x + CW - S(88), S(349), S(88), S(300), TRUE);
         {
             std::wstring fl = FreeDriveLetters(), cur = t_conn.mount.size() >= 1 ? std::wstring(1, (wchar_t)towupper(t_conn.mount[0])) : L"";
             if (!cur.empty() && fl.find(cur[0]) == std::wstring::npos) { fl += cur; std::sort(fl.begin(), fl.end()); }
@@ -1765,53 +1808,33 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         p_wdesc = Ctl(h, L"STATIC", L"목록은 NAS에서 그때그때 보여 주고, 프로그램이 읽는 조각만 잠시 받습니다. 오프라인이면 열리지 않고 탐색기 상태 아이콘도 없습니다.\n"
                                      L"WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos · github.com/winfsp/winfsp", SS_LEFT | SS_NOPREFIX, IDP_WDESC);
-        SendMessageW(p_wdesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_wdesc, x, S(404), CW, S(58), TRUE);
+        SendMessageW(p_wdesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_wdesc, x, S(480), CW, S(42), TRUE);
         p_wfsp = Ctl(h, L"BUTTON", L"WinFsp 설치", BS_PUSHBUTTON | WS_TABSTOP, IDP_WFSP);
-        MoveWindow(p_wfsp, x, S(466), S(150), S(30), TRUE);
-        p_tip = MakeTip(h);
-        AddTip(p_tip, p_web, L"PC에 파일을 받아 두지 않고 NAS 폴더를 드라이브처럼 씁니다. 파일을 열면 NAS에서 바로 읽고, 저장하고 닫으면 바로 NAS로 올립니다. 인터넷(NAS 연결)이 없으면 열리지 않습니다. WinFsp 드라이버가 필요합니다(처음 한 번 설치, 관리자 승인).");
-        AddTip(p_tip, p_mFolder, L"[일반] 탭에 적은 PC 폴더 자리에 NAS 내용이 보입니다. 그 폴더는 아직 없거나 비어 있어야 합니다.");
+        MoveWindow(p_wfsp, x, ch - S(46), S(150), S(32), TRUE);
+        AddTip(p_tip, p_mFolder, L"아래에 적은 PC 폴더 자리에 NAS 내용이 보입니다. 그 폴더는 아직 없거나 비어 있어야 합니다.");
         AddTip(p_tip, p_mDrive, L"오른쪽에서 고른 문자(예: M:)로 탐색기 '내 PC'에 네트워크 드라이브가 생깁니다.");
         AddTip(p_tip, p_letter, L"지금 비어 있는 드라이브 문자만 보입니다.");
         AddTip(p_tip, p_wfsp, L"WinFsp 공식 설치 파일(GitHub)을 받아 실행합니다. Windows가 관리자 승인을 묻습니다.");
-        HWND md = Ctl(h, L"STATIC", L"폴더마다 다르게 하려면 [받을 폴더] 탭의 '항상 이 PC에' 칸을 체크하세요.\n탐색기에서 파일·폴더를 오른쪽 클릭 → Mydrive → 항상 이 장치에 유지 / 공간 확보로도 바꿀 수 있습니다.\n탐색기 연동(왼쪽 Mydrive · 상태 아이콘 · 오른쪽 클릭 메뉴)은 어느 쪽이든 늘 켜져 있습니다.", SS_LEFT | SS_NOPREFIX, IDP_DESC);
-        SendMessageW(md, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(md, x, S(258), CW, S(80), TRUE);
-        p_mdesc = md;
-        p_pg[1] = {p_od, p_all, p_web, md};
-        // 탭 3: 일반 (NAS 폴더 · PC 폴더)
-        HWND l1 = Ctl(h, L"STATIC", L"NAS 폴더", SS_LEFT | SS_NOPREFIX, 0);
-        SendMessageW(l1, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(l1, x, S(64), CW, S(20), TRUE);
-        if (t_idx < 0) {
-            p_rootBox = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP, IDP_ROOT);
-            MoveWindow(p_rootBox, x, S(88), CW, S(220), TRUE);
-            for (auto& n : s_names) {
-                bool used = false; for (auto& c : s_conns) if (W(c.name) == n) used = true;
-                if (!used) SendMessageW(p_rootBox, CB_ADDSTRING, 0, (LPARAM)n.c_str());
-            }
-            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기");
-            s_root = p_rootBox;   // [연결 시험] 결과가 오면 목록이 채워짐
-            if (!Trim(GetText(s_token)).empty()) StartTest(g_settings);
-        } else {
-            p_rootBox = Ctl(h, L"STATIC", W(t_conn.name).c_str(), SS_LEFT | SS_NOPREFIX, IDP_ROOT);
-            MoveWindow(p_rootBox, x, S(92), CW, S(22), TRUE);
-        }
-        HWND l2 = Ctl(h, L"STATIC", L"이 PC의 폴더", SS_LEFT | SS_NOPREFIX, 0);
-        SendMessageW(l2, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(l2, x, S(132), CW, S(20), TRUE);
-        p_local = Ctl(h, L"EDIT", t_conn.local.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, IDP_LOCAL);
-        MoveWindow(p_local, x, S(156), CW - bw - S(6), eh, TRUE);
-        SendMessageW(p_local, EM_SETCUEBANNER, TRUE, (LPARAM)L"예: D:\\작업");
-        HWND br = Ctl(h, L"BUTTON", L"\xE838", BS_PUSHBUTTON | WS_TABSTOP, IDP_BROWSE);
-        SetPropW(br, L"ico", (HANDLE)1); MoveWindow(br, x + CW - bw, S(156), bw, eh, TRUE);
-        HWND gd = Ctl(h, L"STATIC", t_idx < 0 ? L"없는 폴더면 새로 만듭니다. 이미 파일이 있어도 지우지 않고, 같은 이름·다른 내용이면 둘 다 남깁니다."
-                                             : L"바꾸면 [저장] 뒤 새 폴더에서 처음 맞추기를 다시 합니다. 원래 폴더의 파일은 그대로 남습니다.", SS_LEFT | SS_NOPREFIX, IDP_DESC + 1);
-        SendMessageW(gd, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(gd, x, S(194), CW, S(40), TRUE);
-        p_pg[2] = {l1, p_rootBox, l2, p_local, br, gd};
+        p_pg[0] = {l1, p_rootBox, lm, p_od, p_all, p_web, p_mLabel};
+
+        // ── 탭 1: 받을 폴더 (체크 목록 트리) ──
+        p_list = Ctl(h, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | WS_TABSTOP, IDP_LIST, WS_EX_CLIENTEDGE);
+        ListView_SetExtendedListViewStyle(p_list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+        AddCol(p_list, 0, L"이 PC로 받을 폴더", 318); AddCol(p_list, 1, L"항상 이 PC에", 96); AddCol(p_list, 2, L"먼저 맞추기", 90);
+        ListView_SetImageList(p_list, ImageList_Create(1, S(30), ILC_COLOR32, 1, 1), LVSIL_SMALL);   // 줄 높이
+        MoveWindow(p_list, x, S(58), CW, ch - S(58) - S(104), TRUE);
+        p_info = Ctl(h, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDP_INFO);
+        SendMessageW(p_info, WM_SETFONT, (WPARAM)g_fontSmall, TRUE);
+        MoveWindow(p_info, x, ch - S(96), CW, S(40), TRUE);
+        p_pg[1] = {p_list, p_info};
+        p_pg[2].clear();
+
         HWND ok = Ctl(h, L"BUTTON", t_idx < 0 ? L"만들기" : L"확인", BS_DEFPUSHBUTTON | WS_TABSTOP, IDP_OK);
         HWND cancel = Ctl(h, L"BUTTON", L"취소", BS_PUSHBUTTON | WS_TABSTOP, IDP_CANCEL);
         MoveWindow(ok, x + CW - S(200), ch - S(46), S(96), S(32), TRUE);
         MoveWindow(cancel, x + CW - S(96), ch - S(46), S(96), S(32), TRUE);
         DarkWindow(h); DarkenChildren(h);
-        PickTab(h, t_idx < 0 ? 2 : 0);
+        PickTab(h, 0);
         return 0;
     }
     case WM_APP_WFSP: {
@@ -1885,10 +1908,10 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             std::string name = PickRootName();
             std::wstring local = Trim(GetText(p_local));
             if (t_conn.web && !t_conn.mount.empty()) t_conn.mount = PickLetter();
-            if (!CheckTask(h, name, local, t_idx, t_conn.web, t_conn.mount)) { PickTab(h, t_conn.web && !t_conn.mount.empty() ? 1 : 2); break; }
+            if (!CheckTask(h, name, local, t_idx, t_conn.web, t_conn.mount)) { PickTab(h, 0); break; }
             if (t_conn.web && !WinFspInstalled() &&
                 MessageBoxW(h, L"웹드라이브에는 WinFsp 드라이버가 필요합니다. 지금 설치할까요?\n(GitHub의 공식 설치 파일을 받아 실행합니다. Windows가 관리자 승인을 묻습니다.)", L"Mydrive", MB_YESNO | MB_ICONQUESTION) == IDYES) {
-                PickTab(h, 1); InstallWinFsp(h); break;
+                PickTab(h, 0); InstallWinFsp(h); break;
             }
             if (!t_conn.web && p_loaded && p_loadName == name) PickApply();
             t_conn.name = name; t_conn.local = local;
@@ -1914,7 +1937,7 @@ static void OpenTask(HWND owner, int idx) {
     t_idx = idx;
     if (idx >= 0) t_conn = s_conns[idx]; else { t_conn = Conn(); t_conn.onDemand = true; }
     MONITORINFO mi{sizeof mi}; GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &mi);
-    RECT r{0, 0, S(562), std::min<int>(S(580), mi.rcWork.bottom - mi.rcWork.top - S(60))};
+    RECT r{0, 0, S(562), std::min<int>(S(590), mi.rcWork.bottom - mi.rcWork.top - S(60))};
     AdjustWindowRectExForDpi(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0, g_dpi);
     RECT o; GetWindowRect(owner, &o);
     int w = r.right - r.left, hh = r.bottom - r.top;
@@ -1923,6 +1946,40 @@ static void OpenTask(HWND owner, int idx) {
                              std::clamp<int>((o.left + o.right - w) / 2, mi.rcWork.left, mi.rcWork.right - w), std::clamp<int>((o.top + o.bottom - hh) / 2, mi.rcWork.top, mi.rcWork.bottom - hh), w, hh, owner, nullptr, g_inst, nullptr);
     EnableWindow(owner, FALSE);
     ShowWindow(h, SW_SHOW);
+}
+
+// 작업 표를 작업 수만큼 키우고, 넘치면 설정 창도 키움 (화면 높이까지)
+static void FitConnList() {
+    if (!s_list || !IsWindow(s_list) || !s_panel[1]) return;
+    int itemH = (int)SendMessageW(s_list, LB_GETITEMHEIGHT, 0, 0);
+    int listH = itemH * std::max(2, (int)s_conns.size());
+    RECT r; GetWindowRect(s_list, &r); MapWindowPoints(nullptr, s_panel[1], (POINT*)&r, 2);
+    MoveWindow(s_list, r.left, r.top, r.right - r.left, listH, TRUE);
+    int y = r.top + listH + S(8);
+    if (s_listHint) MoveWindow(s_listHint, r.left, y, r.right - r.left, S(18), TRUE);
+    s_panelH[1] = y + S(18) + S(16);
+    HWND h = GetParent(s_panel[1]);
+    MONITORINFO mi{sizeof mi}; GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &mi);
+    int panelH = std::min(s_panelH[1], (int)(mi.rcWork.bottom - mi.rcWork.top) - s_barH - S(90));
+    if (panelH <= s_panelHNow) return;
+    s_panelHNow = panelH;
+    RECT pc; GetClientRect(h, &pc);
+    int WW = pc.right, PW = WW - s_sideW;
+    for (int i = 0; i < kPages; i++) {
+        MoveWindow(s_panel[i], s_sideW, 0, PW, panelH, TRUE);
+        SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_DISABLENOSCROLL};
+        si.nMin = 0; si.nMax = s_panelH[i] - 1; si.nPage = panelH;
+        SetScrollInfo(s_panel[i], SB_VERT, &si, TRUE);
+        ShowScrollBar(s_panel[i], SB_VERT, s_panelH[i] > panelH);
+    }
+    int by = panelH + (s_barH - S(32)) / 2;
+    if (HWND b = GetDlgItem(h, IDS_SAVE)) MoveWindow(b, WW - S(24) - S(204), by, S(100), S(32), TRUE);
+    if (HWND b = GetDlgItem(h, IDS_CANCEL)) MoveWindow(b, WW - S(24) - S(96), by, S(96), S(32), TRUE);
+    if (s_hint) MoveWindow(s_hint, s_sideW + s_cx, by + S(8), WW - s_sideW - s_cx - S(250), S(18), TRUE);
+    RECT wr{0, 0, WW, panelH + s_barH};
+    AdjustWindowRectExForDpi(&wr, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0, g_dpi);
+    SetWindowPos(h, nullptr, 0, 0, wr.right - wr.left, wr.bottom - wr.top, SWP_NOMOVE | SWP_NOZORDER);
+    InvalidateRect(h, nullptr, TRUE);
 }
 
 static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1994,7 +2051,7 @@ static LRESULT CALLBACK SettingsProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDS_SKTMP: case IDS_SKLOCK: case IDS_SKINI: case IDS_SKTHUMB: case IDS_SKDOT: { HWND b = s_sk[LOWORD(wp) - IDS_SKTMP]; ChkSet(b, !ChkGet(b)); break; }
         case IDS_UPDCHECK: UpdateCheck(true); break;
         case IDS_UPDINST: UpdateInstallNow(); break;
-        case 900: case 901: case 902: case 903: case 904: ShowPage(LOWORD(wp) - 900); if (LOWORD(wp) == 904) Settings_UpdateUi(); break;
+        case 900: case 901: case 902: case 903: case 904: case 905: ShowPage(LOWORD(wp) - 900); if (LOWORD(wp) == 904) Settings_UpdateUi(); break;
         case IDS_PAIR: OpenPair(h); break;
         case IDS_ONDEMAND: case IDS_MODEALL:
             if (!s_filling && s_sel >= 0 && s_sel < (int)s_conns.size()) {

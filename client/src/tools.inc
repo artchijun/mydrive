@@ -64,7 +64,7 @@ static bool RemoveShellVerbs() {
     return ok;
 }
 // 메뉴 구성이 바뀌면 이 숫자를 올림 → 업데이트 설치 때 다시 등록 (관리자 승인 한 번)
-static const DWORD kMenuVersion = 6;   // 6: 다른 동기화 작업으로 옮기기   // 3: 항목마다 아이콘, 4: 항상 유지/공간 확보
+static const DWORD kMenuVersion = 7;   // 6: 다른 동기화 작업으로 옮기기, 7: 구분선·하위 메뉴 없앰 (어두운 모드에서 옛 모양으로 그려짐)   // 3: 항목마다 아이콘, 4: 항상 유지/공간 확보
 // 지금 등록된 메뉴가 이 실행 파일·이 구성인지
 static bool ShellVerbsCurrent() {
     wchar_t buf[1024]; DWORD n = sizeof buf, ver = 0, vn = sizeof ver;
@@ -88,19 +88,22 @@ static bool RegisterShellVerbs() {
         RegSz(k, L"AppliesTo", applies);
         if (bg == 0) { DWORD ver = kMenuVersion; RegSetKeyValueW(HKEY_LOCAL_MACHINE, k.c_str(), L"MydriveMenuVersion", REG_DWORD, &ver, sizeof ver); }
         std::wstring arg = bg ? L"\"%V\"" : L"\"%1\"";
-        // 원드라이브처럼: 파일에 하는 일(유지·공간 확보·버전·경로) 먼저, 동기화 제어는 '동기화' 아래로
-        //   키 이름 순서대로 나옴. sep: 위에 구분선. file: 파일·폴더를 눌렀을 때만 (빈 곳 메뉴에는 없음)
+        // 원드라이브처럼: 파일에 하는 일(유지·공간 확보·버전·경로) 먼저, 그다음 동기화 제어
+        //   키 이름 순서대로 나옴. file: 파일·폴더를 눌렀을 때만 (빈 곳 메뉴에는 없음)
+        //   구분선(CommandFlags 0x20)과 하위 메뉴는 쓰지 않음: Windows 11 어두운 모드에서 이 둘만 옛 모양(굵은 회색 줄·검은 화살표)으로 그려짐.
+        //   잠시 멈춤·다시 시작은 트레이 메뉴에 있음.
         struct V { const wchar_t* id; const wchar_t* name; const wchar_t* sw; const wchar_t* icon; bool sep, file; };
         static const V top[] = {
             {L"01keep", L"항상 이 장치에 유지", L"--keep", L"-209", false, false},
             {L"02free", L"공간 확보", L"--free", L"-210", false, false},
-            {L"11versions", L"버전 기록…", L"--versions", L"-206", true, true},
+            {L"11versions", L"버전 기록…", L"--versions", L"-206", false, true},
             {L"12deleted", L"지운 파일 되살리기…", L"--deleted", L"-207", false, false},
             {L"13copy", L"NAS 경로 복사", L"--copy-nas", L"-208", false, false},
-            {L"14moveto", L"다른 동기화 작업으로 옮기기…", L"--move-to", L"-205", false, true},
-            {L"21status", L"동기화 상태 보기…", L"--status", L"-205", true, false},
-            {L"22sync", L"동기화", nullptr, L"-201", false, false},   // 하위 메뉴 (아래)
-            {L"99open", L"Mydrive 열기", L"", L"0", true, false},
+            {L"14moveto", L"다른 동기화 작업으로 옮기기…", L"--move-to", L"-211", false, true},
+            {L"21status", L"동기화 상태 보기…", L"--status", L"-205", false, false},
+            {L"22syncnow", L"지금 동기화", L"--sync-now", L"-201", false, false},
+            {L"23skip", L"이 폴더 동기화에서 제외 / 다시 포함", L"--toggle-skip", L"-204", false, true},
+            {L"99open", L"Mydrive 열기", L"", L"0", false, false},
         };
         static const V sub[] = {
             {L"1now", L"지금 동기화", L"--sync-now", L"-201", false, false},
@@ -121,8 +124,7 @@ static bool RegisterShellVerbs() {
         bool first = true;
         for (auto& v : top) {
             if (bg && v.file) continue;
-            bool sepHere = v.sep || (bg && wcscmp(v.id, L"12deleted") == 0);   // 빈 곳 메뉴에는 버전 기록이 없으니 구분선을 여기에
-            V vv = v; vv.sep = sepHere;
+            V vv = v;
             std::wstring vk = put(k, vv, first); first = false;
             if (!v.sw) {   // '동기화' 하위 메뉴
                 RegSz(vk, L"SubCommands", L"");

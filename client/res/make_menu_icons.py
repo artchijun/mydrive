@@ -74,7 +74,12 @@ def g_free(x, y):      # 구름 테두리
     inner = (math.hypot(x - 0.36, y - 0.58) <= 0.10 or math.hypot(x - 0.56, y - 0.47) <= 0.15 or math.hypot(x - 0.72, y - 0.62) <= 0.07
              or rbox(x, y, 0.3, 0.6, 0.78, 0.69, 0.04))
     return outer and not inner
-ICONS = {"keep": (g_keep, (46, 184, 92)), "free": (g_free, BLUE), "sync": (g_sync, BLUE), "pause": (g_pause, BLUE), "resume": (g_resume, BLUE), "skip": (g_skip, RED),
+def g_move(x, y):      # 폴더 테두리 + 오른쪽 화살표 (다른 동기화 작업으로 옮기기)
+    tab = rbox(x, y, 0.1, 0.18, 0.46, 0.32, 0.04)
+    body = rbox(x, y, 0.1, 0.27, 0.9, 0.86, 0.07) and not rbox(x, y, 0.19, 0.36, 0.81, 0.77, 0.03)
+    arrow = seg(x, y, 0.3, 0.565, 0.56, 0.565, 0.1) or tri(x, y, (0.53, 0.43), (0.53, 0.70), (0.72, 0.565))
+    return tab or body or arrow
+ICONS = {"keep": (g_keep, (46, 184, 92)), "move": (g_move, BLUE), "free": (g_free, BLUE), "sync": (g_sync, BLUE), "pause": (g_pause, BLUE), "resume": (g_resume, BLUE), "skip": (g_skip, RED),
          "status": (g_status, BLUE), "versions": (g_versions, BLUE), "deleted": (g_deleted, BLUE), "copy": (g_copy, BLUE)}
 
 def draw(size, g, col):

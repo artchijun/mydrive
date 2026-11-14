@@ -653,7 +653,7 @@ static void CountLastMinute(int64_t& down, int64_t& up, int64_t& retry, int64_t&
 }
 
 // 동기화 줄: 상태 · [지금 동기화] · 잠시 멈춤 칩 · 연결 목록
-static float BarHeight() { return 11 + 34 + 8 + 26 + 8 + (float)g_engines.size() * 24 + 9; }
+static float BarHeight() { return 11 + 34 + 8 + (float)g_engines.size() * 24 + 9; }
 static void DrawBar(Rect r, const Overall& o) {
     Card(r);
     Rect in{r.l + 11, r.t + 9, r.r - 11, r.b - 9};
@@ -665,25 +665,27 @@ static void DrawBar(Rect r, const Overall& o) {
     if (paused) text = ClockAfter(PausedLeft()) + L"까지 멈춤 · 그동안 바뀐 것은 다시 시작할 때 한꺼번에 맞춤";
     else if (o.offline) text = L"NAS에 연결할 수 없음 — 15초마다 다시 시도";
     else if (o.pend > 0) text = Fmt(L"맞출 것 %lld개 남음", o.pend);
-    else text = L"바뀌면 바로 맞춤 · 수정이 몰리면 잠시 미룸";
-    float bw = BtnW(L"지금 동기화", 0xE768, 12, 9);
-    g_cv.Text(title, {in.l + 26, in.t, in.r - bw - 8, in.t + 17}, col::Text(), {12, DWRITE_FONT_WEIGHT_SEMI_BOLD});
-    g_cv.Text(text, {in.l + 26, in.t + 17, in.r - bw - 8, in.t + 34}, col::Muted(), {10.5f});
-    Btn(H_SYNCNOW, {in.r - bw, in.t + 4, in.r, in.t + 30}, L"지금 동기화", 0xE768,
-        paused ? L"멈춤을 풀고 지금 바로 맞춥니다 (모든 연결)" : L"기다리지 않고 지금 바로 PC 와 NAS 를 비교해 맞춥니다");
-    float y = in.t + 42, x = in.l + 26;
-    std::wstring pl = paused ? L"다시 정하기" : L"잠시 멈춤";
-    float lw = g_cv.TextWidth(pl, {11}) + 8;
-    g_cv.Text(pl, {x, y, x + lw, y + 24}, col::Muted(), {11});
-    x += lw;
-    struct { int id, m; } chips[] = {{H_P30, 30}, {H_P60, 60}, {H_P180, 180}};
-    for (auto& c : chips) {
-        std::wstring t = MinText(c.m); float w = BtnW(t, 0, 11.5f, 10);
-        Btn(c.id, {x, y, x + w, y + 24}, t, 0, MinText(c.m) + L" 동안 모든 연결의 동기화를 멈춤 — 시간이 되면 저절로 다시 맞춤", 0, 11.5f);
-        x += w + 6;
+    else text = L"바뀌면 바로 맞춤";
+    // 오른쪽: 평소에는 '⏸ 30분 1시간 3시간'(잠시 멈춤), 멈춰 있을 때만 [지금 동기화] (멈춤을 풀고 바로 맞춤)
+    float right = in.r;
+    if (paused) {
+        float bw = BtnW(L"지금 동기화", 0xE768, 12, 9);
+        Btn(H_RESUME, {in.r - bw, in.t + 4, in.r, in.t + 30}, L"지금 동기화", 0xE768, L"멈춤을 풀고 지금 바로 맞춥니다 (모든 연결)");
+        right = in.r - bw - 8;
+    } else {
+        struct { int id, m; } chips[] = {{H_P180, 180}, {H_P60, 60}, {H_P30, 30}};   // 오른쪽부터
+        float x = in.r;
+        for (auto& c : chips) {
+            std::wstring ct = MinText(c.m); float w = BtnW(ct, 0, 11.5f, 9);
+            Btn(c.id, {x - w, in.t + 5, x, in.t + 29}, ct, 0, MinText(c.m) + L" 동안 모든 연결의 동기화를 잠시 멈춤 — 시간이 되면 저절로 다시 맞춤", 0, 11.5f);
+            x -= w + 5;
+        }
+        g_cv.Icon(0xE769, {x - 20, in.t + 5, x, in.t + 29}, col::Muted(), 12);   // ⏸ 잠시 멈춤
+        right = x - 26;
     }
-    if (paused) { float w = BtnW(L"다시 시작", 0, 11.5f, 10); Btn(H_RESUME, {x, y, x + w, y + 24}, L"다시 시작", 0, L"멈춤을 풀고 바로 다시 맞춤", 0, 11.5f); }
-    y += 34;
+    g_cv.Text(title, {in.l + 26, in.t, right, in.t + 17}, col::Text(), {12, DWRITE_FONT_WEIGHT_SEMI_BOLD});
+    g_cv.Text(text, {in.l + 26, in.t + 17, right, in.t + 34}, col::Muted(), {10.5f});
+    float y = in.t + 42;
     for (int i = 0; i < (int)g_engines.size(); i++) {
         Engine& e = *g_engines[i];
         int st = EngineState(e);
