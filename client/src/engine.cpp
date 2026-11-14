@@ -744,6 +744,7 @@ bool Engine::RunPass() {
         const LocalE* l = li == local_.end() ? nullptr : &li->second;
         const RemoteE* r = ri == remote_.end() ? nullptr : &ri->second;
         const BaseE* b = bi == base_.end() ? nullptr : &bi->second;
+        if (SkipRemoteAnc(p)) continue;   // 건너뛰는 폴더 안: 알림 없이 조용히 넘어감
         if (r && (BadWinName(p) || SkipRemoteRel(p))) {
             if (!l && !b) { if (warned_.insert(p).second) Event("건너뜀", p, BadWinName(p) ? "Windows 에서 쓸 수 없는 이름" : "임시·잠금 파일이라 맞추지 않음 (.tmp · ~$ · desktop.ini · Thumbs.db)"); }
             continue;

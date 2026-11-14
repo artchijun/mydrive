@@ -106,6 +106,13 @@ inline bool SkipRemoteRel(const std::string& rel) {
     std::wstring w = W(Leaf(rel));
     return SkipLocalName(w);
 }
+// 위 폴더 중 하나가 건너뛰는 이름인지 (예: LibreOffice 의 lu1234.tmp 폴더). PC 쪽은 그런 폴더 안을 아예 보지 않으므로 NAS 쪽도 맞춤
+inline bool SkipRemoteAnc(const std::string& rel) {
+    size_t a = 0;
+    for (size_t i = rel.find('/'); i != std::string::npos; a = i + 1, i = rel.find('/', a))
+        if (SkipLocalName(W(rel.substr(a, i - a)))) return true;
+    return false;
+}
 
 // 기록 (콘솔 + 파일)
 class Log {
