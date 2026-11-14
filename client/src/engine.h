@@ -92,7 +92,13 @@ public:
     void Start();                         // 감시하며 계속 맞추기 (스레드)
     void Stop();
     void ConfirmMassDelete() { confirmDelete_ = true; Kick(); }
-    void RestoreMassDelete() { restoreDelete_ = true; Kick(); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
+    void RestoreMassDelete() { restoreDelete_ = true; Kick(); }
+    // DSM 에서 다른 공유 폴더로 옮긴 것 알아채기: 보류된 'NAS에서 사라짐' 가운데 다른 연결의 NAS 에 같은 파일(이름·크기·수정 시각)이 생긴 것
+    int HeldMoved(std::string* to) { std::lock_guard<std::mutex> g(cfMu_); if (to) *to = movedConn_; return movedN_; }
+    void ConfirmMoved() { confirmMoved_ = true; Kick(); }   // [옮긴 것으로 처리]: 짝이 확인된 것만 옛 자리(PC)에서 지움 (휴지통)
+    void WantKeyIndex() { rkWant_ = GetTickCount64() + 180000; Kick(); }   // 다른 연결이 'NAS 파일 찾기 색인'을 쓰겠다고 알림
+    bool LookupKey(const std::string& k, std::string* rel) { std::lock_guard<std::mutex> g(rkMu_); auto it = rkIdx_.find(k); if (it == rkIdx_.end()) return false; if (rel) *rel = it->second; return true; }
+    static std::string MoveKey(const std::string& leaf, int64_t size, int64_t mtimeNs) { return leaf + "|" + std::to_string(size) + "|" + std::to_string(mtimeNs / 1000000000LL); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
     // NAS 전체 목록을 새로 받아 PC 가 들고 있는 목록을 바로잡음 ([NAS 다시 확인], 올리기가 'NAS에도 다른 판'으로 거절될 때)
     void ResyncRemote() { resync_ = true; Kick(); }
@@ -190,6 +196,13 @@ private:
     std::mutex cfMu_;
     std::vector<std::string> newConf_;
     std::vector<HeldDir> heldDirs_; int heldGroups_ = 0;
+    // 옮겨진 것 알아채기 (위 HeldMoved). movedTo_/movedN_/movedConn_ 은 cfMu_ 로 보호
+    std::map<std::string, std::pair<std::string, std::string>> movedTo_;   // 이 연결 경로 → (옮겨 간 연결, 그 연결 안 경로). 폴더는 연결 이름이 빈 값
+    int movedN_ = 0; std::string movedConn_; uint64_t movedAt_ = 0;
+    std::atomic<bool> confirmMoved_{false};
+    std::set<std::string> allowDel_;   // [옮긴 것으로 처리]로 보류를 푼 항목 (mu_ 로 보호)
+    // 다른 연결이 찾아볼 NAS 파일 색인: MoveKey → 경로 (rkMu_ 만 잡음, g_engMu 를 잡은 채로도 됨)
+    std::atomic<uint64_t> rkWant_{0}; std::mutex rkMu_; std::unordered_map<std::string, std::string> rkIdx_; int64_t rkSeq_ = -1;
     void NoteConflict(const std::string& p) { std::lock_guard<std::mutex> g(cfMu_); if (newConf_.size() < 500) newConf_.push_back(p); }
     int rootSync_ = 0;   // 맨 위 폴더에 알린 상태: 0 아직, 1 맞춰짐, 2 맞추는 중
     std::map<std::string, std::pair<std::string, uint64_t>> waitNote_;   // 기다리는 파일 → (알린 내용, 처음 본 시각) — xMu_ 로 보호

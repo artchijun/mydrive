@@ -310,6 +310,7 @@ struct Overall {
     std::vector<std::pair<int, Transfer>> xf;
     std::vector<std::pair<int, Engine::HeldDir>> heldDirs;   // (연결 번호, 폴더) 많은 순 상위 3곳
     int heldGroups = 0;
+    int heldMoved = 0; std::wstring heldMovedTo;   // 보류 중 다른 동기화 작업으로 옮겨진 것으로 보이는 파일 수와 그 작업
     bool offline = false;
 };
 static uint64_t g_offlineSince = 0;
@@ -323,7 +324,11 @@ static Overall GetOverall() {
         if (e.busy || e.stats.pending > 0) busy = true;
         for (auto& s : e.StuckList()) o.stuck.push_back({i, s});
         for (auto& t : e.Transfers()) o.xf.push_back({i, t});
-        if (e.stats.heldDeletes > 0) { int g = 0; for (auto& d : e.HeldDirs(&g)) o.heldDirs.push_back({i, d}); o.heldGroups += g; }
+        if (e.stats.heldDeletes > 0) {
+            int g = 0; for (auto& d : e.HeldDirs(&g)) o.heldDirs.push_back({i, d}); o.heldGroups += g;
+            std::string to; int mv = e.HeldMoved(&to);
+            if (mv > 0) { o.heldMoved += mv; if (o.heldMovedTo.empty()) o.heldMovedTo = W(to); }
+        }
     }
     std::sort(o.heldDirs.begin(), o.heldDirs.end(), [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
     if (o.heldDirs.size() > 3) o.heldDirs.resize(3);
@@ -446,6 +451,7 @@ enum Hit {
     H_NOWOPEN, H_NOWCOPY, H_CONFIRMDEL, H_SUMREF, H_LOGOPEN, H_LEGEND, H_RESTOREDEL, H_RESCAN, H_HELDLIST,
     H_HELDDIR = 90,        // + 0..2 (대량 삭제가 일어난 폴더)
     H_CONNPAUSE = 7800,    // + 연결 번호 (이 작업만 멈춤/다시 시작)
+    H_HELDMOVED = 7900,    // [옮긴 것으로 처리]
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -640,7 +646,7 @@ static void DrawStuck(Rect r) {
     }
 }
 static std::vector<std::wstring> g_heldDirAbs;   // [H_HELDDIR + k] 누르면 탐색기에서 보여 줄 폴더
-static float HeldHeight(const Overall& o) { return 110.f + 22.f * (float)o.heldDirs.size(); }
+static float HeldHeight(const Overall& o) { return 110.f + 22.f * (float)o.heldDirs.size() + (o.heldMoved > 0 ? 26.f : 0.f); }
 static void DrawHeld(Rect r, const Overall& o) {
     int64_t held = o.held;
     g_cv.Fill(r, Hex(0x22F5B544), 12); g_cv.Stroke(r, Hex(0x70F5B544), 12);
@@ -670,11 +676,26 @@ static void DrawHeld(Rect r, const Overall& o) {
         ry += 22;
     }
     float off = 22.f * (float)o.heldDirs.size();
+    if (o.heldMoved > 0) {   // DSM 에서 다른 공유 폴더로 옮긴 것으로 보임
+        Rect mr{in.l + 20, in.t + 56 + off, in.r, in.t + 78 + off};
+        g_cv.Icon(0xE8DE, {mr.l + 4, mr.t + 2, mr.l + 20, mr.b - 2}, col::Green(), 12);
+        g_cv.Text(Fmt(L"그중 %d개는 '", o.heldMoved) + o.heldMovedTo + L"' 작업으로 옮겨진 것으로 보입니다",
+                  {mr.l + 24, mr.t, mr.r, mr.b}, Hex(0xFF9FE3B0), {11.5f});
+        g_cv.AddHit(mr, 0, L"DSM 등에서 다른 공유 폴더로 옮긴 경우입니다. 사라진 파일과 이름·크기·수정 시각이 같은 파일이 '" + o.heldMovedTo + L"' 작업의 NAS 쪽에 있습니다.\n[옮긴 것으로 처리]를 누르면 이 파일들만 옛 자리에서 지웁니다 (휴지통으로).", false);
+        off += 26;
+    }
     g_cv.Icon(0xE769, {in.l, in.t, in.l + 16, in.t + 20}, col::Orange(), 14);
     g_cv.Text(Fmt(L"한 번에 %lld개가 지워져서 삭제를 멈췄습니다", held), {in.l + 24, in.t, in.r, in.t + 20}, Hex(0xFFFFD18A), {13, DWRITE_FONT_WEIGHT_SEMI_BOLD});
     g_cv.Text(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [지우기]. 다른 동기화는 계속합니다.",
               {in.l + 24, in.t + 22, in.r, in.t + 54}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, true, true});
     float w1 = BtnW(L"되살리기", 0xE777), w2 = BtnW(L"지우기", 0xE74D), w3 = BtnW(L"목록 보기", 0xE8FD);
+    float x0 = in.l + 24;
+    if (o.heldMoved > 0) {
+        float w0 = BtnW(L"옮긴 것으로 처리", 0xE8DE);
+        Btn(H_HELDMOVED, {x0, in.t + 58 + off, x0 + w0, in.t + 86 + off}, L"옮긴 것으로 처리", 0xE8DE,
+            L"다른 동기화 작업에서 같은 파일이 확인된 것만 이 PC의 옛 자리에서 지웁니다 (휴지통으로).\n새 자리에는 이미 들어와 있습니다. 짝을 찾지 못한 파일은 계속 보류합니다.", 2);
+        x0 += w0 + 8; in.l = x0 - 24;
+    }
     Btn(H_HELDLIST, {in.l + 40 + w1 + w2, in.t + 58 + off, in.l + 40 + w1 + w2 + w3, in.t + 86 + off}, L"목록 보기", 0xE8FD,
         L"지워지려는 파일·폴더 목록을 메모장으로 엽니다. 어느 쪽에서 사라졌는지도 적혀 있습니다.");
     Btn(H_RESTOREDEL, {in.l + 24, in.t + 58 + off, in.l + 24 + w1, in.t + 86 + off}, L"되살리기", 0xE777,
@@ -1197,6 +1218,10 @@ static void OnClick(int id) {
     else if (id >= H_XCANCEL && id < H_XCANCEL + 100 && id - H_XCANCEL < (int)g_xferRefs.size()) {
         auto& ref = g_xferRefs[id - H_XCANCEL];
         if (ref.first >= 0 && ref.first < (int)g_engines.size()) g_engines[ref.first]->CancelTransfer(ref.second);
+    }
+    else if (id == H_HELDMOVED) {
+        int n = 0; for (auto& e : g_engines) { int mv = e->HeldMoved(nullptr); if (mv > 0) { e->ConfirmMoved(); n += mv; } }
+        if (n) AddAlert(A_CONFIRM, Fmt(L"대량 삭제 중 %d개를 다른 동기화 작업으로 옮긴 것으로 처리 — 옛 자리는 휴지통으로", n));
     }
     else if (id == H_HELDLIST) {
         for (auto& e : g_engines) if (e->stats.heldDeletes > 0)

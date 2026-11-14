@@ -800,6 +800,13 @@ bool Engine::RunPass() {
     std::unique_lock<std::recursive_mutex> L(mu_);   // 작은 파일을 옮기는 동안만 풀어 줌
     retryAt_ = 0;
     if (!RefreshRemote()) return false;
+    // 다른 연결이 '옮겨진 것 찾기'에 쓸 NAS 파일 색인 (요청이 있을 때만, NAS 목록이 바뀌었을 때만 다시 만듦)
+    if (rkWant_ > GetTickCount64() && rkSeq_ != seq_) {
+        std::unordered_map<std::string, std::string> ix; ix.reserve(remote_.size());
+        for (auto& [p, r] : remote_) if (!r.d) ix.emplace(MoveKey(Leaf(p), r.s, r.m), p);
+        { std::lock_guard<std::mutex> g(rkMu_); rkIdx_.swap(ix); }
+        rkSeq_ = seq_;
+    }
     if (!ScanLocal()) return false;
     bool any = DetectRenames();
 
@@ -940,8 +947,19 @@ bool Engine::RunPass() {
 
     for (auto x = xOutWait_.begin(); x != xOutWait_.end();) x = xOutNow.count(x->first) ? std::next(x) : xOutWait_.erase(x);
     // 대량 삭제 확인: 지울 항목 수(아래 항목 포함)가 한도를 넘으면 그 방향의 삭제는 멈추고 확인을 기다림
+    // [옮긴 것으로 처리]: 다른 동기화 작업으로 옮겨진 것이 확인된 항목은 보류에서 빼고 지움
+    if (confirmMoved_.exchange(false)) {
+        std::lock_guard<std::mutex> g(cfMu_);
+        int n = 0;
+        for (auto& [p, v] : movedTo_) { allowDel_.insert(p); if (!v.first.empty()) n++; }
+        if (n) Event("→ 옮긴 것으로 처리", cfg_.name, std::to_string(n) + "개 — " + movedConn_ + " 작업으로 옮겨짐, 옛 자리는 휴지통으로");
+    }
+    {   // 지금 지울 목록에 없는 것은 잊음
+        std::set<std::string> dl; for (auto& it : items) if (it.a == DelL) dl.insert(it.p);
+        for (auto a = allowDel_.begin(); a != allowDel_.end();) a = dl.count(*a) ? std::next(a) : allowDel_.erase(a);
+    }
     int nDelL = 0, nDelR = 0;
-    for (auto& it : items) { if (it.a == DelL) nDelL++; if (it.a == DelR) nDelR++; }
+    for (auto& it : items) { if (it.a == DelL && !allowDel_.count(it.p)) nDelL++; if (it.a == DelR) nDelR++; }
     // [되살리기]: 한도를 넘은 쪽의 삭제를 하지 않고, 마지막 상태 기록을 잊어 '한쪽에만 있음'으로 다시 맞춤
     //   NAS 삭제 보류(PC에서 사라짐) → PC에 다시 만듦(필요할 때 받기면 자리표시) / PC 삭제 보류(NAS에서 사라짐) → NAS에 다시 올림
     if (restoreDelete_.exchange(false)) {
@@ -958,8 +976,45 @@ bool Engine::RunPass() {
     bool holdL = nDelL > cfg_.massDeleteLimit && !confirmDelete_;
     bool holdR = nDelR > cfg_.massDeleteLimit && !confirmDelete_;
     stats.heldDeletes = (holdL ? nDelL : 0) + (holdR ? nDelR : 0);
-    if (stats.heldDeletes != lastHeld_ && stats.heldDeletes > 0) {
-        Event("⏸ 대량 삭제 보류", cfg_.name, std::to_string(nDelR) + "개 NAS 삭제 / " + std::to_string(nDelL) + "개 PC 삭제 — [지우기]를 누르면 진행");
+    // DSM 에서 다른 공유 폴더로 옮긴 경우: NAS 에서 사라진 파일과 이름·크기·수정 시각이 같은 파일이 다른 연결의 NAS 에 있으면 '옮겨진 것'
+    bool movedChanged = false;
+    if (holdL && (GetTickCount64() - movedAt_ > 5000 || stats.heldDeletes != lastHeld_)) {
+        movedAt_ = GetTickCount64();
+        std::map<std::string, std::pair<std::string, std::string>> mt;
+        std::map<std::string, int> per;
+        std::set<std::string> hasMatch, dirty;
+        {
+            std::lock_guard<std::mutex> g(g_engMu);
+            for (Engine* e : g_engs) if (e != this) e->WantKeyIndex();
+            for (auto& it : items) {
+                if (it.a != DelL || allowDel_.count(it.p)) continue;
+                auto bi = base_.find(it.p);
+                if (bi == base_.end() || bi->second.d) continue;
+                std::string key = MoveKey(Leaf(it.p), bi->second.rs, bi->second.rm), rel, cn;
+                for (Engine* e : g_engs) if (e != this && e->LookupKey(key, &rel)) { cn = e->cfg().name; break; }
+                if (!cn.empty()) { mt[it.p] = {cn, rel}; per[cn]++; for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) hasMatch.insert(q); }
+                else for (std::string q = Parent(it.p); !q.empty(); q = Parent(q)) dirty.insert(q);
+            }
+        }
+        // 폴더: 안에 옮겨진 파일이 있고 짝 없는 파일이 하나도 없으면 같이 옮겨진 것
+        for (auto& it : items) {
+            if (it.a != DelL || allowDel_.count(it.p)) continue;
+            auto bi = base_.find(it.p);
+            if (bi != base_.end() && bi->second.d && hasMatch.count(it.p) && !dirty.count(it.p)) mt[it.p] = {"", ""};
+        }
+        int n = 0; std::string top; int best = 0;
+        for (auto& [c, k] : per) { n += k; if (k > best) { best = k; top = c; } }
+        std::lock_guard<std::mutex> g(cfMu_);
+        movedChanged = n != movedN_;
+        movedTo_.swap(mt); movedN_ = n; movedConn_ = top;
+        if (movedChanged && n > 0) LOG("[%s] 대량 삭제 보류 중 %d개는 '%s' 작업으로 옮겨진 것으로 보임", cfg_.name.c_str(), n, top.c_str());
+    } else if (!holdL) {
+        std::lock_guard<std::mutex> g(cfMu_);
+        if (movedN_ || !movedTo_.empty()) { movedTo_.clear(); movedN_ = 0; movedConn_.clear(); }
+    }
+    if ((stats.heldDeletes != lastHeld_ || movedChanged) && stats.heldDeletes > 0) {
+        if (stats.heldDeletes != lastHeld_)
+            Event("⏸ 대량 삭제 보류", cfg_.name, std::to_string(nDelR) + "개 NAS 삭제 / " + std::to_string(nDelL) + "개 PC 삭제 — [지우기]를 누르면 진행");
         // 어느 폴더에서 사라졌나: 같이 사라진 가장 위 폴더(없으면 파일이 있던 폴더)로 묶어 셈
         {
             std::set<std::string> hs;
@@ -1022,12 +1077,17 @@ bool Engine::RunPass() {
                 bool r = pass == 0;
                 if (!(r ? holdR : holdL)) continue;
                 fprintf(fp, r ? "[이 PC에서 사라짐 → [지우기]를 누르면 NAS에서도 지움] %d개\r\n" : "[NAS에서 사라짐 → [지우기]를 누르면 이 PC에서도 지움] %d개\r\n", r ? nDelR : nDelL);
+                std::map<std::string, std::pair<std::string, std::string>> mv;
+                { std::lock_guard<std::mutex> g(cfMu_); if (!r) mv = movedTo_; }
                 for (auto& it : items) {
-                    if (it.a != (r ? DelR : DelL)) continue;
+                    if (it.a != (r ? DelR : DelL) || (!r && allowDel_.count(it.p))) continue;
                     auto bi = base_.find(it.p); bool d = bi != base_.end() && bi->second.d;
                     std::string ap = U(Abs(cfg_.localRoot, it.p));
                     if (ap.rfind("\\\\?\\", 0) == 0) ap.erase(0, 4);
-                    fprintf(fp, "  %s%s\r\n", ap.c_str(), d ? "\\" : "");
+                    auto m = mv.find(it.p);
+                    if (m != mv.end() && !m->second.first.empty()) fprintf(fp, "  %s    → 옮겨짐: %s/%s\r\n", ap.c_str(), m->second.first.c_str(), m->second.second.c_str());
+                    else if (m != mv.end()) fprintf(fp, "  %s\\    → 폴더째 옮겨짐\r\n", ap.c_str());
+                    else fprintf(fp, "  %s%s\r\n", ap.c_str(), d ? "\\" : "");
                 }
                 fputs("\r\n", fp);
             }
@@ -1266,8 +1326,9 @@ bool Engine::RunPass() {
         for (std::string q = Parent(p); !q.empty(); q = Parent(q)) if (gone.count(q)) { under = true; break; }
         if (under) { base_.erase(p); continue; }
         if (it.a == DelL && !local_.count(p)) { stats.pending--; continue; }   // 위에서 이미 지워짐
-        if (it.a == DelL && !holdL && !local_[p].d && Busy(p, true)) { stats.pending--; continue; }
-        if (it.a == DelL && !holdL) { if (DeleteLocal(p)) { gone.insert(p); any = true; } }
+        bool okL = !holdL || allowDel_.count(p);   // 보류 중이어도 [옮긴 것으로 처리]한 것은 지움
+        if (it.a == DelL && okL && !local_[p].d && Busy(p, true)) { stats.pending--; continue; }
+        if (it.a == DelL && okL) { if (DeleteLocal(p)) { gone.insert(p); any = true; } }
         if (it.a == DelR && !holdR) { auto bi = base_.find(p); if (bi != base_.end() && DeleteRemote(p, bi->second)) { gone.insert(p); any = true; } }
         stats.pending--;
     }
