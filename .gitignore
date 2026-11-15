@@ -23,3 +23,6 @@ server/deploy/token.txt
 dsm/ui/md.cgi
 
 /build/
+
+# 휴대폰 앱 서명 열쇠 (저장소에 넣지 않음)
+_서명열쇠/

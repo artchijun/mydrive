@@ -20,7 +20,7 @@ MYDRIVED=…/mydrived ./gradlew testDebugUnitTest   # 실제 서버에 대고 �
 `android/keystore.properties` (저장소에 넣지 않음):
 
 ```
-storeFile=…/mydrive-android.jks
+storeFile=../_서명열쇠/mydrive-android.jks   (저장소 밖 _서명열쇠 폴더 — .gitignore 됨)
 storePassword=…
 keyAlias=mydrive
 keyPassword=…
