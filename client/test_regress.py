@@ -353,6 +353,18 @@ check("휴지통으로 지워도 받지 않음", events("↓ 받음", "cloud/on2
 check("NAS 에서도 지워짐 (NAS 휴지통)", "cloud/on2.bin" not in [e["p"] for e in snap()["entries"]])
 wait_same(60, "C10")
 
+print("C12) NAS 에 대소문자만 다른 이름 — Windows 에서는 같은 이름이라 하나만 받고 나머지는 건너뜀", flush=True)
+lw("case2/File.txt", "pc")   # PC 에 먼저 있는 이름이 이김
+time.sleep(5)
+wsl("mkdir -p ~/mdr/data/case && echo A > ~/mdr/data/case/Abc.txt && echo a > ~/mdr/data/case/abc.txt && echo n > ~/mdr/data/case2/file.txt")
+time.sleep(12)
+got = sorted(k for k in local_tree() if k.startswith("case"))
+check("PC 에는 하나씩만 (case/Abc.txt, case2/File.txt)", got == ["case", "case/Abc.txt", "case2", "case2/File.txt"], got)
+check("건너뜀 알림 2개", clilog().count("대소문자만 다른 같은 이름이 NAS 에 있음") == 2, clilog().count("대소문자만 다른 같은 이름이 NAS 에 있음"))
+check("PC 판은 그대로", open(os.path.join(LOCAL, r"case2\File.txt")).read() == "pc")
+wsl("rm -rf ~/mdr/data/case ~/mdr/data/case2"); shutil.rmtree(os.path.join(LOCAL, "case"), ignore_errors=True); shutil.rmtree(os.path.join(LOCAL, "case2"), ignore_errors=True)
+time.sleep(8)
+
 print("C11) 다 끝난 뒤: 조용할 때 아무것도 옮기지 않음 (되풀이 없음)", flush=True)
 time.sleep(5); n1 = events("↑ 올림") + events("↓ 받음"); time.sleep(20); n2 = events("↑ 올림") + events("↓ 받음")
 check("20초 동안 새로 옮긴 것 없음", n1 == n2, (n1, n2))

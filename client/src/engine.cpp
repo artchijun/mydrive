@@ -722,7 +722,7 @@ bool Engine::DetectRenames() {
     std::vector<std::string> keys;
     bool needL = false, needR = false;
     {
-        auto li = local_.begin(), ri = remote_.begin();
+        auto li = local_.begin(); auto ri = remote_.begin();
         for (auto& [p, b] : base_) {
             while (li != local_.end() && li->first < p) ++li;
             while (ri != remote_.end() && ri->first < p) ++ri;
@@ -924,15 +924,37 @@ bool Engine::RunPass() {
     struct Item { std::string p; Act a; };
     std::vector<Item> items;
 
-    std::set<std::string> all;
-    for (auto& [p, _] : local_) all.insert(p);
-    for (auto& [p, _] : remote_) all.insert(p);
-    for (auto& [p, _] : base_) all.insert(p);
+    // 세 목록의 모든 경로를 정렬된 순서로 한 번씩 (세 map 이 같은 순서라 나란히 훑어 합침).
+    //   예전에는 차례마다 set 에 58만 번 넣었음 (drive). 아래에서 세 목록을 고칠 수 있어 경로는 따로 복사해 둠.
+    std::vector<std::string> all;
+    all.reserve(std::max({local_.size(), remote_.size(), base_.size()}) + 64);
+    bool anyNewR = false;   // NAS 에만 새로 생긴 항목이 있나 (대소문자 겹침 검사가 필요한 때)
+    {
+        auto li = local_.begin(); auto ri = remote_.begin(); auto bi = base_.begin();
+        while (li != local_.end() || ri != remote_.end() || bi != base_.end()) {
+            const std::string* m = nullptr;
+            if (li != local_.end()) m = &li->first;
+            if (ri != remote_.end() && (!m || ri->first < *m)) m = &ri->first;
+            if (bi != base_.end() && (!m || bi->first < *m)) m = &bi->first;
+            bool hl = li != local_.end() && li->first == *m, hr = ri != remote_.end() && ri->first == *m, hb = bi != base_.end() && bi->first == *m;
+            if (hr && !hl && !hb) anyNewR = true;
+            all.push_back(*m);
+            if (hl) ++li;
+            if (hr) ++ri;
+            if (hb) ++bi;
+        }
+    }
 
     std::set<std::string> exclUnderL, exclUnderR;   // 필터로 뺀 파일이 들어 있는 폴더 (통째로 지우지 않음)
     std::map<std::wstring, std::string> caseWinner;  // 소문자 이름 → 처음 나온 NAS 경로 (all 은 정렬돼 있어 늘 같은 것이 이김)
-    for (auto& [p, l] : local_) { std::wstring lw = W(p); CharLowerBuffW(lw.data(), (DWORD)lw.size()); caseWinner.emplace(lw, p); }   // PC 에 이미 있는 이름이 우선
-    for (auto& [p, b] : base_) { std::wstring lw = W(p); CharLowerBuffW(lw.data(), (DWORD)lw.size()); caseWinner.emplace(lw, p); }
+    bool caseBuilt = false;   // 처음 필요할 때(NAS 에만 새로 생긴 항목) 한 번만 만듦 — 예전에는 차례마다 39만 개를 바꿔 넣었음
+    auto buildCase = [&] {
+        if (caseBuilt) return;
+        caseBuilt = true;
+        for (auto& [p, l] : local_) { std::wstring lw = W(p); CharLowerBuffW(lw.data(), (DWORD)lw.size()); caseWinner.emplace(lw, p); }   // PC 에 이미 있는 이름이 우선
+        for (auto& [p, b] : base_) { std::wstring lw = W(p); CharLowerBuffW(lw.data(), (DWORD)lw.size()); caseWinner.emplace(lw, p); }
+    };
+    (void)anyNewR;
     std::vector<std::string> hydr, dehy, conv, unpinDirs, autoFree;   // 탐색기 연동: 항상 유지 → 받기 / 공간 확보 / 자리표시로 바꾸기 / 표시 지울 폴더 / 오래 안 쓴 파일
     int64_t nowNs; { FILETIME ft; GetSystemTimeAsFileTime(&ft); nowNs = FtToNs(ft); }
     // 자동 공간 확보는 10분에 한 번만 살펴봄
@@ -961,6 +983,7 @@ bool Engine::RunPass() {
         }
         // NAS 에 대소문자만 다른 이름이 둘 이상 (Windows 에서는 같은 이름): 정렬해서 첫 것만 맞추고 나머지는 건너뜀
         if (r && !l && !b) {
+            buildCase();
             std::wstring lw = W(p); CharLowerBuffW(lw.data(), (DWORD)lw.size());
             auto [wi, fresh] = caseWinner.emplace(lw, p);
             if (!fresh && wi->second != p) {
