@@ -39,6 +39,7 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <activity android:name=".ViewerActivity" android:exported="false" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
         <activity android:name=".SetupActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
 
         <service android:name=".TransferService" android:exported="false" android:foregroundServiceType="dataSync" />

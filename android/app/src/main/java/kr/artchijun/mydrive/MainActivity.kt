@@ -527,8 +527,18 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun selectAll() { items.forEach { sel.add(it.path) }; adapter.notifyDataSetChanged(); refreshChrome() }
 
     // ---------- 열기 ----------
+    private var builtinViewer get() = pf.bool("viewer", true); set(v) = pf.putBool("viewer", v)
+
     private fun openItem(l: Loc, it: Item) {
         val ext = it.name.substringAfterLast('.', "").lowercase()
+        val vk = ViewerActivity.kindOf(it.name)
+        if (builtinViewer && vk != null && (l.kind == "local" || l.kind == "nas")) {
+            // 같은 폴더의 같은 종류(사진이면 사진들)를 넘겨 볼 수 있게
+            val dir = it.path.substringBeforeLast('/', "")
+            val same = if (vk == ViewerActivity.IMG && tab.loc.kind != "search") items.filter { x -> !x.dir && ViewerActivity.kindOf(x.name) == vk } else listOf(it)
+            ViewerActivity.start(this, l.copy(path = dir), same.map { x -> x.name }, same.map { x -> x.size }, same.map { x -> x.mtimeMs }, same.indexOf(it).coerceAtLeast(0), vk)
+            return
+        }
         when (l.kind) {
             "local" -> {
                 val f = File(l.root, it.path)
@@ -804,6 +814,7 @@ class MainActivity : Activity(), Transfers.Listener {
         opts += (if (showHidden) "숨김 파일 감추기" else "숨김 파일 보기 (점으로 시작)") to { showHidden = !showHidden; load() }
         if (tab.loc.kind == "trash") opts += "휴지통 비우기" to { emptyTrash() }
         if (tab.loc.kind == "zip") opts += "여기에 전부 풀기" to { extractHere() }
+        opts += (if (builtinViewer) "✓ 내장 뷰어로 열기 (사진·동영상·PDF·텍스트)" else "    내장 뷰어로 열기 (사진·동영상·PDF·텍스트)") to { builtinViewer = !builtinViewer; toast(if (builtinViewer) "앱 안에서 엽니다" else "휴대폰의 다른 앱으로 엽니다") }
         opts += "화면 테마" to { themeMenu() }
         opts += "새 판 확인" to { checkUpdate(true) }
         AlertDialog.Builder(this).setItems(opts.map { it.first }.toTypedArray()) { _, w -> opts[w].second() }.show()
@@ -975,6 +986,41 @@ class MainActivity : Activity(), Transfers.Listener {
         d.show(); e.requestFocus()
     }
 
+    // ---------- 사진·동영상 미리보기 (휴대폰 파일) ----------
+    private val thumbs = object : android.util.LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) { override fun sizeOf(k: String, b: android.graphics.Bitmap) = b.byteCount }
+    private val thumbPool = Executors.newFixedThreadPool(2)
+    private val thumbMiss = HashSet<String>()
+
+    private fun thumb(iv: ImageView, it: Item) {
+        val l = tab.loc
+        val base = when (l.kind) { "local" -> l; "search" -> Loc.parse(l.root)?.takeIf { b -> b.kind == "local" }; else -> null } ?: run { iv.tag = null; return }
+        val k = FileIcon.kindOf(it.name)
+        if (it.dir || (k != "image" && k != "video")) { iv.tag = null; return }
+        val f = File(base.root, it.path); val key = f.path + ":" + it.mtimeMs
+        iv.tag = key
+        thumbs.get(key)?.let { b -> iv.setImageBitmap(b); return }
+        if (key in thumbMiss) return
+        thumbPool.execute {
+            val b = try {
+                val sz = android.util.Size(ui.dp(68), ui.dp(68))
+                if (k == "image") android.media.ThumbnailUtils.createImageThumbnail(f, sz, null) else android.media.ThumbnailUtils.createVideoThumbnail(f, sz, null)
+            } catch (e: Exception) { null }
+            val r = b?.let { cropRound(it) }
+            runOnUiThread { if (r == null) thumbMiss += key else { thumbs.put(key, r); if (iv.tag == key) iv.setImageBitmap(r) } }
+        }
+    }
+
+    /** 가운데를 정사각형으로 자르고 모서리를 둥글게 */
+    private fun cropRound(b: android.graphics.Bitmap): android.graphics.Bitmap {
+        val s = minOf(b.width, b.height)
+        val out = android.graphics.Bitmap.createBitmap(s, s, android.graphics.Bitmap.Config.ARGB_8888)
+        val c = android.graphics.Canvas(out); val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        p.shader = android.graphics.BitmapShader(b, android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP).apply {
+            setLocalMatrix(android.graphics.Matrix().apply { setTranslate(-(b.width - s) / 2f, -(b.height - s) / 2f) }) }
+        c.drawRoundRect(0f, 0f, s.toFloat(), s.toFloat(), s * 0.14f, s * 0.14f, p)
+        return out
+    }
+
     // ================= 목록 칸 =================
     private inner class Adapter : BaseAdapter() {
         override fun getCount() = rows.size
@@ -1032,7 +1078,9 @@ class MainActivity : Activity(), Transfers.Listener {
             }
             val on = sel.contains(it.path)
             v.setBackgroundColor(if (on) ui.select else Color.TRANSPARENT)
-            (v.getChildAt(0) as ImageView).setImageDrawable(FileIcon(it.dir, it.name, if (it.dir && it.name == "Download" && tab.loc.kind == "local" && tab.loc.path.isEmpty()) "download" else ""))
+            val iconV = v.getChildAt(0) as ImageView
+            iconV.setImageDrawable(FileIcon(it.dir, it.name, if (it.dir && it.name == "Download" && tab.loc.kind == "local" && tab.loc.path.isEmpty()) "download" else ""))
+            thumb(iconV, it)
             val box = v.getChildAt(1) as LinearLayout
             (box.getChildAt(0) as TextView).text = it.name
             val l = tab.loc
