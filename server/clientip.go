@@ -2,8 +2,8 @@ package main
 
 import (
 	"net"
-	"os"
 	"net/http"
+	"os"
 	"strings"
 )
 
@@ -15,6 +15,13 @@ func clientIP(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		ip = r.RemoteAddr
+	}
+	// Cloudflare 터널: cloudflared 가 NAS 안(같은 기계·Docker 망)에서 넘겨줌 → 진짜 접속 주소는 CF-Connecting-IP
+	//   (로그인 실패 제한을 사람마다 따로 — 안 그러면 인터넷에서 오는 요청이 모두 한 주소로 보여 한 사람의 실패가 모두를 막음)
+	if f := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); f != "" && net.ParseIP(f) != nil {
+		if p := net.ParseIP(ip); p != nil && (p.IsLoopback() || p.IsPrivate()) {
+			return f
+		}
 	}
 	if r.Header.Get("X-Mydrive-Via") == "dsm" {
 		if p := net.ParseIP(ip); p != nil && (p.IsLoopback() || inNet(p, "172.16.0.0/12")) {

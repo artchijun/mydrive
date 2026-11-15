@@ -567,6 +567,32 @@ func (r *Root) Snapshot() (string, int64, []Entry) {
 	return r.epoch, r.seq, es
 }
 
+// Info: 목록 번호·변경 번호·항목 수 (전체 목록을 만들지 않고)
+func (r *Root) Info() (string, int64, int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.epoch, r.seq, len(r.idx)
+}
+
+// List: 폴더 하나의 바로 아래 항목 (휴대폰 앱처럼 전체 목록을 받지 않고 폴더씩 볼 때). ok=false 면 그런 폴더가 없음
+func (r *Root) List(dir string) ([]Entry, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if dir != "" {
+		if e, ok := r.idx[dir]; !ok || !e.D {
+			return nil, false
+		}
+	}
+	out := make([]Entry, 0, len(r.kids[dir]))
+	for c := range r.kids[dir] {
+		if e, ok := r.idx[c]; ok {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].P < out[j].P })
+	return out, true
+}
+
 func (r *Root) Get(rel string) (Entry, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

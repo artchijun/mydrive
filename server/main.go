@@ -34,12 +34,12 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"os/signal"
 	"syscall"
 	"time"
 )
@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.9"
+const version = "0.6.10"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -97,10 +97,13 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
+	mux.HandleFunc("/v1/list", auth(hList)) // 폴더 하나만 (휴대폰 앱)
 	mux.HandleFunc("/v1/changes", auth(hChanges))
 	mux.HandleFunc("/v1/rescan", auth(hRescan))     // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
 	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
-	mux.HandleFunc("/v1/batch", auth(hBatch))       // 작은 파일 묶어 올리기 (기록은 안에서 파일마다)
+	mux.HandleFunc("/v1/batch", auth(hBatch))
+	mux.HandleFunc("/v1/part", auth(hPart)) // 큰 파일 나눠 올리기 (Cloudflare 터널은 한 번에 100MB 까지)
+	go partJanitor()                        // 작은 파일 묶어 올리기 (기록은 안에서 파일마다)
 	mux.HandleFunc("/v1/move", auth(logged(hMove)))
 	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
 	mux.HandleFunc("/v1/hash", auth(hHash))
@@ -142,7 +145,7 @@ func main() {
 	mux.HandleFunc("/", hRootRedirect)
 	mux.HandleFunc("/v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("mydrived " + version + "\n")) })
 	log.Printf("mydrived %s 시작: %s (공유 폴더 %d개)", version, listen, len(roots))
-	srv := &http.Server{Addr: listen, Handler: mux, ReadHeaderTimeout: 30 * time.Second}
+	srv := &http.Server{Addr: listen, Handler: tunnelGuard(mux), ReadHeaderTimeout: 30 * time.Second}
 	log.Fatal(srv.ListenAndServe())
 }
 func env(k, d string) string {
@@ -208,17 +211,52 @@ func getRoot(w http.ResponseWriter, r *http.Request) *Root {
 	return rt
 }
 
+// hList: 폴더 하나의 바로 아래 항목 — GET /v1/list?root=&path=  (path 가 비면 맨 위)
+func hList(w http.ResponseWriter, r *http.Request) {
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	dir := strings.Trim(r.URL.Query().Get("path"), "/")
+	if strings.Contains(dir, "..") {
+		httpErr(w, 400, "bad_path", "경로가 올바르지 않음")
+		return
+	}
+	es, ok := rt.List(dir)
+	if !ok {
+		httpErr(w, 404, "not_found", "그런 폴더가 없음")
+		return
+	}
+	writeJSON(w, r, map[string]any{"path": dir, "entries": es})
+}
+
+// 인터넷(Cloudflare 터널)으로 들어온 요청인가 — 터널은 요청마다 CF-Connecting-IP 를 붙여 보냄
+func viaTunnel(r *http.Request) bool {
+	return r.Header.Get("Cf-Connecting-Ip") != "" || r.Header.Get("Cf-Ray") != ""
+}
+
+// tunnelGuard: 터널로 들어온 요청은 관리 화면·관리 기능을 막음 (집 안이나 DSM 창에서만). 동기화·휴대폰 앱 기능은 그대로
+func tunnelGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if viaTunnel(r) && (r.URL.Path == "/admin" || strings.HasPrefix(r.URL.Path, "/v1/admin/")) {
+			httpErr(w, 403, "forbidden", "관리 화면은 집 안에서나 DSM 에서만 열 수 있습니다")
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
+}
+
 func hRoots(w http.ResponseWriter, r *http.Request) {
 	out := []map[string]any{}
 	for _, rt := range rootList() {
-		e, s, es := rt.Snapshot()
+		e, s, n := rt.Info() // 예전에는 항목 수를 세려고 전체 목록(drive 19만 개)을 만들어 정렬했음
 		// share: NAS 공유 폴더 기준 경로 (예: /DESKTOP/작업) — PC 앱의 'NAS 경로 복사'가 \\NAS\DESKTOP\작업 으로 만듦
 		share := ""
 		if d := filepath.Clean(rt.Dir); strings.HasPrefix(d, filepath.Clean(nasBase)+"/") {
 			share = strings.TrimPrefix(d, filepath.Clean(nasBase))
 		}
 		total, free := diskSpace(rt.Dir)
-		out = append(out, map[string]any{"name": rt.Name, "epoch": e, "seq": s, "items": len(es), "share": share, "total": total, "free": free})
+		out = append(out, map[string]any{"name": rt.Name, "epoch": e, "seq": s, "items": n, "share": share, "total": total, "free": free})
 	}
 	writeJSON(w, r, out)
 }
@@ -453,6 +491,11 @@ func putOne(rt *Root, rel, abs string, mt int64, cond string, body io.Reader, si
 		os.Remove(tmp)
 		return 400, Entry{}, "upload", "올리기가 끊김: " + err.Error()
 	}
+	return commitTmp(rt, rel, abs, tmp, mt, cond)
+}
+
+// commitTmp: 다 받은 임시 파일을 제자리로 (조건 확인 → 덮을 판은 이전 버전으로 → 바꿔 넣기)
+func commitTmp(rt *Root, rel, abs, tmp string, mt int64, cond string) (int, Entry, string, string) {
 	t := time.Unix(0, mt)
 	os.Chtimes(tmp, t, t)
 	// 조건 확인과 교체는 짧게 붙여서 (그 사이에 NAS 쪽이 바뀌면 덮지 않음)
@@ -471,6 +514,17 @@ func putOne(rt *Root, rel, abs string, mt int64, cond string, body io.Reader, si
 	if err := os.Rename(tmp, abs); err != nil {
 		os.Remove(tmp)
 		return 500, Entry{}, "io", err.Error()
+	}
+	// 새로 생긴 위 폴더도 바로 목록에 (감시가 알아채기까지 0.3초쯤 걸려, 그 사이 목록에 파일만 있고 폴더가 없었음)
+	var newDirs []string
+	for d := parentOf(rel); d != ""; d = parentOf(d) {
+		if _, ok := rt.Get(d); ok {
+			break
+		}
+		newDirs = append(newDirs, d)
+	}
+	for i := len(newDirs) - 1; i >= 0; i-- {
+		rt.Apply(newDirs[i])
 	}
 	rt.Apply(rel)
 	e, _ := statRel(rt, rel)
