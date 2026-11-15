@@ -418,9 +418,12 @@ bool UpdateDehydrated(const std::wstring& abs, int64_t size, int64_t mtimeNs, co
     HANDLE h = CreateFileW(abs.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD before = GetFileAttributesW(abs.c_str());
     CF_FS_METADATA m = Meta(false, size, mtimeNs);
     std::string id = identity.empty() ? std::string("-") : identity;
     HRESULT hr = CfUpdatePlaceholder(h, &m, id.data(), (DWORD)id.size(), nullptr, 0, CF_UPDATE_FLAG_DEHYDRATE | CF_UPDATE_FLAG_MARK_IN_SYNC, nullptr, nullptr);
+    // 고치면 '공간 확보' 표시가 지워짐 → '항상 유지' 폴더 안이면 위 폴더 표시를 물려받아 곧바로 통째로 받게 됨 (시험으로 확인). 있던 표시를 되살림
+    if (SUCCEEDED(hr) && before != INVALID_FILE_ATTRIBUTES && IsUnpinned(before)) CfSetPinState(h, CF_PIN_STATE_UNPINNED, CF_SET_PIN_FLAG_NONE, nullptr);
     CloseHandle(h);
     if (FAILED(hr)) LOG("자리표시 파일 고치기 실패 %s: 0x%08X", U(abs).c_str(), (unsigned)hr);
     return SUCCEEDED(hr);

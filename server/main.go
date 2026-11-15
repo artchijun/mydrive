@@ -38,6 +38,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"os/signal"
 	"syscall"
 	"time"
 )
@@ -85,6 +87,10 @@ func main() {
 	for _, r := range rootList() {
 		r.Save()
 	}
+	// Docker 가 끄거나 다시 켤 때(SIGTERM): 상태를 저장하고 깨끗하게 끝냄
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
+	go func() { <-sig; log.Printf("끝내라는 신호 — 상태 저장 뒤 끝냄"); shutdown() }()
 	versionsStart()
 	devicesStart()
 
@@ -117,11 +123,8 @@ func main() {
 	mux.HandleFunc("/v1/pair", hPair) // DSM 계정으로 PC 연결 (토큰 없이)
 	// 다시 켜기: 프로세스를 끝내면 Docker 가 다시 띄우면서 최신 실행 파일을 복사해 씀
 	restart := func(w http.ResponseWriter, r *http.Request) {
-		for _, rt := range rootList() {
-			rt.Save()
-		}
 		writeJSON(w, r, map[string]any{"ok": true})
-		go func() { time.Sleep(300 * time.Millisecond); os.Exit(0) }()
+		go func() { time.Sleep(300 * time.Millisecond); shutdown() }()
 	}
 	mux.HandleFunc("/v1/admin/restart", func(w http.ResponseWriter, r *http.Request) {
 		// 관리 토큰 또는 (예전 방식) 동기화 토큰
@@ -617,4 +620,17 @@ func hMkdir(w http.ResponseWriter, r *http.Request) {
 	rt.Apply(rel)
 	e, _ := statRel(rt, rel)
 	writeJSON(w, r, e)
+}
+
+// 끝내기: 감시를 멈추고(더 바뀌지 않게) 깨끗하게 끝났다는 표시와 함께 저장한 뒤 끝냄
+var shutdownOnce sync.Once
+
+func shutdown() {
+	shutdownOnce.Do(func() {
+		for _, r := range rootList() {
+			r.Close()
+			r.SaveClean()
+		}
+		os.Exit(0)
+	})
 }

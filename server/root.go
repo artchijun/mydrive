@@ -57,6 +57,7 @@ type Root struct {
 	pending map[string]struct{}
 	pmu     sync.Mutex
 	state   string
+	saveMu  sync.Mutex // 주기 저장과 끝낼 때 저장이 겹치지 않게
 	stop    chan struct{}
 }
 
@@ -206,6 +207,7 @@ type persisted struct {
 	Epoch string
 	Seq   int64
 	Idx   map[string]Entry
+	Clean bool // 깨끗하게 끝냄(끝내기 직전 저장). false 로 남아 있으면 갑자기 꺼진 것 — 저장 뒤의 변경 번호를 PC 들이 이미 봤을 수 있음
 }
 
 func OpenRoot(name, dir, stateDir string) (*Root, error) {
@@ -232,6 +234,12 @@ func OpenRoot(name, dir, stateDir string) (*Root, error) {
 	} else {
 		// 꺼져 있던 동안 바뀐 것을 변경 기록으로 이어 붙인다 (PC 앱은 전체를 다시 받지 않아도 됨)
 		r.epoch, r.seq, r.idx = old.Epoch, old.Seq, old.Idx
+		if !old.Clean {
+			// 갑자기 꺼졌음: 마지막 저장 뒤에 나간 변경 번호를 PC 들이 이미 받았을 수 있어, 번호를 이어 쓰면 그 뒤 변경을 놓칠 수 있음
+			// → 목록 번호(epoch)를 새로 해서 PC 들이 전체 목록을 한 번 다시 받게 함
+			r.epoch = newEpoch()
+			log.Printf("[%s] 지난번에 깨끗하게 끝나지 않음 — PC 들이 전체 목록을 다시 받게 함", name)
+		}
 		r.buildKidsLocked()
 		r.oldest = r.seq + 1
 		r.diffInto(cur)
@@ -240,6 +248,7 @@ func OpenRoot(name, dir, stateDir string) (*Root, error) {
 	if r.kids == nil {
 		r.buildKidsLocked()
 	}
+	r.dirty = true // 켜자마자 '실행 중'(Clean=false)으로 다시 저장 — 깨끗하게 끝났다는 표시가 남아 있으면 안 됨
 	r.mu.Unlock()
 	log.Printf("[%s] %s: %d개 항목, 훑는 데 %v (epoch %s, seq %d)", name, dir, len(r.idx), time.Since(t0).Round(time.Millisecond), r.epoch, r.seq)
 	if err := r.startWatch(dirs); err != nil {
@@ -497,13 +506,20 @@ func (r *Root) Rescan() {
 	}
 }
 
-func (r *Root) Save() {
+func (r *Root) Save() { r.save(false) }
+
+// SaveClean: 끝내기 직전에 — 다음에 켤 때 변경 번호를 그대로 이어 써도 된다는 표시를 함께 남김
+func (r *Root) SaveClean() { r.save(true) }
+
+func (r *Root) save(clean bool) {
+	r.saveMu.Lock()
+	defer r.saveMu.Unlock()
 	r.mu.Lock()
-	if !r.dirty {
+	if !r.dirty && !clean {
 		r.mu.Unlock()
 		return
 	}
-	p := persisted{Epoch: r.epoch, Seq: r.seq, Idx: make(map[string]Entry, len(r.idx))}
+	p := persisted{Epoch: r.epoch, Seq: r.seq, Idx: make(map[string]Entry, len(r.idx)), Clean: clean}
 	for k, v := range r.idx {
 		p.Idx[k] = v
 	}

@@ -1352,8 +1352,10 @@ bool Engine::RunPass() {
             if (stop_ || Paused()) return any;
             std::wstring a = Abs(cfg_.localRoot, p);
             if (!cloud::Dehydrate(a)) continue;   // 쓰는 중이면 다음에
-            if (cloud::IsUnpinned(local_[p].a)) cloud::ClearPin(a, false);
-            LocalE now; if (StatLocal(p, now)) local_[p] = now;
+            // '공간 확보' 표시는 위 폴더가 '항상 유지'가 아닐 때만 지움 (보통 온라인 전용으로 돌아감).
+            //   '모두 받아 두기'·'항상 유지' 폴더 안이면 지우지 않고 남김 — 지우면 위 폴더의 '항상 유지'를 물려받아 곧바로 다시 통째로 받았음
+            if (cloud::IsUnpinned(local_[p].a) && ParentPin(p) != 1) cloud::ClearPin(a, false);
+            LocalE now; if (StatLocal(p, now)) { now.pin = local_[p].pin; local_[p] = now; }
             Event("☁ 공간 확보", p, std::to_string(now.s) + " B");
             any = true;
         }

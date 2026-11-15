@@ -44,8 +44,8 @@ def local_tree():
     return out
 
 def remote_tree():
-    s = wsl("cd ~/mdt/data && find . -mindepth 1 -not -path './#recycle*' -type d -printf 'DIR %P\\n'; "
-            "find . -not -path './#recycle*' -type f -exec sha1sum {} +", capture=True)
+    s = wsl("cd ~/mdt/data && find . -mindepth 1 -not -path './#recycle*' -not -path './#mydrive-versions*' -type d -printf 'DIR %P\\n'; "
+            "find . -not -path './#recycle*' -not -path './#mydrive-versions*' -type f -exec sha1sum {} +", capture=True)
     out = {}
     for line in s.splitlines():
         if line.startswith("DIR "): out[line[4:]] = "DIR"
