@@ -241,28 +241,62 @@ bool Engine::RefreshRemote() {
     return true;
 }
 
-// ---------- 로컬 폴더 훑기 (폴더 하나를 한 번에 읽는 방식: 이름·크기·시각·파일 번호를 같이 받음) ----------
-bool Engine::ScanLocal() {
-    std::map<std::string, LocalE> out;
-    std::vector<std::string> exclPlain;
-    int64_t nowNs; { FILETIME ft; GetSystemTimeAsFileTime(&ft); nowNs = FtToNs(ft); }
-    std::vector<std::string> stack{""};
-    std::vector<char> buf(256 * 1024);
-    DWORD attr = GetFileAttributesW(Abs(cfg_.localRoot, "").c_str());
-    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
-        LOG("[%s] 로컬 폴더를 열 수 없음 — 이번에는 건너뜀 (지우지 않음)", cfg_.name.c_str());
-        return false;
+// ---------- 로컬 폴더 읽기 (폴더 하나를 한 번에 읽는 방식: 이름·크기·시각·파일 번호를 같이 받음) ----------
+static uint8_t OwnPin(DWORD a) { return cloud::IsPinned(a) ? 1 : cloud::IsUnpinned(a) ? 2 : 0; }   // '항상 유지'(1) / '공간 확보'(2)
+
+// 폴더 하나를 읽음 (아래 폴더로는 들어가지 않음). 열 수 없으면 false
+bool Engine::ListDir(const std::string& dir, uint8_t parentPin, int64_t nowNs, std::vector<std::pair<std::string, LocalE>>& out, std::vector<std::string>& exclPlain) {
+    HANDLE h = CreateFileW(Abs(cfg_.localRoot, dir).c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::vector<char>& buf = scanBuf_;
+    if (buf.empty()) buf.resize(256 * 1024);
+    FILE_INFO_BY_HANDLE_CLASS cls = FileIdBothDirectoryRestartInfo;
+    while (GetFileInformationByHandleEx(h, cls, buf.data(), (DWORD)buf.size())) {
+        cls = FileIdBothDirectoryInfo;
+        auto* e = (FILE_ID_BOTH_DIR_INFO*)buf.data();
+        for (;;) {
+            std::wstring n(e->FileName, e->FileNameLength / sizeof(wchar_t));
+            // 링크(정션 등)는 따라가지 않음. 단, 탐색기 연동의 자리표시 파일(클라우드 파일)은 보통 파일처럼 다룸
+            // (FILE_ATTRIBUTE_REPARSE_POINT 이면 EaSize 칸에 재분석 태그가 들어 있음)
+            bool link = (e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud::IsCloudReparse(e->FileAttributes, e->EaSize);
+            // 체크로 뺀 종류의 보통 파일(자리표시 아님): 1분 넘게 그대로면 탐색기 표시만 고칠 대상 (저장 중인 임시 파일은 건드리지 않음)
+            if (!(e->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) && !AlwaysSkipName(n) &&
+                (SkipKind(n) & g_skipMask.load()) && nowNs - FtToNs(*(FILETIME*)&e->LastWriteTime) > 60000000000LL && exclPlain.size() < 500)
+                exclPlain.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
+            // 늘 빼는 이름(시놀로지 내부 폴더 등)이 자리표시가 아니면 위 폴더가 탐색기에 늘 '동기화 중' → 안까지 표시만 고침 (우리 임시 파일은 제외)
+            if (n != L"." && n != L".." && AlwaysSkipName(n) && n.rfind(L".mydrive-tmp-", 0) != 0 && !(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && exclTree_.size() < 20)
+                exclTree_.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
+            if (n != L"." && n != L".." && !SkipLocalName(n) && !link) {
+                std::string rel = dir.empty() ? U(n) : dir + "/" + U(n);
+                LocalE l;
+                l.d = (e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                l.s = l.d ? 0 : e->EndOfFile.QuadPart;
+                l.m = FtToNs(*(FILETIME*)&e->LastWriteTime);
+                l.id = (uint64_t)e->FileId.QuadPart;
+                l.a = e->FileAttributes;
+                l.at = FtToNs(*(FILETIME*)&e->LastAccessTime);
+                uint8_t own = OwnPin(l.a);
+                l.pin = own ? own : parentPin;   // 폴더에 붙은 표시는 아래 항목이 물려받음
+                // 이름 패턴·선택 동기화로 뺀 것은 아예 보지 않음 (크기 0 으로 물어 크기 제한은 여기서 보지 않음 — 맞출 때 양쪽을 함께 봄)
+                if (!Excluded(rel, l.d, 0)) out.emplace_back(std::move(rel), l);
+            }
+            if (!e->NextEntryOffset) break;
+            e = (FILE_ID_BOTH_DIR_INFO*)((char*)e + e->NextEntryOffset);
+        }
     }
-    // '항상 유지'(1) / '공간 확보'(2): 폴더에 붙은 표시는 아래 항목이 물려받음
-    auto ownPin = [](DWORD a) -> uint8_t { return cloud::IsPinned(a) ? 1 : cloud::IsUnpinned(a) ? 2 : 0; };
-    rootPin_ = ownPin(attr);
-    std::map<std::string, uint8_t> dirPin;
+    CloseHandle(h);
+    return true;
+}
+
+// start 폴더 아래 전부를 읽어 out 에 넣음. 맨 위 폴더(start 가 빈 값)를 못 열 때만 false
+bool Engine::ScanTree(const std::string& start, uint8_t startPin, int64_t nowNs, std::map<std::string, LocalE>& out, std::vector<std::string>& exclPlain) {
+    std::vector<std::pair<std::string, uint8_t>> stack{{start, startPin}};
+    std::vector<std::pair<std::string, LocalE>> kids;
     while (!stack.empty()) {
-        std::string dir = stack.back(); stack.pop_back();
-        uint8_t parentPin = dir.empty() ? rootPin_ : dirPin[dir];
-        HANDLE h = CreateFileW(Abs(cfg_.localRoot, dir).c_str(), FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (h == INVALID_HANDLE_VALUE) {
+        auto [dir, pin] = stack.back(); stack.pop_back();
+        kids.clear();
+        if (!ListDir(dir, pin, nowNs, kids, exclPlain)) {
             if (dir.empty()) return false;
             // 읽을 수 없는 폴더: 그 아래는 "모름" — base 에 있는 항목을 그대로 둬서 지우는 것으로 오해하지 않게
             std::string pre = dir + "/";
@@ -270,50 +304,87 @@ bool Engine::ScanLocal() {
                 out[it->first] = LocalE{it->second.d, it->second.ls, it->second.lm, it->second.lid};
             continue;
         }
-        FILE_INFO_BY_HANDLE_CLASS cls = FileIdBothDirectoryRestartInfo;
-        while (GetFileInformationByHandleEx(h, cls, buf.data(), (DWORD)buf.size())) {
-            cls = FileIdBothDirectoryInfo;
-            auto* e = (FILE_ID_BOTH_DIR_INFO*)buf.data();
-            for (;;) {
-                std::wstring n(e->FileName, e->FileNameLength / sizeof(wchar_t));
-                // 링크(정션 등)는 따라가지 않음. 단, 탐색기 연동의 자리표시 파일(클라우드 파일)은 보통 파일처럼 다룸
-                // (FILE_ATTRIBUTE_REPARSE_POINT 이면 EaSize 칸에 재분석 태그가 들어 있음)
-                bool link = (e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud::IsCloudReparse(e->FileAttributes, e->EaSize);
-                // 체크로 뺀 종류의 보통 파일(자리표시 아님): 1분 넘게 그대로면 탐색기 표시만 고칠 대상 (저장 중인 임시 파일은 건드리지 않음)
-                if (!(e->FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) && !AlwaysSkipName(n) &&
-                    (SkipKind(n) & g_skipMask.load()) && nowNs - FtToNs(*(FILETIME*)&e->LastWriteTime) > 60000000000LL && exclPlain.size() < 500)
-                    exclPlain.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
-                // 늘 빼는 이름(시놀로지 내부 폴더 등)이 자리표시가 아니면 위 폴더가 탐색기에 늘 '동기화 중' → 안까지 표시만 고침 (우리 임시 파일은 제외)
-                if (n != L"." && n != L".." && AlwaysSkipName(n) && n.rfind(L".mydrive-tmp-", 0) != 0 && !(e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && exclTree_.size() < 20)
-                    exclTree_.push_back(dir.empty() ? U(n) : dir + "/" + U(n));
-                if (n != L"." && n != L".." && !SkipLocalName(n) && !link) {
-                    std::string rel = dir.empty() ? U(n) : dir + "/" + U(n);
-                    LocalE l;
-                    l.d = (e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                    l.s = l.d ? 0 : e->EndOfFile.QuadPart;
-                    l.m = FtToNs(*(FILETIME*)&e->LastWriteTime);
-                    l.id = (uint64_t)e->FileId.QuadPart;
-                    l.a = e->FileAttributes;
-                    l.at = FtToNs(*(FILETIME*)&e->LastAccessTime);
-                    uint8_t own = ownPin(l.a);
-                    l.pin = own ? own : parentPin;
-                    // 이름 패턴·선택 동기화로 뺀 것은 아예 보지 않음 (크기 제한은 맞출 때 양쪽을 함께 봄)
-                    if (!Excluded(rel, l.d, 0)) {   // 크기 0 으로 물어 크기 제한은 여기서 보지 않음 (맞출 때 양쪽을 함께 봄)
-                        out[rel] = l;
-                        if (l.d) { stack.push_back(rel); dirPin[rel] = l.pin; }
-                    }
-                }
-                if (!e->NextEntryOffset) break;
-                e = (FILE_ID_BOTH_DIR_INFO*)((char*)e + e->NextEntryOffset);
-            }
-        }
-        CloseHandle(h);
+        for (auto& [rel, l] : kids) { if (l.d) stack.push_back({rel, l.pin}); out[rel] = l; }
     }
-    local_ = std::move(out);
-    exclPlain_ = std::move(exclPlain);
     return true;
 }
 
+// ---------- 로컬 폴더 훑기 ----------
+//   보통은 Windows 가 '바뀌었다'고 알려 준 폴더만 다시 읽음 (파일 하나 바뀔 때마다 수만~수십만 개를 다 읽지 않게).
+//   전체를 읽는 때: 처음, 알림이 넘쳤을 때, 알림을 못 받을 때, [지금 동기화], 그리고 재검사 간격(rescanMin)마다 — 놓친 것이 있어도 여기서 잡힘.
+bool Engine::ScanLocal() {
+    int64_t nowNs; { FILETIME ft; GetSystemTimeAsFileTime(&ft); nowNs = FtToNs(ft); }
+    DWORD attr = GetFileAttributesW(Abs(cfg_.localRoot, "").c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        LOG("[%s] 로컬 폴더를 열 수 없음 — 이번에는 건너뜀 (지우지 않음)", cfg_.name.c_str());
+        scanAll_ = true;
+        return false;
+    }
+    std::set<std::string> dd;
+    { std::lock_guard<std::mutex> g(ddMu_); dd.swap(dirtyDirs_); }
+    bool all = scanAll_.exchange(false);
+    uint64_t now = GetTickCount64();
+    uint8_t rp = OwnPin(attr);
+    if (!haveLocal_ || !watchOk_ || rp != rootPin_ || now - lastFull_ > (uint64_t)std::max(1, cfg_.rescanMin) * 60000) all = true;
+    rootPin_ = rp;
+    std::vector<std::string> exclPlain;
+    if (all) {
+        std::map<std::string, LocalE> out;
+        if (!ScanTree("", rootPin_, nowNs, out, exclPlain)) { scanAll_ = true; return false; }
+        local_ = std::move(out);
+        exclPlain_ = std::move(exclPlain);
+        haveLocal_ = true; lastFull_ = now; scanDirs_ = -1;
+        return true;
+    }
+    // 바뀐 폴더만: 그 폴더 바로 아래를 다시 읽어 local_ 을 고침. 새로 생겼거나 바뀐(다른 폴더가 됨·표시가 바뀜) 아래 폴더는 안까지 다시 읽음
+    auto eraseTree = [&](const std::string& p) { local_.erase(local_.lower_bound(p + "/"), local_.lower_bound(p + "0")); };   // '0' 은 '/' 바로 다음 글자
+    std::vector<std::string> deep;   // 안까지 다시 읽은 폴더 (그 아래 폴더는 또 읽지 않음)
+    std::vector<std::pair<std::string, LocalE>> kids;
+    int nDirs = 0;
+    for (auto& dir : dd) {   // 정렬돼 있어 위 폴더가 먼저 옴
+        if (stop_) { scanAll_ = true; return false; }
+        if (std::any_of(deep.begin(), deep.end(), [&](const std::string& r) { return Under(dir, r); })) continue;
+        uint8_t pin = rootPin_;
+        if (!dir.empty()) {
+            auto it = local_.find(dir);
+            if (it == local_.end() || !it->second.d) continue;   // 모르는 폴더(뺀 폴더이거나, 새 폴더면 위 폴더를 읽을 때 같이 읽음) · 사라진 폴더
+            pin = it->second.pin;
+        }
+        kids.clear();
+        if (!ListDir(dir, pin, nowNs, kids, exclPlain)) continue;   // 못 열면 아는 그대로 둠 (사라진 것이면 위 폴더를 읽을 때 지워짐)
+        nDirs++;
+        std::string pre = dir.empty() ? std::string() : dir + "/";
+        std::set<std::string> have;
+        for (auto& [rel, l] : kids) have.insert(rel);
+        // 전에 있던 바로 아래 항목 중 사라진 것을 지움
+        std::vector<std::string> gone;
+        for (auto it = pre.empty() ? local_.begin() : local_.lower_bound(pre); it != local_.end() && it->first.compare(0, pre.size(), pre) == 0;) {
+            size_t s = it->first.find('/', pre.size());
+            if (s != std::string::npos) { it = local_.lower_bound(it->first.substr(0, s) + "0"); continue; }   // 더 아래 항목: 그 폴더를 통째로 건너뜀
+            if (!have.count(it->first)) gone.push_back(it->first);
+            ++it;
+        }
+        for (auto& p : gone) { eraseTree(p); local_.erase(p); }
+        for (auto& [rel, l] : kids) {
+            auto old = local_.find(rel);
+            bool had = old != local_.end();
+            if (l.d) {
+                if (!had || !old->second.d || old->second.id != l.id || old->second.pin != l.pin) {
+                    eraseTree(rel);
+                    local_[rel] = l;
+                    ScanTree(rel, l.pin, nowNs, local_, exclPlain);
+                    deep.push_back(rel);
+                } else old->second = l;
+            } else {
+                if (had && old->second.d) eraseTree(rel);
+                local_[rel] = l;
+            }
+        }
+    }
+    exclPlain_ = std::move(exclPlain);
+    scanDirs_ = nDirs;
+    return true;
+}
 bool Engine::StatLocal(const std::string& p, LocalE& out) {
     HANDLE h = CreateFileW(Abs(cfg_.localRoot, p).c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
@@ -397,8 +468,14 @@ bool Engine::UploadDone(const std::string& p, const LocalE& l, const Resp& r, st
         bool mark = marks == nullptr;
         if (here && now.s == l.s && SameTime(now.m, l.m)) { SetBase(p, now, re, mark); if (!mark) marks->push_back({p, now.d}); }
         else if (!here) SetBase(p, l, re);   // 다 올린 뒤 지워짐 → 다음 차례에 NAS에서도 지움 (예전에는 PC로 도로 받아 와서 되살아났음)
-        else { remote_[p] = re; dirty_ = true; }
-    }   // 올리는 사이 또 바뀜 → 다음 차례에 다시 올림
+        else {
+            // 올리는 사이 PC 에서 또 바뀜 → '올린 판'을 마지막으로 맞춘 상태로 적어 두고, 다음 차례에 새 판을 다시 올림.
+            //   예전에는 NAS 쪽만 적어서 다음 차례에 'PC·NAS 둘 다 바뀜'으로 보고 충돌 사본을 만들었음 (최신 판이 충돌 사본으로 가고 본 파일은 옛 판으로 돌아감)
+            SetBase(p, l, re, false);
+            auto it = local_.find(p);
+            if (it != local_.end()) { now.pin = it->second.pin; it->second = now; }
+        }
+    }
     stats.up++;
     Event("↑ 올림", p, std::to_string(l.s) + " B");
     return true;
@@ -1728,9 +1805,9 @@ void Engine::LoopMain() {
         uint64_t took = GetTickCount64() - passAt;
         busy = false;
         if (took > 3000 && !prof_[3]) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (중간에 멈춤)", cfg_.name.c_str(), took / 1000.0);
-        else if (took > 3000) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (NAS 목록 %.1f · PC 훑기 %.1f · 비교 %.1f · 옮기기 %.1f · 저장 등 %.1f, PC %zu개)", cfg_.name.c_str(), took / 1000.0,
+        else if (took > 3000) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (NAS 목록 %.1f · PC 훑기 %.1f · 비교 %.1f · 옮기기 %.1f · 저장 등 %.1f, PC %zu개, 읽은 폴더 %s)", cfg_.name.c_str(), took / 1000.0,
                              prof_[0] / 1000.0, (prof_[1] - prof_[0]) / 1000.0, (prof_[2] - prof_[1]) / 1000.0, (prof_[3] - prof_[2]) / 1000.0,
-                             prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size());
+                             prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size(), scanDirs_ < 0 ? "전체" : std::to_string(scanDirs_).c_str());
         polledSeq_ = seq_;
         if (stop_) break;
         // 바뀐 게 있었으면 곧바로 한 번 더 (연쇄 변경), 없으면 알림이 올 때까지 (최대 재검사 간격)
@@ -1772,6 +1849,7 @@ void Engine::WatchMain() {
                             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
     if (watchDir_ == INVALID_HANDLE_VALUE) return;
     std::vector<char> buf(64 * 1024);
+    scanAll_ = true; watchOk_ = true;   // 감시를 시작하기 전에 바뀐 것은 전체 훑기로 잡음
     while (!stop_) {
         DWORD got = 0;
         BOOL ok = ReadDirectoryChangesW(watchDir_, buf.data(), (DWORD)buf.size(), TRUE,
@@ -1779,12 +1857,18 @@ void Engine::WatchMain() {
                                         (cloudOn_ ? FILE_NOTIFY_CHANGE_ATTRIBUTES : 0),   // 탐색기의 '항상 유지'/'공간 확보'
                                         &got, nullptr, nullptr);
         if (!ok || stop_) break;
+        if (got == 0) scanAll_ = true;   // 알림이 넘쳐서 무엇이 바뀌었는지 모름 → 전체를 읽음
         // 우리 임시 파일만 바뀐 것이면 무시
         bool real = got == 0;
         for (auto* e = (FILE_NOTIFY_INFORMATION*)buf.data(); got && e;) {
             std::wstring n(e->FileName, e->FileNameLength / sizeof(wchar_t));
             auto s = n.rfind(L'\\');
             if (!SkipLocalName(s == std::wstring::npos ? n : n.substr(s + 1))) real = true;
+            {   // 바뀐 항목이 든 폴더를 적어 둠 (다음 훑기에서 이 폴더만 다시 읽음)
+                std::string par = s == std::wstring::npos ? std::string() : U(n.substr(0, s)); for (auto& c : par) if (c == '\\') c = '/';
+                std::lock_guard<std::mutex> g(ddMu_);
+                if (dirtyDirs_.size() < 5000) dirtyDirs_.insert(std::move(par)); else scanAll_ = true;
+            }
             if (e->Action == FILE_ACTION_REMOVED || e->Action == FILE_ACTION_RENAMED_OLD_NAME) {
                 std::string rel = U(n); for (auto& c : rel) if (c == '\\') c = '/';
                 std::lock_guard<std::mutex> g(xMu_);
@@ -1795,6 +1879,7 @@ void Engine::WatchMain() {
         }
         if (real) SetEvent(wake_);
     }
+    watchOk_ = false; scanAll_ = true;
     CloseHandle(watchDir_); watchDir_ = INVALID_HANDLE_VALUE;
 }
 

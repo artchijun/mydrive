@@ -101,7 +101,7 @@ public:
     static std::string MoveKey(const std::string& leaf, int64_t size, int64_t mtimeNs) { return leaf + "|" + std::to_string(size) + "|" + std::to_string(mtimeNs / 1000000000LL); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
     // NAS 전체 목록을 새로 받아 PC 가 들고 있는 목록을 바로잡음 ([NAS 다시 확인], 올리기가 'NAS에도 다른 판'으로 거절될 때)
-    void ResyncRemote() { resync_ = true; Kick(); }
+    void ResyncRemote() { resync_ = true; scanAll_ = true; Kick(); }
     bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
     void ClearCanceled() { std::lock_guard<std::mutex> g(xMu_); canceled_.clear(); }   // [지금 동기화]: 취소한 것도 다시 맞춤
     // 일시 중지: minutes 동안 (0 = 다시 시작)
@@ -224,6 +224,13 @@ private:
 
     bool RefreshRemote();
     bool ScanLocal();
+    bool ListDir(const std::string& dir, uint8_t parentPin, int64_t nowNs, std::vector<std::pair<std::string, LocalE>>& out, std::vector<std::string>& exclPlain);
+    bool ScanTree(const std::string& start, uint8_t startPin, int64_t nowNs, std::map<std::string, LocalE>& out, std::vector<std::string>& exclPlain);
+    // 바뀐 폴더만 훑기: 폴더 감시(WatchMain)가 바뀐 폴더를 모아 두고, ScanLocal 이 그 폴더만 다시 읽음
+    std::mutex ddMu_; std::set<std::string> dirtyDirs_;
+    std::atomic<bool> scanAll_{true}, watchOk_{false};   // scanAll_: 다음에는 전체를 읽음 · watchOk_: 폴더 감시가 돌고 있음
+    bool haveLocal_ = false; uint64_t lastFull_ = 0; int scanDirs_ = -1;   // scanDirs_: 이번에 읽은 폴더 수 (-1 = 전체)
+    std::vector<char> scanBuf_;
     void ApplyRemoteEntry(const std::string& p, const RemoteE& e);
     bool DetectRenames();
     // 실행
