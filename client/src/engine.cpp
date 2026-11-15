@@ -716,12 +716,41 @@ int Engine::SameContent(const std::string& p) {
 
 // ---------- 이름 바꾸기 알아채기 (지우고 새로 올리는 대신 이름만 바꿈) ----------
 bool Engine::DetectRenames() {
-    bool any = false;
-    std::unordered_map<uint64_t, std::string> lById, rByIno;
-    for (auto& [p, l] : local_) if (l.id && !Excluded(p, l.d, l.s)) lById[l.id] = p;
-    for (auto& [p, r] : remote_) if (r.i && !Excluded(p, r.d, r.s)) rByIno[r.i] = p;
+    // 예전에는 차례마다 양쪽 전체(drive 는 40만 개)로 파일 번호 색인을 만들고(이름 패턴 검사 포함) base 전체를 정렬해 1~2초 걸렸음.
+    // 이름이 바뀐 것은 반드시 'base 에 있는데 한쪽에서 사라진 것'(후보)과 'base 에 없는 새 경로'(짝)이므로 그것만 봄.
+    // 세 목록은 같은 순서로 정렬된 map 이라 한 번 나란히 훑으면 됨 (찾기 없이).
     std::vector<std::string> keys;
-    for (auto& [p, b] : base_) keys.push_back(p);
+    bool needL = false, needR = false;
+    {
+        auto li = local_.begin(), ri = remote_.begin();
+        for (auto& [p, b] : base_) {
+            while (li != local_.end() && li->first < p) ++li;
+            while (ri != remote_.end() && ri->first < p) ++ri;
+            bool lHere = li != local_.end() && li->first == p, rHere = ri != remote_.end() && ri->first == p;
+            if (!lHere && rHere && b.lid) { keys.push_back(p); needL = true; }        // PC 에서 사라짐 → PC 의 새 경로에서 짝을 찾음
+            else if (lHere && !rHere && b.ri) { keys.push_back(p); needR = true; }    // NAS 에서 사라짐 → NAS 의 새 경로에서 짝을 찾음
+        }
+    }
+    if (keys.empty()) return false;
+    bool any = false;
+    std::unordered_map<uint64_t, std::string> lById, rByIno;   // base 에 없는 새 경로만
+    if (needL) {
+        auto bi = base_.begin();
+        for (auto& [p, l] : local_) {
+            while (bi != base_.end() && bi->first < p) ++bi;
+            if (bi != base_.end() && bi->first == p) continue;
+            if (l.id && !Excluded(p, l.d, l.s)) lById[l.id] = p;
+        }
+    }
+    if (needR) {
+        auto bi = base_.begin();
+        for (auto& [p, r] : remote_) {
+            while (bi != base_.end() && bi->first < p) ++bi;
+            if (bi != base_.end() && bi->first == p) continue;
+            if (r.i && !Excluded(p, r.d, r.s)) rByIno[r.i] = p;
+        }
+    }
+    if (lById.empty() && rByIno.empty()) return false;   // 짝이 될 새 경로가 없음 (지우기만 함)
     std::sort(keys.begin(), keys.end(), [](auto& a, auto& b) { return Depth(a) < Depth(b) || (Depth(a) == Depth(b) && a < b); });
     for (auto& p : keys) {
         auto bi = base_.find(p);
