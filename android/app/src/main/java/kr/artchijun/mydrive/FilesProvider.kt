@@ -17,7 +17,9 @@ class FilesProvider : ContentProvider() {
     companion object {
         fun authority(ctx: Context) = ctx.packageName + ".files"
         fun uriFor(ctx: Context, f: File): Uri {
-            val rel = f.canonicalPath.removePrefix(ctx.cacheDir.canonicalPath).trimStart('/')
+            val cp = f.canonicalPath; val cache = ctx.cacheDir.canonicalPath
+            // 앱 캐시 안 = 받은 파일, 그 밖 = 휴대폰 저장소 파일 (탐색기에서 열기·공유) → /x/절대경로
+            val rel = if (cp.startsWith("$cache/")) cp.removePrefix(cache).trimStart('/') else "x" + cp
             return Uri.Builder().scheme("content").authority(authority(ctx)).path(rel).build()
         }
         fun mimeOf(name: String): String {
@@ -28,8 +30,14 @@ class FilesProvider : ContentProvider() {
     }
 
     private fun fileOf(uri: Uri): File {
+        val p = uri.path ?: ""
+        if (p.startsWith("/x/")) {   // 휴대폰 저장소 파일: /storage/ 아래만
+            val f = File(p.removePrefix("/x")).canonicalFile
+            if (!f.path.startsWith("/storage/") || !f.isFile) throw FileNotFoundException(uri.toString())
+            return f
+        }
         val base = context!!.cacheDir.canonicalFile
-        val f = File(base, uri.path ?: "").canonicalFile
+        val f = File(base, p).canonicalFile
         if (!f.path.startsWith(base.path + "/") || !f.isFile) throw FileNotFoundException(uri.toString())
         return f
     }

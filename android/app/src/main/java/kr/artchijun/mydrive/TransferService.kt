@@ -54,7 +54,7 @@ class TransferService : Service() {
             .setOngoing(true)
             .setOnlyAlertOnce(true)
         if (j == null) return b.setContentTitle("Mydrive").setContentText("준비 중").build()
-        val what = when (j.kind) { Transfers.Kind.UP -> "올리는 중"; else -> "받는 중" }
+        val what = Transfers.verb(j.kind)
         val more = Transfers.waiting.let { if (it > 0) " · 기다리는 것 ${it}개" else "" }
         b.setContentTitle("$what: ${j.title}").setContentText(Fmt.size(j.done) + " / " + Fmt.size(j.total) + more)
         if (j.total > 0) b.setProgress(1000, (j.done * 1000 / j.total).toInt(), false) else b.setProgress(0, 0, true)

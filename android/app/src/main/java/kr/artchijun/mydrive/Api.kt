@@ -107,6 +107,28 @@ class Api(servers: List<String>, var token: String) {
         }
     }
 
+    /** 새 폴더 */
+    fun mkdir(root: String, path: String): Entry = retry { entry(JSONObject(readBody(open("POST", "/v1/mkdir", mapOf("root" to root, "path" to path))))) }
+
+    /** 이름 바꾸기·옮기기 (같은 연결 폴더 안). 받는 쪽에 같은 이름이 있으면 409 */
+    fun move(root: String, from: String, to: String) { retry { readBody(open("POST", "/v1/move", mapOf("root" to root, "from" to from, "to" to to, "if" to "none"))) } }
+
+    /** 지우기 → NAS 휴지통(#recycle)으로 */
+    fun delete(root: String, path: String) { retry { readBody(open("DELETE", "/v1/file", mapOf("root" to root, "path" to path))) } }
+
+    /** 이름 검색 (서버 0.6.11 이상) → (결과, 더 있음) */
+    fun search(root: String, under: String, q: String, ext: String, limit: Int = 500): Pair<List<Entry>, Boolean> = retry {
+        val j = JSONObject(readBody(open("GET", "/v1/search", mapOf("root" to root, "path" to under, "q" to q, "ext" to ext, "limit" to limit.toString()), 60000)))
+        val a = j.getJSONArray("entries")
+        (0 until a.length()).map { entry(a.getJSONObject(it)) } to j.optBoolean("more")
+    }
+
+    /** 파일 하나 정보 (없으면 null) — 폴더 안 목록에서 찾음 */
+    fun stat(root: String, path: String): Entry? {
+        val dir = path.substringBeforeLast('/', "")
+        return try { list(root, dir).firstOrNull { it.path == path } } catch (e: ApiException) { if (e.status == 404) null else throw e }
+    }
+
     /** 받기: dest 로. 끊기면 받은 데까지 이어서 (같은 파일일 때만) */
     fun download(root: String, e: Entry, dest: File, progress: (Long, Long) -> Unit, canceled: () -> Boolean) {
         val part = File(dest.path + ".part")

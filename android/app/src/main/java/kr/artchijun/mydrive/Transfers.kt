@@ -13,7 +13,7 @@ import java.util.concurrent.Executors
 
 // 올리기·받기 줄: 하나씩 차례로. 다른 앱으로 가도 계속되게 TransferService 가 알림과 함께 붙잡아 둠
 object Transfers {
-    enum class Kind { UP, OPEN, SAVE }
+    enum class Kind { UP, OPEN, SAVE, COPY, MOVE, SHARE, ZIP }
 
     class Job(val kind: Kind, val root: String, val title: String, val run: (Job) -> String?) {
         @Volatile var done = 0L
@@ -40,6 +40,8 @@ object Transfers {
         pool.execute { runOne() }
         changed()
     }
+
+    fun verb(k: Kind) = when (k) { Kind.UP -> "올리는 중"; Kind.COPY -> "복사하는 중"; Kind.MOVE -> "옮기는 중"; Kind.ZIP -> "압축하는 중"; else -> "받는 중" }
 
     fun cancelAll() {
         synchronized(queue) { queue.clear() }

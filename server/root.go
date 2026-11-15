@@ -599,3 +599,43 @@ func (r *Root) Get(rel string) (Entry, bool) {
 	e, ok := r.idx[rel]
 	return e, ok
 }
+
+// Search: 이름에 q 가 들어간 항목(대소문자 무시) — 휴대폰 탐색기의 검색. under 아래만, exts 가 있으면 그 확장자 파일만, 최대 limit 개
+func (r *Root) Search(under, q string, exts []string, limit int) ([]Entry, bool) {
+	q = strings.ToLower(q)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := []Entry{}
+	more := false
+	for p, e := range r.idx {
+		if under != "" && p != under && !strings.HasPrefix(p, under+"/") {
+			continue
+		}
+		name := strings.ToLower(p[strings.LastIndexByte(p, '/')+1:])
+		if q != "" && !strings.Contains(name, q) {
+			continue
+		}
+		if len(exts) > 0 {
+			if e.D {
+				continue
+			}
+			ok := false
+			for _, x := range exts {
+				if strings.HasSuffix(name, "."+x) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				continue
+			}
+		}
+		if len(out) >= limit {
+			more = true
+			break
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].P < out[j].P })
+	return out, more
+}

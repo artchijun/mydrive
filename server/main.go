@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.10"
+const version = "0.6.11"
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -98,6 +98,7 @@ func main() {
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
 	mux.HandleFunc("/v1/list", auth(hList)) // 폴더 하나만 (휴대폰 앱)
+	mux.HandleFunc("/v1/search", auth(hSearch)) // 이름 검색 (휴대폰 탐색기)
 	mux.HandleFunc("/v1/changes", auth(hChanges))
 	mux.HandleFunc("/v1/rescan", auth(hRescan))     // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
 	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
@@ -228,6 +229,37 @@ func hList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, map[string]any{"path": dir, "entries": es})
+}
+
+// hSearch: GET /v1/search?root=&q=&ext=jpg,pdf&path=&limit=  → {"entries":[...], "more":bool}
+func hSearch(w http.ResponseWriter, r *http.Request) {
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	qv := r.URL.Query()
+	under := strings.Trim(qv.Get("path"), "/")
+	if strings.Contains(under, "..") {
+		httpErr(w, 400, "bad_path", "경로가 올바르지 않음")
+		return
+	}
+	var exts []string
+	for _, x := range strings.Split(strings.ToLower(qv.Get("ext")), ",") {
+		if x = strings.Trim(strings.TrimSpace(x), "."); x != "" {
+			exts = append(exts, x)
+		}
+	}
+	q := strings.TrimSpace(qv.Get("q"))
+	if q == "" && len(exts) == 0 {
+		httpErr(w, 400, "bad_request", "검색어나 확장자가 필요함")
+		return
+	}
+	limit, _ := strconv.Atoi(qv.Get("limit"))
+	if limit <= 0 || limit > 2000 {
+		limit = 500
+	}
+	es, more := rt.Search(under, q, exts, limit)
+	writeJSON(w, r, map[string]any{"entries": es, "more": more})
 }
 
 // 인터넷(Cloudflare 터널)으로 들어온 요청인가 — 터널은 요청마다 CF-Connecting-IP 를 붙여 보냄

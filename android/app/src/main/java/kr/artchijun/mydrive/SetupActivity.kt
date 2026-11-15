@@ -11,8 +11,9 @@ import kotlin.concurrent.thread
 // 처음 연결: 서버 주소 + DSM 계정 → 이 휴대폰 전용 열쇠(토큰)를 받음. 비밀번호는 저장하지 않음
 class SetupActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        val ui = Ui(this); if (!ui.dark) setTheme(R.style.AppTheme_Light)
         super.onCreate(savedInstanceState)
-        val ui = Ui(this); val pf = Prefs(this)
+        val pf = Prefs(this)
         val home = ui.input("집 안 주소 (예: http://192.168.0.6:8642)", pf.home)
         val out = ui.input("인터넷 주소 (예: https://drive.cdluos.com)", pf.outside)
         val acc = ui.input("DSM 아이디", pf.user)
