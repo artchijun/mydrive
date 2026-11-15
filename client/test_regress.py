@@ -138,8 +138,9 @@ class Cli:
     p = None
     def start(self, *extra):
         self.f = open(CLILOG, "ab")
+        env = dict(os.environ, MYDRIVE_PASSLOG_MS="0")   # 차례마다 기록 (빠른 길로 넘긴 수 등)
         self.p = subprocess.Popen([CLI, "--server", BASE, "--token", "test", "--root", ROOT, "--local", LOCAL, "--state", STATE,
-                                   "--pc", "RT", *extra], stdout=self.f, stderr=subprocess.STDOUT)
+                                   "--pc", "RT", *extra], stdout=self.f, stderr=subprocess.STDOUT, env=env)
         time.sleep(1.5)
     def kill(self):   # 갑자기 꺼짐 (저장할 틈 없음)
         if self.p and self.p.poll() is None:
@@ -353,6 +354,26 @@ check("휴지통으로 지워도 받지 않음", events("↓ 받음", "cloud/on2
 check("NAS 에서도 지워짐 (NAS 휴지통)", "cloud/on2.bin" not in [e["p"] for e in snap()["entries"]])
 wait_same(60, "C10")
 
+print("C13) 제외 규칙을 바꾸면(앱을 다시 켬) 맞춰 있던 파일도 바로 빠짐 — '바뀌지 않은 파일은 검사 건너뛰기'가 있어도", flush=True)
+lw("ex/a.log", "log1"); lw("ex/b.txt", "txt1"); big0 = os.urandom(2 << 20); lw("ex/big.bin", big0)
+wait_same(60, "C13 준비")
+cli.kill(); cli.start("--exclude", "*.log", "--maxsize", "1")
+time.sleep(6)
+lw("ex/a.log", "log2 changed"); lw("ex/b.txt", "txt2"); wsl("rm ~/mdr/data/ex/big.bin")
+time.sleep(12)
+check("뺀 파일(*.log)은 PC 에서 고쳐도 올리지 않음", wsl("cat ~/mdr/data/ex/a.log") == "log1", wsl("cat ~/mdr/data/ex/a.log"))
+check("크기 제한으로 뺀 파일은 NAS 에서 지워도 PC 에서 지우지 않음", os.path.exists(os.path.join(LOCAL, r"ex\big.bin")))
+check("뺀 것이 아닌 파일은 평소대로 올림", wsl("cat ~/mdr/data/ex/b.txt") == "txt2", wsl("cat ~/mdr/data/ex/b.txt"))
+cli.kill(); cli.start()
+wait_same(60, "C13 규칙을 다시 풀고")
+check("크기 제한을 풀면 PC 에만 남아 있던 파일이 다시 올라감", wsl("sha1sum ~/mdr/data/ex/big.bin").split()[0] == hashlib.sha1(big0).hexdigest())
+cs = [k for k in conflicts_local() if k.startswith("ex/a")]
+check("빠져 있는 동안 양쪽이 달라진 파일은 둘 다 남김 (원래 이름 = NAS 판, 사본 = PC 판)",
+      len(cs) == 1 and wsl("cat ~/mdr/data/ex/a.log") == "log1" and open(os.path.join(LOCAL, cs[0].replace("/", "\\"))).read() == "log2 changed", cs)
+for k in cs: os.remove(os.path.join(LOCAL, k.replace("/", "\\")))
+wait_same(60, "C13 정리")
+print("       (참고) 이 연결이 빠른 길로 넘긴 수:", re.findall(r"검사 건너뜀 (\d+)개", clilog())[-3:], flush=True)
+
 print("C12) NAS 에 대소문자만 다른 이름 — Windows 에서는 같은 이름이라 하나만 받고 나머지는 건너뜀", flush=True)
 lw("case2/File.txt", "pc")   # PC 에 먼저 있는 이름이 이김
 time.sleep(5)
@@ -374,6 +395,8 @@ for line in clilog().splitlines():
     if m: cnt[m.group(2)] = cnt.get(m.group(2), 0) + 1
 rep = {k: v for k, v in cnt.items() if v > 3 and not k.startswith("mid/")}
 check("같은 파일을 4번 넘게 옮긴 것 없음", not rep, list(rep.items())[:5])
+fasts = [int(x) for x in re.findall(r"검사 건너뜀 (\d+)개", clilog())]
+check("바뀌지 않은 파일은 검사 건너뜀 (빠른 길이 실제로 쓰임)", fasts and max(fasts) > 20000, fasts[-5:])
 
 # ---------- 정리 ----------
 cli.kill(); srv_stop("KILL"); unregister_root()

@@ -971,11 +971,43 @@ bool Engine::RunPass() {
     // 동기화 작업 사이 옮기기: 이번 차례에 기다리는 것(xOutNow) / 다른 작업에 없다고 확인한 것(xOutNo, 그 아래는 다시 확인 안 함)
     std::set<std::string> xOutNow, xOutNo;
     for (auto x = xAdopt_.begin(); x != xAdopt_.end();) x = GetTickCount64() > x->second ? xAdopt_.erase(x) : std::next(x);
+    // 맞춰져 있는 항목: 탐색기에서 고른 '항상 유지'/'공간 확보'를 따름
+    auto syncedWork = [&](const std::string& p, const LocalE* l, const RemoteE* r) {
+        bool reparse = (l->a & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        if (!l->d && r) {
+            bool dehyd = cloud::IsDehydrated(l->a);
+            uint8_t pin = unregister_ ? 1 : l->pin;   // 연동을 끄는 중이면 모두 받음
+            if (pin == 1 && dehyd) hydr.push_back(p);
+            else if (pin == 2 && !dehyd && reparse) dehy.push_back(p);
+            // 오래 안 연 파일 → 온라인 전용 (항상 유지가 아닌 것만, 열 때 다시 받음)
+            else if (pin == 0 && autoFreeNs > 0 && !dehyd && reparse && autoFree.size() < 1000 &&
+                     nowNs - std::max({l->at, l->m, OpenedAt(p)}) > autoFreeNs) autoFree.push_back(p);
+        }
+        if (l->d && cloud::IsUnpinned(l->a)) unpinDirs.push_back(p);
+        if (!reparse && !unregister_ && conv.size() < 2000) {
+            bool pend; { std::lock_guard<std::mutex> g(spMu_); pend = syncPending_.count(p) > 0; }
+            if (!pend) conv.push_back(p);   // 전부터 있던 보통 파일 → 자리표시로 바꿔 상태 아이콘이 보이게
+        }
+    };
+    // 빠른 길: PC·NAS·마지막 기록 세 곳에 다 있고 지난번 맞춘 그대로인 항목 (큰 폴더에서는 거의 전부)은
+    //   이름·제외 규칙 검사를 다시 하지 않음 — 파일마다 경로를 잘라 글자 변환·패턴 비교를 해서 drive 에서 차례마다 2초 넘게 걸렸음.
+    //   같은 엔진 안에서는 규칙이 바뀌지 않음 (설정을 바꾸면 엔진을 새로 띄움). 그래도 처음 한 번과 1시간마다는 전부 검사.
+    uint64_t nowT = GetTickCount64();
+    bool fastOK = checkedOnce_ && nowT - lastFullCheck_ < 3600000;
+    if (!fastOK) lastFullCheck_ = nowT;
+    int nFast = 0;
     for (auto& p : all) {
         auto li = local_.find(p); auto ri = remote_.find(p); auto bi = base_.find(p);
         const LocalE* l = li == local_.end() ? nullptr : &li->second;
         const RemoteE* r = ri == remote_.end() ? nullptr : &ri->second;
         const BaseE* b = bi == base_.end() ? nullptr : &bi->second;
+        if (fastOK && l && r && b && l->d == b->d && r->d == b->d &&
+            (b->d || (l->s == b->ls && SameTime(l->m, b->lm) && r->s == b->rs && r->m == b->rm && l->s == r->s)) &&
+            !inflight_.count(p) && !flightAnc.count(p)) {
+            nFast++;
+            if (cloudOn_) syncedWork(p, l, r);
+            continue;
+        }
         if (SkipRemoteAnc(p)) continue;   // 건너뛰는 폴더 안: 알림 없이 조용히 넘어감
         if (r && (BadWinName(p) || SkipRemoteRel(p))) {
             if (!l && !b) { if (warned_.insert(p).second) Event("건너뜀", p, BadWinName(p) ? "Windows 에서 쓸 수 없는 이름" : "임시·잠금 파일이라 맞추지 않음 (.tmp · ~$ · desktop.ini · Thumbs.db)"); }
@@ -1066,25 +1098,9 @@ bool Engine::RunPass() {
             }
         }
         if (a != None) items.push_back({p, a});
-        else if (cloudOn_ && l && b) {
-            // 맞춰져 있는 항목: 탐색기에서 고른 '항상 유지'/'공간 확보'를 따름
-            bool reparse = (l->a & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-            if (!l->d && r) {
-                bool dehyd = cloud::IsDehydrated(l->a);
-                uint8_t pin = unregister_ ? 1 : l->pin;   // 연동을 끄는 중이면 모두 받음
-                if (pin == 1 && dehyd) hydr.push_back(p);
-                else if (pin == 2 && !dehyd && reparse) dehy.push_back(p);
-                // 오래 안 연 파일 → 온라인 전용 (항상 유지가 아닌 것만, 열 때 다시 받음)
-                else if (pin == 0 && autoFreeNs > 0 && !dehyd && reparse && autoFree.size() < 1000 &&
-                         nowNs - std::max({l->at, l->m, OpenedAt(p)}) > autoFreeNs) autoFree.push_back(p);
-            }
-            if (l->d && cloud::IsUnpinned(l->a)) unpinDirs.push_back(p);
-            if (!reparse && !unregister_ && conv.size() < 2000) {
-                bool pend; { std::lock_guard<std::mutex> g(spMu_); pend = syncPending_.count(p) > 0; }
-                if (!pend) conv.push_back(p);   // 전부터 있던 보통 파일 → 자리표시로 바꿔 상태 아이콘이 보이게
-            }
-        }
+        else if (cloudOn_ && l && b) syncedWork(p, l, r);
     }
+    checkedOnce_ = true; fastN_ = nFast;
 
     for (auto x = xOutWait_.begin(); x != xOutWait_.end();) x = xOutNow.count(x->first) ? std::next(x) : xOutWait_.erase(x);
     // 대량 삭제 확인: 지울 항목 수(아래 항목 포함)가 한도를 넘으면 그 방향의 삭제는 멈추고 확인을 기다림
@@ -1868,10 +1884,11 @@ void Engine::LoopMain() {
         bool changed = RunPass();
         uint64_t took = GetTickCount64() - passAt;
         busy = false;
-        if (took > 3000 && !prof_[3]) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (중간에 멈춤)", cfg_.name.c_str(), took / 1000.0);
-        else if (took > 3000) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (NAS 목록 %.1f · PC 훑기 %.1f · 비교 %.1f · 옮기기 %.1f · 저장 등 %.1f, PC %zu개, 읽은 폴더 %s)", cfg_.name.c_str(), took / 1000.0,
+        static const uint64_t logMs = [] { wchar_t v[16]; return GetEnvironmentVariableW(L"MYDRIVE_PASSLOG_MS", v, 16) ? (uint64_t)_wtoi(v) : 3000ull; }();   // 이보다 오래 걸린 차례를 기록 (시험용으로 0)
+        if (took >= logMs && !prof_[3]) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (중간에 멈춤)", cfg_.name.c_str(), took / 1000.0);
+        else if (took >= logMs) LOG("[%s] 한 번 맞추기에 %.1f초 걸림 (NAS 목록 %.1f · PC 훑기 %.1f · 비교 %.1f · 옮기기 %.1f · 저장 등 %.1f, PC %zu개, 읽은 폴더 %s, 바뀌지 않아 검사 건너뜀 %d개)", cfg_.name.c_str(), took / 1000.0,
                              prof_[0] / 1000.0, (prof_[1] - prof_[0]) / 1000.0, (prof_[2] - prof_[1]) / 1000.0, (prof_[3] - prof_[2]) / 1000.0,
-                             prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size(), scanDirs_ < 0 ? "전체" : std::to_string(scanDirs_).c_str());
+                             prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size(), scanDirs_ < 0 ? "전체" : std::to_string(scanDirs_).c_str(), fastN_);
         polledSeq_ = seq_;
         if (stop_) break;
         // 바뀐 게 있었으면 곧바로 한 번 더 (연쇄 변경), 없으면 알림이 올 때까지 (최대 재검사 간격)

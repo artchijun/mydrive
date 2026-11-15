@@ -229,7 +229,8 @@ private:
     // 바뀐 폴더만 훑기: 폴더 감시(WatchMain)가 바뀐 폴더를 모아 두고, ScanLocal 이 그 폴더만 다시 읽음
     std::mutex ddMu_; std::set<std::string> dirtyDirs_;
     std::atomic<bool> scanAll_{true}, watchOk_{false};   // scanAll_: 다음에는 전체를 읽음 · watchOk_: 폴더 감시가 돌고 있음
-    bool haveLocal_ = false; uint64_t lastFull_ = 0; int scanDirs_ = -1;   // scanDirs_: 이번에 읽은 폴더 수 (-1 = 전체)
+    bool haveLocal_ = false; uint64_t lastFull_ = 0; int scanDirs_ = -1;
+    bool checkedOnce_ = false; uint64_t lastFullCheck_ = 0; int fastN_ = 0;   // 비교의 빠른 길: 한 번 전부 검사했나 · 마지막 전부 검사 시각 · 이번에 빠른 길로 간 수   // scanDirs_: 이번에 읽은 폴더 수 (-1 = 전체)
     std::vector<char> scanBuf_;
     void ApplyRemoteEntry(const std::string& p, const RemoteE& e);
     bool DetectRenames();
