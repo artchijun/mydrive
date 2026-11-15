@@ -10,7 +10,7 @@ class Prefs(ctx: Context) {
         get() = p.getString("home", "http://192.168.0.6:8642") ?: ""
         set(v) = p.edit().putString("home", v.trim()).apply()
     var outside: String
-        get() = p.getString("outside", "") ?: ""
+        get() = p.getString("outside", "https://drive.cdluos.com") ?: ""
         set(v) = p.edit().putString("outside", v.trim()).apply()
     var token: String
         get() = p.getString("token", "") ?: ""
