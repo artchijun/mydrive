@@ -58,7 +58,10 @@ object Transfers {
         current = job; changed()
         var err: String? = null
         var res: String? = null
-        try { res = job.run(job) } catch (e: Canceled) { err = "취소함" } catch (e: Exception) { err = e.message ?: e.javaClass.simpleName }
+        try { res = job.run(job) } catch (e: Canceled) { err = "취소함" } catch (e: Exception) {
+            err = e.message ?: e.javaClass.simpleName
+            android.util.Log.w("Mydrive", "${job.kind} ${job.title} 실패", e)
+        }
         current = null
         main.post { listener?.onFinished(job, err, res) }
         changed()

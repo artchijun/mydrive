@@ -18,7 +18,7 @@ class TransferService : Service() {
         private var self: TransferService? = null
 
         fun start(ctx: Context) {
-            if (self != null) return
+            if (self?.foreground == true) return
             try { ctx.startForegroundService(Intent(ctx, TransferService::class.java)) } catch (e: Exception) { /* 화면이 켜져 있으면 알림 없이도 계속됨 */ }
         }
         fun refresh() { self?.update() }
@@ -33,9 +33,12 @@ class TransferService : Service() {
         self = this
     }
 
+    private var foreground = false
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val n = build()
-        startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        // startForegroundService 로 켜면 반드시 먼저 startForeground — 그 전에 멈추면 안드로이드가 앱을 끔 (일이 아주 빨리 끝난 경우)
+        startForeground(ID, build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        foreground = true
         update()
         return START_NOT_STICKY
     }
@@ -59,7 +62,8 @@ class TransferService : Service() {
     }
 
     fun update() {
-        if (!Transfers.busy) { stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return }
+        if (!foreground) return   // 아직 onStartCommand 전: 거기서 startForeground 한 뒤 다시 봄
+        if (!Transfers.busy) { foreground = false; stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); return }
         getSystemService(NotificationManager::class.java).notify(ID, build())
     }
 }

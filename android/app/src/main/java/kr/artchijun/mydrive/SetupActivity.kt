@@ -14,7 +14,7 @@ class SetupActivity : Activity() {
         super.onCreate(savedInstanceState)
         val ui = Ui(this); val pf = Prefs(this)
         val home = ui.input("집 안 주소 (예: http://192.168.0.6:8642)", pf.home)
-        val out = ui.input("인터넷 주소 (Cloudflare 터널, 예: https://drive.example.com)", pf.outside)
+        val out = ui.input("인터넷 주소 (https://… — 집 밖에서)", pf.outside)
         val acc = ui.input("DSM 아이디", pf.user)
         val pw = ui.input("DSM 비밀번호", password = true)
         val otp = ui.input("2단계 인증 코드 (쓰는 경우만)")

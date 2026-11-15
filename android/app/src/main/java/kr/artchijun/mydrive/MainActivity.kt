@@ -254,7 +254,7 @@ class MainActivity : Activity(), Transfers.Listener {
                     if (mt == 0L) c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED).takeIf { it >= 0 }?.let { if (!c.isNull(it)) mt = c.getLong(it) * 1_000_000_000 }
                 }
             }
-        } catch (e: Exception) { }
+        } catch (e: Exception) { android.util.Log.w("Mydrive", "파일 정보 못 읽음 $u", e) }
         if (size < 0) size = try { contentResolver.openAssetFileDescriptor(u, "r")?.use { it.length } ?: -1 } catch (e: Exception) { -1 }
         if (mt <= 0) mt = System.currentTimeMillis() * 1_000_000
         name = name.replace('/', '_').replace('\\', '_')
@@ -272,11 +272,21 @@ class MainActivity : Activity(), Transfers.Listener {
             taken += name.lowercase()
             Transfers.add(this, Transfers.Job(Transfers.Kind.UP, r, name) { job ->
                 var n = name
+                // 크기를 알려 주지 않는 앱이 보낸 파일: 앱 안에 한 번 받아 두고 그걸 올림 (끝나면 지움)
+                var tmp: File? = null
+                var size = s.size
+                var open: () -> java.io.InputStream = { contentResolver.openInputStream(s.uri) ?: throw java.io.IOException("파일을 열 수 없음") }
+                if (size < 0) {
+                    val f = File(File(cacheDir, "up").apply { mkdirs() }, Api.newId())
+                    try { open().use { inp -> f.outputStream().use { inp.copyTo(it, 256 * 1024) } } }
+                    catch (e: SecurityException) { f.delete(); throw java.io.IOException("이 파일을 읽을 권한이 없습니다 — 보낸 앱에서 다시 공유해 주세요") }
+                    tmp = f; size = f.length(); open = { f.inputStream() }
+                }
+                try {
                 for (attempt in 0 until 20) {
                     val rel = if (dir.isEmpty()) n else "$dir/$n"
                     try {
-                        api.upload(r, rel, s.size, s.mtimeNs, { contentResolver.openInputStream(s.uri) ?: throw java.io.IOException("파일을 열 수 없음") },
-                            { d, t -> Transfers.progress(job, d, t) }, { job.cancel })
+                        api.upload(r, rel, size, s.mtimeNs, open, { d, t -> Transfers.progress(job, d, t) }, { job.cancel })
                         return@Job if (n != s.name) "‘$n’ 이름으로 올렸습니다" else null
                     } catch (e: ApiException) {
                         if (e.status != 409) throw e
@@ -286,6 +296,8 @@ class MainActivity : Activity(), Transfers.Listener {
                     }
                 }
                 throw java.io.IOException("올릴 이름을 정하지 못함")
+                } catch (e: SecurityException) { throw java.io.IOException("이 파일을 읽을 권한이 없습니다 — 보낸 앱에서 다시 공유해 주세요") }
+                finally { tmp?.delete() }
             })
         }
     }
