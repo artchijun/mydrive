@@ -901,6 +901,14 @@ bool Engine::RunPass() {
             lc = !l || l->d != b->d || (!b->d && (l->s != b->ls || !SameTime(l->m, b->lm)));
             rc = !r || r->d != b->d || (!b->d && (r->s != b->rs || r->m != b->rm));
         }
+        // 온라인 전용(내용이 PC 에 없는) 파일은 PC 쪽에서 내용이 바뀔 수 없음 → 'PC 에서 바뀜'으로 보지 않음.
+        //   안 그러면 내용 비교·올리기·충돌 사본을 하려고 Mydrive 가 스스로 그 파일을 통째로 내려받음 (8GB 파일을 받은 적이 있음).
+        //   NAS 에 있으면 자리표시만 NAS 에 맞춤. NAS 에도 기록에도 없으면(올릴 내용이 없음) 건드리지 않고 알리기만 함.
+        if (cloudOn_ && l && !l->d && (l->a & FILE_ATTRIBUTE_REPARSE_POINT) && cloud::IsDehydrated(l->a) && (!b || !b->d)) {
+            if (!b && !r) { if (warned_.insert(p).second) Event("건너뜀", p, "온라인 전용 파일인데 NAS 에 없음 — 받을 내용이 없어 그대로 둠"); continue; }
+            lc = false;
+            if (r && !r->d && (!b || l->s != r->s)) rc = true;   // 자리표시의 크기가 NAS 와 다르면 자리표시를 고침
+        }
         Act a = None;
         if (!lc && !rc) {
             if (b && !l && !r) a = DropBase;

@@ -413,11 +413,15 @@ struct PH {
 };
 
 bool UpdateDehydrated(const std::wstring& abs, int64_t size, int64_t mtimeNs, const std::string& identity) {
-    PH p(abs, true);
-    if (!p.ok()) return false;
+    // 주의: CfOpenFileWithOplock 으로 열면 온라인 전용 파일을 Windows 가 먼저 통째로 내려받음 (시험으로 확인).
+    //   그래서 NAS 에서 파일이 바뀔 때마다 예전 판을 다 받았음 (8GB 파일도). 보통 방식으로, 자리표시 그대로(OPEN_REPARSE_POINT) 엶.
+    HANDLE h = CreateFileW(abs.c_str(), FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | FILE_WRITE_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
     CF_FS_METADATA m = Meta(false, size, mtimeNs);
     std::string id = identity.empty() ? std::string("-") : identity;
-    HRESULT hr = CfUpdatePlaceholder(p.h(), &m, id.data(), (DWORD)id.size(), nullptr, 0, CF_UPDATE_FLAG_DEHYDRATE | CF_UPDATE_FLAG_MARK_IN_SYNC, nullptr, nullptr);
+    HRESULT hr = CfUpdatePlaceholder(h, &m, id.data(), (DWORD)id.size(), nullptr, 0, CF_UPDATE_FLAG_DEHYDRATE | CF_UPDATE_FLAG_MARK_IN_SYNC, nullptr, nullptr);
+    CloseHandle(h);
     if (FAILED(hr)) LOG("자리표시 파일 고치기 실패 %s: 0x%08X", U(abs).c_str(), (unsigned)hr);
     return SUCCEEDED(hr);
 }
