@@ -1459,6 +1459,13 @@ bool Engine::RunPass() {
 // 켠 뒤 첫 차례가 끝나면 한 번, 양쪽이 마지막 상태와 같은 자리표시만 골라 표시를 확인하고 빠졌으면 붙임 (파일은 받지 않음).
 void Engine::HealInSync() {
     if (!cloudOn_ || unregister_) return;
+    // 파일을 하나하나 열어 보는 일이라 큰 폴더(19만 개)에서는 40초쯤 걸림 → 켤 때마다 하지 않고 7일에 한 번만
+    std::wstring mark = cfg_.stateDir + L"\\" + W(cfg_.name) + L".healed";
+    WIN32_FILE_ATTRIBUTE_DATA fa{};
+    if (GetFileAttributesExW(mark.c_str(), GetFileExInfoStandard, &fa)) {
+        FILETIME ft; GetSystemTimeAsFileTime(&ft);
+        if (FtToNs(ft) - FtToNs(fa.ftLastWriteTime) < 7LL * 86400 * 1000000000LL) return;
+    }
     std::vector<std::pair<std::string, bool>> list;
     {
         std::lock_guard<std::recursive_mutex> g(mu_);
@@ -1478,6 +1485,9 @@ void Engine::HealInSync() {
         if (cloud::InSyncState(Abs(cfg_.localRoot, p), d) == 0) { InSync(p, d); if (fixed < 500) cloud::RefreshShell(Abs(cfg_.localRoot, p)); fixed++; }
     }
     if (fixed) Event("✔ 맞춰짐 표시 고침", cfg_.name, std::to_string(fixed) + "개 — 이름을 바꾸거나 옮긴 뒤 빠져 있던 표시");
+    // 끝까지 했을 때만 '했음'을 적어 둠 (중간에 꺼지면 다음에 켤 때 다시)
+    HANDLE mh = CreateFileW(mark.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+    if (mh != INVALID_HANDLE_VALUE) CloseHandle(mh);
 }
 
 // ---------- 계속 맞추기: PC 폴더 감시 + NAS 변경 기다리기 ----------
