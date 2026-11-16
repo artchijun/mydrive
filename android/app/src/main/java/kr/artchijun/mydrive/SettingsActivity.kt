@@ -109,8 +109,13 @@ class SettingsActivity : Activity() {
         item("openwith", "내장 뷰어로 열기", "사진·동영상·PDF·텍스트를 앱 안에서 엽니다. 끄면 휴대폰의 다른 앱으로", sw = viewer) { pf.putBool("viewer", !viewer); changed() }
         val pp = pf.int("paste_policy", -1)
         val pps = arrayOf("매번 묻기", "건너뛰기", "덮어쓰기", "번호 붙이기 '이름 (2)'")
-        item("copy", "붙여 넣을 때 이름이 겹치면", "복사·옮기기에서 받는 폴더에 같은 이름의 파일이 있을 때. 폴더끼리는 합치고, 크기·바뀐 때가 같은 파일은 늘 건너뜁니다", pps[pp + 1]) {
+        item("copy", "붙여 넣을 때 이름이 겹치면", "복사·옮기기에서 받는 폴더에 이름은 같고 내용이 다른 파일이 있을 때. 같은 이름 폴더끼리는 합칩니다", pps[pp + 1]) {
             choose("붙여 넣을 때 이름이 겹치면", pps, pp + 1) { pf.putInt("paste_policy", it - 1); changed() }
+        }
+        val ps = pf.int("paste_same", -1)
+        val pss = arrayOf("매번 묻기", "건너뛰기 (원본도 그대로)", "덮어쓰기", "번호 붙이기 '이름 (2)'", "옮기기면 원본 지우기 (복사는 건너뛰기)")
+        item("copy", "똑같은 파일이 이미 있으면", "받는 폴더에 크기·바뀐 때까지 같은 파일이 있을 때", pss[ps + 1]) {
+            choose("똑같은 파일이 이미 있으면", pss, ps + 1) { pf.putInt("paste_same", it - 1); changed() }
         }
         val dnt = pf.bool("drawerNewTab", true)
         item("plus", "왼쪽 메뉴는 새 탭으로", "왼쪽 메뉴에서 고른 곳을 새 탭에서 엽니다. 끄면 지금 탭에서", sw = dnt) { pf.putBool("drawerNewTab", !dnt); changed() }

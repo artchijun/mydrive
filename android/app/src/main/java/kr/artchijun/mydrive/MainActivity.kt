@@ -841,31 +841,53 @@ class MainActivity : Activity(), Transfers.Listener {
         val c = clip ?: return; val dst = tab.loc
         if (!dst.writable) { toast("여기에는 붙여 넣을 수 없습니다"); return }
         // 받는 폴더에 같은 이름이 있으면 어떻게 할지 먼저 묻기
-        bg({ fs.conflicts(c.items, dst) }) { (files, dirs, same) ->
-            val saved = dupPf.getInt("paste_policy", -1)   // 설정에서 정해 둔 방식 (-1: 매번 묻기)
-            if (files == 0 || saved >= 0) { startPaste(c, dst, if (saved >= 0) saved else Fs.SKIP); return@bg }
-            val names = arrayOf("건너뛰기 — 받는 쪽 것을 그대로 둠", "덮어쓰기 — 새것으로 바꿈 (덮이는 것은 NAS 이전 버전·휴지통으로)", "번호 붙이기 — '이름 (2)' 로 둘 다 둠")
-            var pick = Fs.SKIP
-            val more = listOfNotNull(if (dirs > 0) "같은 이름 폴더 ${dirs}개는 합칩니다 (안에서 겹치는 파일도 고른 방식대로)." else null,
-                if (same > 0) "크기·바뀐 때가 같은 파일 ${same}개는 묻지 않고 건너뜁니다." else null).joinToString("\n")
+        bg({ fs.conflicts(c.loc, c.items, dst) }) { (files, dirs, same) ->
+            // 설정에서 정해 둔 방식 (-1: 매번 묻기). 겹치는 파일·같은 파일 각각 정해 둔 것이 있어야 묻지 않음
+            val saved = dupPf.getInt("paste_policy", -1)
+            val savedSame = dupPf.getInt("paste_same", -1).let { if (!c.move && it == Fs.DROP_SOURCE) Fs.SKIP else it }
+            if ((files == 0 || saved >= 0) && (same == 0 || savedSame >= 0)) { startPaste(c, dst, maxOf(saved, 0), maxOf(savedSame, 0)); return@bg }
+            var pick = Fs.SKIP; var pickSame = Fs.SKIP
+            fun choices(names: Array<String>, init: Int, onPick: (Int) -> Unit) = android.widget.ListView(this).apply {
+                choiceMode = android.widget.ListView.CHOICE_MODE_SINGLE
+                adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_single_choice, names)
+                setItemChecked(init, true); setOnItemClickListener { _, _, w, _ -> onPick(w) }
+                layoutParams = ui.lp(h = ui.dp(56) * names.size, top = 4)
+            }
+            fun note(t: String, bold: Boolean = false) = ui.label(t, if (bold) 14.5f else 13f, if (bold) ui.text else ui.sub, bold = bold).apply { setPadding(ui.dp(22), ui.dp(if (bold) 14 else 2), ui.dp(22), 0) }
+            val body = ui.col()
+            if (dirs > 0) body.addView(note("같은 이름 폴더 ${dirs}개는 합칩니다. 안에서 겹치는 파일도 아래에서 고른 방식대로 합니다."))
+            if (files > 0) {
+                body.addView(note("이름은 같고 내용이 다른 파일 ${files}개", true))
+                body.addView(choices(arrayOf("건너뛰기 — 받는 쪽 것을 그대로 둠" + (if (c.move) " (원본도 그대로)" else ""),
+                    "덮어쓰기 — 새것으로 바꿈 (덮이는 것은 NAS 이전 버전·휴지통으로)", "번호 붙이기 — '이름 (2)' 로 둘 다 둠"), pick) { pick = it })
+            }
+            val sameKeys = if (c.move) intArrayOf(Fs.SKIP, Fs.DROP_SOURCE, Fs.OVERWRITE, Fs.RENAME) else intArrayOf(Fs.SKIP, Fs.OVERWRITE, Fs.RENAME)
+            if (same > 0) {
+                body.addView(note("크기·바뀐 때까지 같은 파일 ${same}개", true))
+                val names = sameKeys.map { k -> when (k) {
+                    Fs.SKIP -> if (c.move) "건너뛰기 — 양쪽 다 그대로 둠 (원본이 남음)" else "건너뛰기 — 이미 있으니 복사하지 않음"
+                    Fs.DROP_SOURCE -> "원본 지우기 — 받는 쪽 것을 두고 옮긴 것으로 침"
+                    Fs.OVERWRITE -> "덮어쓰기 — 그래도 새로 씀"
+                    else -> "번호 붙이기 — '이름 (2)' 로 둘 다 둠"
+                } }.toTypedArray()
+                body.addView(choices(names, 0) { pickSame = sameKeys[it] })
+            }
             val remember = android.widget.CheckBox(this).apply { text = "다음에도 이렇게 (묻지 않음 — 설정에서 바꿈)"; setTextColor(ui.text) }
-            val head = ui.col(ui.label("받는 폴더에 같은 이름의 파일이 ${files}개 있습니다." + (if (more.isNotEmpty()) "\n$more" else ""), 13.5f, ui.sub)).apply { setPadding(ui.dp(22), ui.dp(12), ui.dp(22), 0) }
-            AlertDialog.Builder(this).setTitle(if (c.move) "옮기기 — 이름이 겹칩니다" else "붙여 넣기 — 이름이 겹칩니다")
-                .setView(ui.col(head, android.widget.ListView(this).apply {
-                    choiceMode = android.widget.ListView.CHOICE_MODE_SINGLE
-                    adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_single_choice, names)
-                    setItemChecked(pick, true); setOnItemClickListener { _, _, w, _ -> pick = w }
-                    layoutParams = ui.lp(h = ui.dp(56) * 3, top = 6)
-                }, remember.apply { layoutParams = ui.lp().apply { leftMargin = ui.dp(16) } }))
-                .setPositiveButton("계속") { _, _ -> if (remember.isChecked) dupPf.edit().putInt("paste_policy", pick).apply(); startPaste(c, dst, pick) }
+            body.addView(remember.apply { layoutParams = ui.lp().apply { leftMargin = ui.dp(16); topMargin = ui.dp(4) } })
+            AlertDialog.Builder(this).setTitle(if (c.move) "옮기기 — 같은 이름이 있습니다" else "붙여 넣기 — 같은 이름이 있습니다")
+                .setView(ScrollView(this).apply { addView(body) })
+                .setPositiveButton("계속") { _, _ ->
+                    if (remember.isChecked) dupPf.edit().apply { if (files > 0) putInt("paste_policy", pick); if (same > 0) putInt("paste_same", pickSame) }.apply()
+                    startPaste(c, dst, pick, pickSame)
+                }
                 .setNegativeButton("취소", null).show()
         }
     }
-    private fun startPaste(c: Clip, dst: Loc, policy: Int) {
+    private fun startPaste(c: Clip, dst: Loc, policy: Int, samePolicy: Int) {
         clip = null; refreshChrome(); askNotify()
         val title = if (c.items.size == 1) c.items[0].name else "${c.items.size}개"
         val kind = when { c.move -> Transfers.Kind.MOVE; (dst.kind == "nas" || dst.kind == "cloud") && c.loc.kind != dst.kind -> Transfers.Kind.UP; dst.kind == "local" && (c.loc.kind == "nas" || c.loc.kind == "cloud") -> Transfers.Kind.OPEN; else -> Transfers.Kind.COPY }
-        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move, policy) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") }
+        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move, policy, samePolicy) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") }
             .apply { from = place(c.loc); to = place(dst) })
     }
 

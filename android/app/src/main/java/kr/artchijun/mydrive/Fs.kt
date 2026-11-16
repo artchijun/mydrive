@@ -51,6 +51,8 @@ class Fs(private val ctx: Context, private val api: Api) {
     companion object {
         // 이름이 겹칠 때 (붙여 넣기)
         const val SKIP = 0; const val OVERWRITE = 1; const val RENAME = 2
+        /** 같은 파일일 때만 (옮기기): 받는 쪽 것을 그대로 두고 원본을 지움 = 옮긴 것으로 침 */
+        const val DROP_SOURCE = 3
         const val TRASH_DIR = ".Mydrive-trash"
         private val skipLocal = setOf(TRASH_DIR)
     }
@@ -285,25 +287,33 @@ class Fs(private val ctx: Context, private val api: Api) {
     }
 
     // ---------- 이름이 겹칠 때 ----------
-    private class Report { var renamed = 0; var skipped = 0; var same = 0; var overwritten = 0; var merged = 0 }
+    private class Report { var dropped = 0; var renamed = 0; var skipped = 0; var same = 0; var overwritten = 0; var merged = 0 }
     /** 크기가 같고 바뀐 때가 2초 안쪽이면 같은 파일로 봄 (묻지 않고 건너뜀) */
     private fun sameFile(a: Item, b: Item) = !a.dir && !b.dir && a.size == b.size && Math.abs(a.mtimeMs - b.mtimeMs) <= 2000
 
     /** 붙여 넣기 전에: 받는 폴더에 이미 있는 이름 (파일·폴더 수, 그중 같은 파일 수) */
-    fun conflicts(items: List<Item>, dst: Loc): Triple<Int, Int, Int> {
-        val by = list(dst, true).associateBy { it.name.lowercase() }
+    fun conflicts(src: Loc, items: List<Item>, dst: Loc): Triple<Int, Int, Int> {
         var files = 0; var dirs = 0; var same = 0
-        for (it in items) { val ex = by[it.name.lowercase()] ?: continue; if (ex.dir && it.dir) dirs++ else if (sameFile(ex, it)) same++ else files++ }
+        // 합쳐질 폴더 안까지 세어 봄 (안에서 겹치는 파일도 물어보려고)
+        fun walkIn(its: List<Item>, d: Loc) {
+            val by = list(d, true).associateBy { it.name.lowercase() }
+            for (it in its) {
+                val ex = by[it.name.lowercase()] ?: continue
+                if (ex.dir && it.dir) { dirs++; walkIn(list(src.copy(path = it.path), true), d.child(ex.name)) }
+                else if (sameFile(ex, it)) same++ else files++
+            }
+        }
+        walkIn(items, dst)
         return Triple(files, dirs, same)
     }
 
     /**
      * src 의 items 를 dst 폴더로. move = 옮기기 → 알릴 말
-     *   이름이 겹치면: 폴더끼리는 합침 (안에서 겹치는 파일도 같은 방식) · 크기·바뀐 때가 같은 파일은 건너뜀 ·
+     *   이름이 겹치면: 폴더끼리는 합침 (안에서 겹치는 파일도 같은 방식) · 크기·바뀐 때가 같은 파일은 samePolicy 대로(건너뛰기·원본 지우기·덮어쓰기·번호) ·
      *   나머지 파일은 policy 대로 — SKIP 건너뛰기 · OVERWRITE 덮어쓰기(덮이는 판은 NAS 이전 버전/휴대폰·클라우드 휴지통으로) · RENAME '이름 (2)'
      *   옮기기에서 건너뛴 파일은 원래 자리에 그대로 둠
      */
-    fun transfer(job: Transfers.Job, src: Loc, items: List<Item>, dst: Loc, move: Boolean, policy: Int = RENAME): String? {
+    fun transfer(job: Transfers.Job, src: Loc, items: List<Item>, dst: Loc, move: Boolean, policy: Int = RENAME, samePolicy: Int = SKIP): String? {
         if (!dst.writable) throw IOException("여기에는 붙여 넣을 수 없습니다")
         if (src.kind == dst.kind && src.root == dst.root && items.any { dst.path == it.path || dst.path.startsWith(it.path + "/") })
             throw IOException("폴더를 자기 안으로 옮길 수 없습니다")
@@ -321,9 +331,11 @@ class Fs(private val ctx: Context, private val api: Api) {
                 var n = it.name
                 if (ex != null) {
                     if (ex.dir && it.dir) { slow += it; continue }
-                    if (sameFile(ex, it)) { rep.same++; job.skipped++; continue }
-                    if (ex.dir != it.dir || policy == RENAME) { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                    else if (policy == SKIP) { rep.skipped++; job.skipped++; continue }
+                    val same = sameFile(ex, it); val pol = if (same) samePolicy else policy
+                    if (same && pol == SKIP) { rep.same++; job.skipped++; continue }
+                    if (same && pol == DROP_SOURCE) { deleteSource(src, it); rep.dropped++; continue }
+                    if (ex.dir != it.dir || pol == RENAME) { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
+                    else if (pol == SKIP) { rep.skipped++; job.skipped++; continue }
                     else { delete(dst, listOf(ex)); rep.overwritten++ }
                 }
                 moveSame(src, it, dst, n)
@@ -338,7 +350,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             for (it in slow) {
                 if (job.cancel) throw Canceled()
                 val moved = ArrayList<Item>()
-                val all = put(job, src, it, dst, here, policy, rep, moved)
+                val all = put(job, src, it, dst, here, policy, samePolicy, rep, moved)
                 if (move) {
                     if (all) deleteSource(src, it)               // 다 옮겼으면 통째로
                     else moved.forEach { f -> deleteSource(src, f) }   // 일부 건너뛰었으면 옮긴 파일만
@@ -348,6 +360,7 @@ class Fs(private val ctx: Context, private val api: Api) {
         val parts = listOfNotNull(
             if (rep.merged > 0) "폴더 ${rep.merged}개는 합침" else null,
             if (rep.same > 0) "같은 파일 ${rep.same}개는 건너뜀" + (if (move) "(원본 그대로)" else "") else null,
+            if (rep.dropped > 0) "같은 파일 ${rep.dropped}개는 받는 쪽 것을 두고 원본을 지움" else null,
             if (rep.skipped > 0) "겹치는 ${rep.skipped}개는 건너뜀" else null,
             if (rep.overwritten > 0) "${rep.overwritten}개 덮어씀" else null,
             if (rep.renamed > 0) "${rep.renamed}개는 번호를 붙임" else null)
@@ -375,7 +388,7 @@ class Fs(private val ctx: Context, private val api: Api) {
     }
 
     /** 하나(파일이나 폴더)를 dst 폴더에 넣음. here = dst 안 이름들. 건너뛴 것이 없으면 true. moved = 넣은 파일들(옮기기용) */
-    private fun put(job: Transfers.Job, src: Loc, it: Item, dst: Loc, here: MutableMap<String, Item>, policy: Int, rep: Report, moved: MutableList<Item>): Boolean {
+    private fun put(job: Transfers.Job, src: Loc, it: Item, dst: Loc, here: MutableMap<String, Item>, policy: Int, samePolicy: Int, rep: Report, moved: MutableList<Item>): Boolean {
         if (job.cancel) throw Canceled()
         val ex = here[it.name.lowercase()]
         if (it.dir) {
@@ -384,7 +397,7 @@ class Fs(private val ctx: Context, private val api: Api) {
                 val into = dst.child(ex.name)
                 val inner = list(into, true).associateBy { c -> c.name.lowercase() }.toMutableMap()
                 var all = true
-                for (c in list(src.copy(path = it.path), true)) if (!put(job, src, c, into, inner, policy, rep, moved)) all = false
+                for (c in list(src.copy(path = it.path), true)) if (!put(job, src, c, into, inner, policy, samePolicy, rep, moved)) all = false
                 return all
             }
             val n = if (ex == null) it.name else { rep.renamed++; Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) } }
@@ -396,9 +409,11 @@ class Fs(private val ctx: Context, private val api: Api) {
         var n = it.name
         if (ex != null) {
             when {
-                sameFile(ex, it) -> { rep.same++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
-                ex.dir || policy == RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                policy == SKIP -> { rep.skipped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
+                sameFile(ex, it) && samePolicy == SKIP -> { rep.same++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
+                sameFile(ex, it) && samePolicy == DROP_SOURCE -> {   // 받는 쪽에 같은 파일이 있으니 옮긴 것으로 침 → 원본은 지움
+                    rep.dropped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; moved += it; return true }
+                ex.dir || (if (sameFile(ex, it)) samePolicy else policy) == RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
+                !sameFile(ex, it) && policy == SKIP -> { rep.skipped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
                 else -> {   // 덮어쓰기: NAS 는 덮는 판을 이전 버전으로 남김, 휴대폰·클라우드는 덮이는 파일을 휴지통으로
                     if (dst.kind != "nas") delete(dst, listOf(ex))
                     rep.overwritten++
