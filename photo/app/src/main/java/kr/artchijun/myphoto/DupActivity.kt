@@ -135,7 +135,7 @@ class DupActivity : Activity() {
     private fun update() {
         val drop = groups.flatMap { it.drop }
         val bytes = drop.sumOf { it.it.size }
-        summary.text = "${groups.size}묶음 · 정확한 중복 ${groups.count { it.kind == "same" }} · 줄인 사본 ${groups.count { it.kind == "small" }}  — 사진을 누르면 남김/지움이 바뀜"
+        summary.text = "${groups.size}묶음 · 정확한 중복 ${groups.count { it.kind == "same" }} · 줄인 사본 ${groups.count { it.kind == "small" }}  — 지울 것: ${StatusBadge.kinds(drop.count { !it.it.video }, drop.count { it.it.video })}  — 누르면 남김/지움이 바뀜"
         go.text = if (drop.isEmpty()) "지울 것 없음" else "${drop.size}개 지우기 (${Fmt.size(bytes)})"
         go.isEnabled = drop.isNotEmpty()
         adapter.notifyDataSetChanged()
@@ -150,7 +150,7 @@ class DupActivity : Activity() {
             val row = ui.row().apply { setPadding(ui.dp(10), 0, ui.dp(10), 0) }
             for (e in g.entries) row.addView(card(g, e))
             return ui.col(
-                ui.label((if (g.kind == "same") "정확한 중복" else "줄인 사본") + " · ${g.entries.size}장 · 지울 것 ${Fmt.size(g.drop.sumOf { it.it.size })}", 13f, ui.accent, bold = true).apply { setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(6)) },
+                ui.label((if (g.kind == "same") "정확한 중복" else "줄인 사본") + (if (g.entries.any { it.it.video }) " · 동영상" else "") + " · ${g.entries.size}개 · 지울 것 ${Fmt.size(g.drop.sumOf { it.it.size })}", 13f, ui.accent, bold = true).apply { setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(6)) },
                 HorizontalScrollView(this@DupActivity).apply { isHorizontalScrollBarEnabled = false; addView(row) },
             )
         }
@@ -167,6 +167,9 @@ class DupActivity : Activity() {
             addView(iv, FrameLayout.LayoutParams(-1, -1))
             if (!keep) addView(View(this@DupActivity).apply { setBackgroundColor(0x66000000) }, FrameLayout.LayoutParams(-1, -1))
             addView(badge, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { setMargins(ui.dp(6), ui.dp(6), 0, 0) })
+            if (e.it.video) addView(ui.row(StatusBadge.play(this@DupActivity, ui).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)) },
+                ui.label(if (e.it.dur > 0) PhotoGrid.duration(e.it.dur) else "동영상", 11.5f, 0xFFFFFFFF.toInt(), bold = true).apply { setShadowLayer(4f, 0f, 1f, 0xAA000000.toInt()); setPadding(ui.dp(4), 0, 0, 0) }),
+                FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply { setMargins(ui.dp(6), 0, 0, ui.dp(6)) })   // 동영상
         }
         return ui.col(
             pic.apply { layoutParams = LinearLayout.LayoutParams(w, w) },

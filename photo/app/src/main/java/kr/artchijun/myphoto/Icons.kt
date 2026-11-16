@@ -185,6 +185,13 @@ object StatusBadge {
             setColor(when (status) { Library.BOTH -> 0xCC1F8A4C.toInt(); Library.SERVER_ONLY -> 0x99000000.toInt(); else -> 0xE6E8890C.toInt() })
         }
     }
+    /** 동영상 표시 (작은 칸 위에): 어두운 동그라미 안의 흰 ▶ */
+    fun play(ctx: android.content.Context, ui: Ui) = android.widget.ImageView(ctx).apply {
+        setImageDrawable(Glyph("play", Color.WHITE)); val q = ui.dp(4); setPadding(q + ui.dp(1), q, q - ui.dp(1), q)
+        background = android.graphics.drawable.GradientDrawable().apply { shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(0x99000000.toInt()) }
+    }
+    /** "사진 3 · 동영상 2" (한쪽이 0 이면 빼고) */
+    fun kinds(photos: Int, videos: Int): String = listOfNotNull(if (photos > 0) "사진 ${"%,d".format(photos)}" else null, if (videos > 0) "동영상 ${"%,d".format(videos)}" else null).joinToString(" · ")
     /** 설명 (색과 뜻) */
     val legend = listOf(Library.BOTH to "백업됨 (휴대폰·서버 모두)", Library.SERVER_ONLY to "서버에만", Library.PHONE_ONLY to "백업 안 됨 (휴대폰에만)")
 }

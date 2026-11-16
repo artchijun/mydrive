@@ -83,14 +83,15 @@ object Backup {
         c.moveToFirst(); Counts(c.getInt(0), c.getInt(1), c.getInt(2), c.getLong(3), c.getInt(4), c.getInt(5)) }
 
     /** 백업 기록 화면의 한 줄 */
-    class Entry(val key: Long, val video: Boolean, val rel: String, val name: String, val size: Long, val taken: Long, val state: Int, val how: Int, val at: Long, val srvPath: String?, val err: String?) {
+    class Entry(val key: Long, val video: Boolean, val rel: String, val name: String, val size: Long, val taken: Long, val state: Int, val how: Int, val at: Long, val srvPath: String?, val err: String?, val folder: Long = 0) {
+        fun toLocal() = Local(key, video, rel, name, size, taken, folder)
         val uri: Uri get() = ContentUris.withAppendedId(if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, key / 2)
     }
     /** state: 0 기다림(올릴 차례대로) · 1 완료(최근 것부터) · 2 실패 */
     fun entries(ctx: Context, state: Int, limit: Int = 3000): List<Entry> =
-        db(ctx).rawQuery("SELECT id, video, rel, name, size, taken, state, how, at, srv_path, err FROM media WHERE state=$state ORDER BY " +
+        db(ctx).rawQuery("SELECT id, video, rel, name, size, taken, state, how, at, srv_path, err, srv_folder FROM media WHERE state=$state ORDER BY " +
             (if (state == 0) "taken DESC" else "at DESC") + " LIMIT $limit", null).use { c ->
-            List(c.count) { c.moveToNext(); Entry(c.getLong(0), c.getInt(1) == 1, c.getString(2) ?: "", c.getString(3) ?: "", c.getLong(4), c.getLong(5), c.getInt(6), c.getInt(7), c.getLong(8), c.getString(9), c.getString(10)) } }
+            List(c.count) { c.moveToNext(); Entry(c.getLong(0), c.getInt(1) == 1, c.getString(2) ?: "", c.getString(3) ?: "", c.getLong(4), c.getLong(5), c.getInt(6), c.getInt(7), c.getLong(8), c.getString(9), c.getString(10), c.getLong(11)) } }
 
     fun failures(ctx: Context): List<Pair<String, String>> =
         db(ctx).rawQuery("SELECT rel||name, err FROM media WHERE state=2 ORDER BY at DESC LIMIT 100", null).use { c -> List(c.count) { c.moveToNext(); c.getString(0) to (c.getString(1) ?: "") } }

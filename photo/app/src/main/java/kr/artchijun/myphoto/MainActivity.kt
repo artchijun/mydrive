@@ -77,6 +77,7 @@ class MainActivity : Activity() {
         setContentView(root)
         select(0)
         BackupSchedule.schedule(this)
+        Update.checkOnStart(this)   // 하루 두 번까지 새 판 확인 → 있으면 앱 안에서 받아 설치
     }
 
     override fun onResume() {
@@ -213,15 +214,16 @@ class MainActivity : Activity() {
         Thread {
             Library.phone(this, force = true)
             runOnUiThread { g.phoneChanged(null) }
-            if (Library.stale(this, 12 * 3_600_000L)) {
+            // 백업 폴더(올릴 곳)만 읽어 대조 — 빠름. 서버 전체는 공간 확보에서 넓혀 볼 때만 읽음 (읽어 둔 것이 있으면 함께 씀)
+            if (Library.backupRoot(this).isNotEmpty() && Library.stale(this, 12 * 3_600_000L, Library.BACKUP)) {
                 var last = 0L
-                try { Library.refreshServer(this) { n, t ->
-                    val now = System.currentTimeMillis(); if (now - last < 500 && n < t) return@refreshServer; last = now
-                    runOnUiThread { note.visibility = View.VISIBLE; note.text = "서버와 대조하는 중  ${"%,d".format(n)} / ${"%,d".format(t)} — 끝나면 '백업 안 됨' 사진이 보입니다" }
-                } } catch (e: Exception) { runOnUiThread { note.visibility = View.VISIBLE; note.text = "서버와 대조하지 못했습니다: ${e.message}" } }
+                try { Library.refreshServer(this, Library.BACKUP) { n, t ->
+                    val now = System.currentTimeMillis(); if (now - last < 500) return@refreshServer; last = now
+                    runOnUiThread { note.visibility = View.VISIBLE; note.text = "백업 폴더와 대조하는 중  폴더 ${-t}개 · 사진 ${"%,d".format(n)}장 — 끝나면 '백업 안 됨' 사진이 보입니다" }
+                } } catch (e: Exception) { runOnUiThread { note.visibility = View.VISIBLE; note.text = "백업 폴더와 대조하지 못했습니다: ${e.message}" } }
             }
             val only = Library.phoneOnly(this)?.map { it.toItem() }
-            runOnUiThread { if (only != null) { if (note.text.startsWith("서버와 대조하는 중")) note.visibility = View.GONE; g.phoneChanged(only) } }
+            runOnUiThread { if (only != null) { if (note.text.startsWith("백업 폴더와 대조하는 중")) note.visibility = View.GONE; g.phoneChanged(only) } }
         }.start()
     }
 
@@ -239,7 +241,7 @@ class MainActivity : Activity() {
                         stacks[tab].removeAt(stacks[tab].size - 1); push(name to photoGrid(false, mapOf("folder_id" to id))); return@onSuccess
                     }
                     val rows = ArrayList<Folder?>(); if (id != 1L) rows += null; rows.addAll(subs)
-                    list.adapter = object : BaseAdapter() {
+                    val ad = object : BaseAdapter() {
                         override fun getCount() = rows.size
                         override fun getItem(p: Int) = rows[p]
                         override fun getItemId(p: Int) = p.toLong()
@@ -253,15 +255,54 @@ class MainActivity : Activity() {
                                 .apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(12), ui.dp(6)); background = ui.press(null) }
                         }
                     }
+                    list.adapter = ad
                     list.setOnItemClickListener { _, _, p, _ ->
+                        if (p >= rows.size) return@setOnItemClickListener   // 아래 안내 줄
                         val f = rows[p]
                         if (f == null) push(name to photoGrid(false, mapOf("folder_id" to id)))
                         else push(f.name to folderPage(f.id, f.name))
                     }
+                    // 길게 누르면: 폴더째 지우기
+                    list.setOnItemLongClickListener { _, _, p, _ ->
+                        val f = rows.getOrNull(p) ?: return@setOnItemLongClickListener false
+                        AlertDialog.Builder(this).setTitle(f.name).setItems(arrayOf("폴더째 지우기")) { _, _ ->
+                            deleteFolder(f) { rows.remove(f); ad.notifyDataSetChanged() }
+                        }.show()
+                        true
+                    }
+                    if (rows.any { it != null }) list.addFooterView(ui.label("폴더를 길게 누르면 폴더째 지울 수 있습니다", 12.5f, ui.sub).apply { gravity = Gravity.CENTER; setPadding(0, ui.dp(14), 0, ui.dp(24)) }, null, false)
                 }
             }
         }
         return wrap
+    }
+
+    /** 폴더째 지우기: 안에 몇 장·하위 폴더 몇 개인지 먼저 세어 보여 주고 확인받은 뒤 */
+    private fun deleteFolder(f: Folder, done: () -> Unit) {
+        var stop = false
+        val wait = AlertDialog.Builder(this).setTitle("폴더 안을 세는 중").setMessage(f.path).setNegativeButton("그만") { _, _ -> stop = true }.show()
+        net.execute {
+            val r = try { Result.success(ph.folderStats(ns, f.id) { stop }) } catch (e: Exception) { Result.failure(e) }
+            runOnUiThread {
+                if (stop || isFinishing) return@runOnUiThread
+                wait.dismiss()
+                r.onFailure { e -> Toast.makeText(this, "폴더를 읽지 못했습니다: ${e.message}", Toast.LENGTH_LONG).show() }
+                r.onSuccess { (n, subs) ->
+                    AlertDialog.Builder(this).setTitle("폴더째 지울까요?")
+                        .setMessage("${f.path}\n\n사진·동영상 ${"%,d".format(n)}개" + (if (subs > 0) " · 하위 폴더 ${"%,d".format(subs)}개" else "") +
+                            "\n\n시놀로지에서 폴더와 그 안의 파일을 모두 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다.")
+                        .setPositiveButton("폴더째 지우기") { _, _ ->
+                            net.execute {
+                                val err = try { ph.deleteFolders(ns, listOf(f.id)); null } catch (e: Exception) { e.message ?: "오류" }
+                                runOnUiThread {
+                                    if (err != null) Toast.makeText(this, "지우지 못했습니다: $err", Toast.LENGTH_LONG).show()
+                                    else { Toast.makeText(this, "${f.name} 폴더를 지웠습니다", Toast.LENGTH_SHORT).show(); done() }
+                                }
+                            }
+                        }.setNegativeButton("그만", null).show()
+                }
+            }
+        }
     }
 
     // ---------- 인물 · 장소 ----------

@@ -87,6 +87,27 @@ class Photos(ctx: Context) {
         return id
     }
 
+    /** 폴더째 지우기 (안의 사진·하위 폴더 모두 — 시놀로지 사진 웹과 같은 Browse.Folder delete). 휴지통이 켜져 있으면 DSM 휴지통으로 */
+    fun deleteFolders(ns: String, ids: List<Long>) {
+        try { syno.call("$ns.Browse.Folder", "delete", 1, mapOf("id" to org.json.JSONArray(ids))) }
+        catch (e: SynoError) { if (e.code == 103 || e.code == 104) syno.call("$ns.Browse.Folder", "delete", 2, mapOf("id" to org.json.JSONArray(ids))) else throw e }
+    }
+    /** 폴더 안의 사진 수와 하위 폴더 수 (아래까지 모두) — 지우기 전에 알려 주려고 */
+    fun folderStats(ns: String, id: Long, stop: () -> Boolean = { false }): Pair<Int, Int> {
+        var photos = 0; var subs = 0
+        val q = ArrayDeque<Long>(); q += id
+        while (q.isNotEmpty() && !stop()) {
+            val f = q.removeFirst()
+            photos += try { syno.call("$ns.Browse.Item", "count", 7, mapOf("folder_id" to f)).optInt("count") } catch (e: Exception) {
+                var n = 0; var off = 0
+                while (true) { val pg = list(ns, off, 5000, mapOf("folder_id" to f)); n += pg.size; off += pg.size; if (pg.size < 5000) break }
+                n
+            }
+            for (c in folders(ns, f)) { subs++; q += c.id }
+        }
+        return photos to subs
+    }
+
     fun createFolder(ns: String, parent: Long, name: String): Long {
         val d = try { syno.call("$ns.Browse.Folder", "create", 1, mapOf("target_id" to parent, "name" to name)) }
                 catch (e: SynoError) { if (e.code == 641) { return folders(ns, parent).first { it.name == name }.id }; throw e }

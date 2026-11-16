@@ -78,6 +78,7 @@ class FreeUpActivity : Activity() {
         val statusRow = ui.row(Glyph("nas", ui.sub).let { g -> ImageView(this).apply { setImageDrawable(g); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(8) } } }, status, again)
             .apply { setPadding(ui.dp(18), ui.dp(6), ui.dp(12), ui.dp(2)) }
         seg = ui.row().apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(4)) }
+        scopeRow = ui.row().apply { setPadding(ui.dp(14), ui.dp(4), ui.dp(14), ui.dp(2)) }
         filters = ui.col()
         val search = ui.input("이름으로 찾기 (예: 20250612, IMG_1234)").apply {
             textSize = 14f; layoutParams = ui.lp(top = 4).apply { leftMargin = ui.dp(14); rightMargin = ui.dp(14) }
@@ -96,41 +97,68 @@ class FreeUpActivity : Activity() {
         go = ui.button("지울 항목 없음") { start() }
         val bottom = ui.col(ui.row(preview).apply { gravity = Gravity.CENTER }, go.apply { layoutParams = ui.lp(h = ui.dp(52), top = 8) })
             .apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel); tag = "bottom" }
-        val root = ui.col(top, statusRow, seg, filters, search, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
+        val root = ui.col(top, scopeRow, statusRow, seg, filters, search, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
         ui.insets(root)
         setContentView(root)
-        buildSeg(); buildFilters()
-        // 서버 목록이 1시간보다 오래됐으면 새로 읽고 대조
-        load(force = Library.stale(this, 3_600_000L))
+        buildScope(); buildSeg(); buildFilters()
+        // 고른 범위의 서버 목록이 1시간보다 오래됐으면(또는 그 뒤 백업으로 올린 것이 있으면) 새로 읽고 대조
+        load(force = Library.stale(this, 3_600_000L, scope))
     }
     override fun onDestroy() { super.onDestroy(); stop = true; bg.shutdownNow() }
+
+    // ---------- 대조 범위 ----------
+    private lateinit var scopeRow: LinearLayout
+    /** Library.BACKUP 백업 폴더(올릴 곳)만 — 기본 · Library.ALL 서버 전체 */
+    private val scope get() = pf.int("fu_scope", Library.BACKUP)
+    private fun buildScope() {
+        scopeRow.removeAllViews()
+        val root = Library.backupRoot(this).ifEmpty { "(올릴 곳 안 정함)" }
+        listOf(Library.BACKUP to "백업 폴더  $root", Library.ALL to "서버 전체").forEachIndexed { i, (k, name) ->
+            val sel = k == scope
+            scopeRow.addView(ui.row(ImageView(this).apply { setImageDrawable(Glyph(if (k == Library.ALL) "nas" else "folder", if (sel) ui.accent else ui.sub)); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(6) } },
+                ui.label(name, 13.5f, if (sel) ui.text else ui.sub, bold = sel).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }).apply {
+                gravity = Gravity.CENTER; setPadding(ui.dp(10), 0, ui.dp(10), 0)
+                layoutParams = LinearLayout.LayoutParams(0, ui.dp(38), if (k == Library.ALL) 0.8f else 1.2f).apply { if (i == 0) rightMargin = ui.dp(8) }
+                background = ui.press(ui.round(if (sel) ui.select else ui.bg, 10, stroke = if (sel) ui.accent else ui.line), 10)
+                setOnClickListener { setScope(k) }
+            })
+        }
+    }
+    private fun setScope(k: Int) {
+        if (k == scope) return
+        pf.putInt("fu_scope", k); excluded.clear(); buildScope()
+        load(force = Library.stale(this, 3_600_000L, k))
+    }
 
     // ---------- 대조 ----------
     private fun load(force: Boolean) {
         again.isEnabled = false; again.alpha = 0.4f
         summary.text = "휴대폰 사진을 읽는 중…"
+        val sc = scope
+        rows = emptyList(); buildSeg(); refresh()
         bg.execute {
             var err: String? = null
-            if (force || !Library.hasServer(this)) {
+            if (force || !Library.hasServer(this, sc)) {
                 var last = 0L
-                val ok = try { Library.refreshServer(this, { stop }) { n, t ->
-                    val now = System.currentTimeMillis(); if (now - last < 300 && n < t) return@refreshServer; last = now
-                    runOnUiThread { status.text = "서버 사진 목록 읽는 중  ${"%,d".format(n)} / ${"%,d".format(t)}" }
+                val ok = try { Library.refreshServer(this, sc, { stop }) { n, t ->
+                    val now = System.currentTimeMillis(); if (now - last < 300) return@refreshServer; last = now
+                    runOnUiThread { status.text = if (t < 0) "백업 폴더 읽는 중  폴더 ${-t}개 · 사진 ${"%,d".format(n)}장" else "서버 전체 읽는 중  ${"%,d".format(n)} / ${"%,d".format(t)}" }
                 } } catch (e: Exception) { err = e.message; false }
                 if (!ok && err == null && Library.refreshing) err = "다른 곳에서 서버 목록을 읽는 중 — 잠시 뒤 다시"
             }
             val ph = Library.phone(this, force = true)
-            runOnUiThread { status.text = "휴대폰 ${"%,d".format(ph.size)}개를 서버와 대조하는 중…" }
-            val out = if (Library.hasServer(this)) ph.map { Row(it, Library.matchOnServer(this, it)) } else emptyList()
+            runOnUiThread { status.text = "휴대폰 ${"%,d".format(ph.size)}개를 대조하는 중…" }
+            val out = if (Library.hasServer(this, sc)) ph.map { Row(it, Library.matchOnServer(this, it, sc)) } else emptyList()
             runOnUiThread {
-                if (isFinishing) return@runOnUiThread
+                if (isFinishing || sc != scope) return@runOnUiThread
                 again.isEnabled = true; again.alpha = 1f
                 rows = out
-                val at = Library.serverAt(this)
+                val at = if (Library.hasServer(this, sc)) Library.serverAt(this, sc) else 0L
+                val what = if (sc == Library.BACKUP) "백업 폴더의 사진" else "서버 전체 사진"
                 status.text = when {
-                    err != null && at == 0L -> "서버 목록을 읽지 못했습니다: $err"
-                    at == 0L -> "아직 서버와 대조하지 않았습니다"
-                    else -> "서버 사진 ${"%,d".format(Library.serverCount(this))}장과 대조함 · " + SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(Date(at)) + (if (err != null) " (새로 읽지 못함: $err)" else "")
+                    err != null && at == 0L -> "읽지 못했습니다: $err"
+                    at == 0L -> "아직 대조하지 않았습니다"
+                    else -> "$what ${"%,d".format(Library.serverCount(this, sc))}장과 대조함 · " + SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(Date(at)) + (if (err != null) " (새로 읽지 못함: $err)" else "")
                 }
                 buildSeg(); buildFilters(); refresh()
             }
@@ -208,13 +236,14 @@ class FreeUpActivity : Activity() {
             val pick = shown.filter { it.p.key !in excluded }
             val bytes = pick.sumOf { it.p.size }
             summary.text = if (shown.isEmpty()) (if (rows.isEmpty()) "" else "조건과 일치하는 항목 없음.") else
-                "${"%,d".format(shown.size)}개 중 ${"%,d".format(pick.size)}개 · ${Fmt.size(bytes)} 확보" + (if (shown.size > pick.size) " (뺀 것 ${shown.size - pick.size}개)" else "") +
+                "${"%,d".format(shown.size)}개 중 ${"%,d".format(pick.size)}개 (${StatusBadge.kinds(pick.count { !it.p.video }, pick.count { it.p.video })}) · ${Fmt.size(bytes)} 확보" + (if (shown.size > pick.size) " (뺀 것 ${shown.size - pick.size}개)" else "") +
                     (if (preview.isChecked) "\n누르면 서버의 것과 나란히 비교 · 길게 누르면 빼기/넣기" else "")
             go.text = if (pick.isEmpty()) "지울 항목 없음" else "${"%,d".format(pick.size)}개 지우기 (${Fmt.size(bytes)})"
             go.isEnabled = pick.isNotEmpty(); go.alpha = if (pick.isEmpty()) 0.5f else 1f
         } else {
-            summary.text = if (shown.isEmpty()) "서버에 없는 휴대폰 사진이 없습니다." else
-                "${"%,d".format(shown.size)}개 · ${Fmt.size(shown.sumOf { it.p.size })} — 서버에서 같은 것을 찾지 못한 사진 (지우지 않음). 백업할 폴더에 넣으면 올라갑니다."
+            summary.text = (if (shown.isEmpty()) "서버에 없는 휴대폰 사진이 없습니다." else
+                "${"%,d".format(shown.size)}개 (${StatusBadge.kinds(shown.count { !it.p.video }, shown.count { it.p.video })}) · ${Fmt.size(shown.sumOf { it.p.size })} — " + (if (scope == Library.BACKUP) "백업 폴더에서" else "서버 전체에서") + " 같은 것을 찾지 못한 사진 (지우지 않음).") +
+                (if (scope == Library.BACKUP && shown.isNotEmpty()) "\n다른 폴더에 있을 수 있으면 위의 [서버 전체]로 넓혀 찾아 보세요." else "")
         }
         val vis = tab == 1 || preview.isChecked
         grid.visibility = if (vis) View.VISIBLE else View.INVISIBLE
@@ -247,6 +276,7 @@ class FreeUpActivity : Activity() {
                 addView(View(this@FreeUpActivity).apply { setBackgroundColor(0x99000000.toInt()) }, FrameLayout.LayoutParams(-1, -1))
                 addView(ImageView(this@FreeUpActivity), FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.TOP or Gravity.END).apply { setMargins(0, ui.dp(5), ui.dp(5), 0) })
                 addView(StatusBadge.view(this@FreeUpActivity, ui), FrameLayout.LayoutParams(ui.dp(20), ui.dp(20), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, ui.dp(5), ui.dp(5)) })
+                addView(StatusBadge.play(this@FreeUpActivity, ui), FrameLayout.LayoutParams(ui.dp(22), ui.dp(22), Gravity.TOP or Gravity.START).apply { setMargins(ui.dp(5), ui.dp(5), 0, 0) })   // 동영상
             }
             f.layoutParams = android.widget.AbsListView.LayoutParams(w, w)
             phoneThumb(r.p, f.getChildAt(0) as ImageView)
@@ -259,6 +289,7 @@ class FreeUpActivity : Activity() {
                 val pd = ui.dp(3); setPadding(pd, pd, pd, pd)
             }
             StatusBadge.set(f.getChildAt(3) as ImageView, if (r.m != null) Library.BOTH else Library.PHONE_ONLY)
+            f.getChildAt(4).visibility = if (r.p.video) View.VISIBLE else View.GONE
             return f
         }
     }

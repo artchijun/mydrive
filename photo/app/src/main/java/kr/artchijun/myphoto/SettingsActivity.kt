@@ -84,9 +84,10 @@ class SettingsActivity : Activity() {
         bg.execute {
             val info = try { Update.latest() } catch (e: Exception) { null }
             runOnUiThread {
-                if (info == null || !Update.newer(info.version, Update.current(this))) { Toast.makeText(this, "지금 판이 가장 새것입니다", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
+                if (info == null) { Toast.makeText(this, "새 판을 확인하지 못했습니다 (인터넷 연결 확인)", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
+                if (!Update.newer(info.version, Update.current(this))) { Toast.makeText(this, "지금 판(${Update.current(this)})이 가장 새것입니다", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
                 AlertDialog.Builder(this).setTitle("새 판 ${info.version}").setMessage(info.notes.ifEmpty { "새 판이 있습니다" })
-                    .setPositiveButton("받아서 설치") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(info.page))) }.setNegativeButton("나중에", null).show()
+                    .setPositiveButton("받아서 설치") { _, _ -> Update.install(this, info) }.setNegativeButton("나중에", null).show()
             }
         }
     }

@@ -164,7 +164,7 @@ class BackupActivity : Activity() {
                     val sec = (System.currentTimeMillis() - p.started) / 1000.0
                     val speed = if (sec > 0.5 && p.bytes > 0) p.bytes / sec else 0.0
                     val left = if (speed > 0) ((p.size - p.bytes) / speed).toLong() else -1
-                    curName.text = "${p.name}  (${p.done}/${p.total})"
+                    curName.text = (if (p.key % 2 == 1L) "동영상 · " else "") + "${p.name}  (${p.done}/${p.total})"
                     curWhere.text = "휴대폰 ${p.rel.trimEnd('/').ifEmpty { "(맨 위)" }}  →  서버 ${p.target}"
                     cur.text = "${Fmt.size(p.bytes)} / ${Fmt.size(p.size)}" + (if (speed > 0) "  ·  ${Fmt.size(speed.toLong())}/s" else "") +
                         (if (left >= 0) "  ·  " + (if (left < 60) "${left}초 남음" else "약 ${(left + 59) / 60}분 남음") else "")
@@ -176,7 +176,7 @@ class BackupActivity : Activity() {
                 if (upcoming.isNotEmpty() && (Backup.running || (c?.waiting ?: 0) > 0)) {
                     nextBox.visibility = View.VISIBLE
                     nextBox.addView(ui.label(if (Backup.running) "다음 차례" else "올릴 차례 (기다림)", 12f, ui.sub, bold = true))
-                    upcoming.forEach { e -> nextBox.addView(ui.label("· ${e.name}   ${e.rel.trimEnd('/')} · ${Fmt.size(e.size)}", 12.5f, ui.text).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; setPadding(0, ui.dp(2), 0, 0) }) }
+                    upcoming.forEach { e -> nextBox.addView(ui.label("· ${if (e.video) "동영상 " else ""}${e.name}   ${e.rel.trimEnd('/')} · ${Fmt.size(e.size)}", 12.5f, ui.text).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; setPadding(0, ui.dp(2), 0, 0) }) }
                 } else nextBox.visibility = View.GONE
                 logBox.removeAllViews()
                 if (log.isEmpty()) logBox.addView(ui.label("아직 없음", 13.5f, ui.sub))

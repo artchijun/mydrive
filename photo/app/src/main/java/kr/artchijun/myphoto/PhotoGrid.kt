@@ -91,6 +91,8 @@ class PhotoGrid(
         set(v) { field = v; pf.putStr("unit", v); cols = pf.int("cols_$v", when (v) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) }); rebuild(); list.setSelection(0) }
     /** 아래에 떠 있는 것(일·월·연도 고르기)에 가리지 않도록 목록 끝에 두는 여백 */
     fun setBottomSpace(px: Int) { list.setPadding(0, 0, 0, px) }
+    private var scrolling = false
+    private var thumbDrag = false
     private var loading = false
     private var done = false
     private var seq = 0
@@ -106,8 +108,11 @@ class PhotoGrid(
         list.clipToPadding = false
         list.adapter = adapter
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
-            override fun onScrollStateChanged(v: AbsListView, s: Int) {}
-            override fun onScroll(v: AbsListView, first: Int, visible: Int, total: Int) { if (total > 0 && first + visible >= total - 8) more() }
+            override fun onScrollStateChanged(v: AbsListView, s: Int) { scrolling = s != AbsListView.OnScrollListener.SCROLL_STATE_IDLE }
+            override fun onScroll(v: AbsListView, first: Int, visible: Int, total: Int) {
+                if (total > 0 && first + visible >= total - 8) more()
+                if (scrolling && grouped && !thumbDrag) showBubble(first, visible, total)
+            }
         })
         addView(list, LayoutParams(-1, -1))
         addView(empty, LayoutParams(-1, -1))
@@ -155,6 +160,7 @@ class PhotoGrid(
             i = j
         }
         rows = out
+        buildSections()
         adapter.notifyDataSetChanged()
         if (!done && !loading && rows.size < 40 && all.isNotEmpty()) list.post { more() }
     }
@@ -178,6 +184,11 @@ class PhotoGrid(
         if (idx >= 0) list.setSelection(maxOf(0, idx - 1))
     }
     override fun dispatchTouchEvent(e: MotionEvent): Boolean {
+        // 오른쪽 끝 막대 손잡이를 끄는 중이면 안드로이드의 날짜 말풍선만 (내 것은 숨김)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> { thumbDrag = e.x > width - ui.dp(44); if (thumbDrag) { removeCallbacks(hideBubble); bubble.visibility = View.GONE } }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> thumbDrag = false
+        }
         sg.onTouchEvent(e)
         if (sg.isInProgress || e.pointerCount > 1) { val c = MotionEvent.obtain(e); c.action = MotionEvent.ACTION_CANCEL; super.dispatchTouchEvent(c); c.recycle(); return true }
         return super.dispatchTouchEvent(e)
@@ -198,7 +209,46 @@ class PhotoGrid(
     fun update(it: Item) { val i = all.indexOfFirst { x -> x.id == it.id }; if (i >= 0) { all[i] = it; rebuild() } }
 
     // ---------- 칸 그리기 ----------
-    private val adapter: BaseAdapter = object : BaseAdapter() {
+    // ---------- 스크롤 막대의 날짜 ----------
+    // 막대를 잡고 끌 때 안드로이드가 띄우는 말풍선(SectionIndexer)과, 그냥 넘길 때 막대 옆에 잠깐 뜨는 날짜
+    private var sectionLabels: Array<String> = emptyArray()
+    private var rowSection = IntArray(0)
+    private var sectionStart = IntArray(0)
+    private fun rowLabel(r: Row): String { val t = items.getOrNull(r.start)?.time ?: return ""; return fmt(if (unit == "year") "yyyy년" else "yyyy년 M월", t) }
+    private fun buildSections() {
+        val labels = ArrayList<String>(); val starts = ArrayList<Int>(); val rs = IntArray(rows.size)
+        for ((i, r) in rows.withIndex()) {
+            val l = rowLabel(r)
+            if (labels.isEmpty() || labels.last() != l) { labels += l; starts += i }
+            rs[i] = labels.size - 1
+        }
+        sectionLabels = labels.toTypedArray(); sectionStart = starts.toIntArray(); rowSection = rs
+    }
+    private val bubble by lazy {
+        TextView(a).apply {
+            textSize = 13.5f; setTextColor(ui.text); typeface = android.graphics.Typeface.DEFAULT_BOLD
+            background = ui.round(if (ui.dark) 0xF2333333.toInt() else 0xF7FFFFFF.toInt(), 16, stroke = ui.line); elevation = ui.dpf(4f)
+            setPadding(ui.dp(12), ui.dp(6), ui.dp(12), ui.dp(6)); visibility = View.GONE
+            this@PhotoGrid.addView(this, LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { rightMargin = ui.dp(30) })
+        }
+    }
+    private val hideBubble = Runnable { bubble.animate().alpha(0f).setDuration(250).withEndAction { bubble.visibility = View.GONE }.start() }
+    private fun showBubble(first: Int, visible: Int, total: Int) {
+        if (total <= visible || rows.isEmpty()) return
+        val r = rows.getOrNull(first) ?: return
+        bubble.text = rowLabel(r).ifEmpty { return }
+        bubble.animate().cancel(); bubble.alpha = 1f; bubble.visibility = View.VISIBLE
+        // 막대 손잡이 높이쯤에 둠
+        val h = list.height - list.paddingBottom
+        val y = (h * first.toFloat() / maxOf(1, total - visible)).coerceIn(0f, (h - ui.dp(40)).toFloat().coerceAtLeast(0f))
+        bubble.translationY = y
+        removeCallbacks(hideBubble); postDelayed(hideBubble, 1200)
+    }
+
+    private val adapter: BaseAdapter = object : BaseAdapter(), android.widget.SectionIndexer {
+        override fun getSections(): Array<Any> = sectionLabels.map { it as Any }.toTypedArray()
+        override fun getPositionForSection(sec: Int) = sectionStart.getOrElse(sec.coerceAtLeast(0)) { rows.size - 1 }.coerceAtLeast(0)
+        override fun getSectionForPosition(pos: Int) = rowSection.getOrElse(pos) { maxOf(0, sectionLabels.size - 1) }
         override fun getCount() = rows.size
         override fun getItem(p: Int) = rows[p]
         override fun getItemId(p: Int) = p.toLong()
