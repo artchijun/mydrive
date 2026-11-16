@@ -38,6 +38,8 @@
         <activity android:name=".ViewerActivity" android:exported="false" android:configChanges="orientation|screenSize|screenLayout|keyboardHidden" />
         <activity android:name=".BackupActivity" android:exported="false" />
         <activity android:name=".SettingsActivity" android:exported="false" />
+        <activity android:name=".FreeUpActivity" android:exported="false" />
+        <activity android:name=".DupActivity" android:exported="false" />
 
         <service android:name=".BackupService" android:exported="false" android:foregroundServiceType="dataSync" />
         <service android:name=".BackupJob" android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />

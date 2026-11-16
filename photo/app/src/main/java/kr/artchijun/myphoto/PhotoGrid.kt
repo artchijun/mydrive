@@ -201,7 +201,8 @@ class PhotoGrid(
 
     private fun bind(c: FrameLayout, it: Item, idx: Int) {
         val iv = c.getChildAt(0) as ImageView
-        Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm")
+        iv.scaleType = ImageView.ScaleType.CENTER_CROP
+        Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } }   // 시놀로지가 아직 썸네일을 못 만든 것
         c.getChildAt(1).visibility = if (it.video) View.VISIBLE else View.GONE
         val on = it.id in selected
         c.getChildAt(2).apply { visibility = if (on) View.VISIBLE else View.GONE; setBackgroundColor(0x5560CDFF) }

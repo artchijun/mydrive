@@ -37,3 +37,4 @@ photo/local.properties
 photo/build/
 photo/app/build/
 photo/.gradle/
+photo/.kotlin/

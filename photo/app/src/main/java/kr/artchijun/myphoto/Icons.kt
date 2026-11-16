@@ -30,6 +30,7 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "back" -> { ln(5f, 12f, 19f, 12f); poly(11f, 6f, 5f, 12f, 11f, 18f) }
             "fwd" -> { ln(5f, 12f, 19f, 12f); poly(13f, 6f, 19f, 12f, 13f, 18f) }
             "up" -> { ln(12f, 19f, 12f, 5f); poly(6f, 11f, 12f, 5f, 18f, 11f) }
+            "down" -> { ln(12f, 5f, 12f, 19f); poly(6f, 13f, 12f, 19f, 18f, 13f) }
             "chev" -> { poly(10f, 7f, 15f, 12f, 10f, 17f) }
             "star", "starOn" -> {
                 path.reset()

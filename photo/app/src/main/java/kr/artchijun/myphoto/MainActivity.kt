@@ -53,7 +53,7 @@ class MainActivity : Activity() {
             ui.iconBtn(Glyph("back", ui.text), "뒤로") { back() }.apply { visibility = View.GONE; tag = "back" },
             title.apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(12) } },
             ui.iconBtn(Glyph("refresh", ui.text), "새로 고침") { refresh() },
-            ui.iconBtn(Glyph("settings", ui.text), "설정") { startActivity(Intent(this, SettingsActivity::class.java)) },
+            ui.iconBtn(Glyph("more", ui.text), "메뉴") {}.also { b -> b.setOnClickListener { menu(b) } },
         ).apply { setBackgroundColor(ui.panel); setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4)); minimumHeight = ui.dp(56) }
         selCount = ui.label("", 17f, ui.text, bold = true)
         selBar = ui.row(
@@ -130,6 +130,18 @@ class MainActivity : Activity() {
             stacks[tab].removeAt(stacks[tab].size - 1)
             select(tab)   // 맨 위 화면이면 다시 만들기
         }
+    }
+
+    /** 위 줄 메뉴: 공간 확보 · 중복 정리 · 설정 */
+    private fun menu(anchor: View) {
+        val pm = android.widget.PopupMenu(this, anchor)
+        pm.menu.add(0, 1, 0, "공간 확보 (백업된 사진을 휴대폰에서 지우기)")
+        pm.menu.add(0, 2, 1, "중복 정리 (서버)")
+        pm.menu.add(0, 3, 2, "설정")
+        pm.setOnMenuItemClickListener { mi ->
+            startActivity(Intent(this, when (mi.itemId) { 1 -> FreeUpActivity::class.java; 2 -> DupActivity::class.java; else -> SettingsActivity::class.java })); true
+        }
+        pm.show()
     }
 
     private fun onSel(n: Int) {

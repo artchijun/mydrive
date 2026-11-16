@@ -16,7 +16,7 @@ class SynoError(val code: Int, msg: String) : IOException(msg)
 data class Item(
     val id: Long, val name: String, val size: Long, val time: Long,   // time: 찍은 때 (초)
     val type: String, val folderId: Long, val cacheKey: String, val unitId: Long,
-    val w: Int, val h: Int, val orient: Int, val fav: Boolean,
+    val w: Int, val h: Int, val orient: Int, val fav: Boolean, val indexed: Long = 0,   // indexed: 시놀로지에 들어온 때 (ms)
 ) {
     val video get() = type == "video"
     val live get() = type == "live"
@@ -27,7 +27,7 @@ data class Item(
             val res = a?.optJSONObject("resolution")
             return Item(o.optLong("id"), o.optString("filename"), o.optLong("filesize"), o.optLong("time"), o.optString("type"),
                 o.optLong("folder_id"), th?.optString("cache_key") ?: "", th?.optLong("unit_id", o.optLong("id")) ?: o.optLong("id"),
-                res?.optInt("width") ?: 0, res?.optInt("height") ?: 0, a?.optInt("orientation", 1) ?: 1, a?.optBoolean("favorite") ?: false)
+                res?.optInt("width") ?: 0, res?.optInt("height") ?: 0, a?.optInt("orientation", 1) ?: 1, a?.optBoolean("favorite") ?: false, o.optLong("indexed_time"))
         }
     }
 }
@@ -262,7 +262,13 @@ class Syno(ctx: Context) {
     private fun uploadInParts(ns: String, folderId: Long, name: String, mtimeSec: Long, size: Long, open: () -> InputStream,
                               duplicate: String, progress: (Long) -> Unit, canceled: () -> Boolean): JSONObject {
         val id = java.util.UUID.randomUUID().toString().replace("-", "")
-        val auth = "_sid=" + enc(pf.sid) + (if (pf.synoToken.isNotEmpty()) "&SynoToken=" + enc(pf.synoToken) else "")
+        // 먼저 빈 조각으로 세션 확인 (끊긴 세션이면 32MB 를 다 보낸 뒤에야 거절되는 것을 막음). 밖 주소로 바뀌면 DSM 이 세션을 새로 요구함
+        fun probe(): Int {
+            val c = URL(server() + "/webapi/myphoto/part?id=$id&off=0&" + "_sid=" + enc(pf.sid) + (if (pf.synoToken.isNotEmpty()) "&SynoToken=" + enc(pf.synoToken) else "")).openConnection() as HttpURLConnection
+            return try { c.connectTimeout = 15_000; c.readTimeout = 60_000; c.requestMethod = "POST"; c.doOutput = true; c.setFixedLengthStreamingMode(0); c.outputStream.close(); c.responseCode } finally { c.disconnect() }
+        }
+        if (probe() == 401) { if (!relogin() || probe() == 401) throw SynoError(119, message(119)) }
+        val auth = "_sid=" + enc(pf.sid) + (if (pf.synoToken.isNotEmpty()) "&SynoToken=" + enc(pf.synoToken) else "")   // 다시 로그인했으면 새 세션
         val chunk = 32 * 1024 * 1024
         val buf = ByteArray(chunk)
         open().use { inp ->

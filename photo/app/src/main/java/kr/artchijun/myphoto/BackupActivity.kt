@@ -85,7 +85,8 @@ class BackupActivity : Activity() {
         cur = ui.label("", 12.5f, ui.sub).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE; visibility = View.GONE }
         val now = ui.button("지금 백업") { startNow() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f).apply { rightMargin = ui.dp(8) } }
         val stop = ui.button("멈추기", primary = false) { BackupService.stopAsked = true; tick() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f) }
-        body.addView(card(stateBig, stateSub, bar, cur, ui.row(now, stop).apply { layoutParams = ui.lp(top = 14) }))
+        val free = ui.button("공간 확보 — 백업된 사진을 휴대폰에서 지우기", primary = false) { startActivity(android.content.Intent(this, FreeUpActivity::class.java)) }.apply { layoutParams = ui.lp(h = ui.dp(46), top = 8) }
+        body.addView(card(stateBig, stateSub, bar, cur, ui.row(now, stop).apply { layoutParams = ui.lp(top = 14) }, free))
 
         // ---- 설정 ----
         body.addView(head("설정"))
