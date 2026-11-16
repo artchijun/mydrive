@@ -27,6 +27,7 @@ struct Connection { int64_t key = 0; };
 std::wstring FetchRequester();
 // 자리표시에 '맞춰짐' 표시가 붙어 있는지 (1 붙음, 0 없음, -1 모름) — 파일을 받지 않고 확인
 int InSyncState(const std::wstring& path, bool dir);
+bool IsPartial(const std::wstring& abs);   // 자리표시인데 내용을 끝까지 받지 않음 (일부만 받음)
 // 탐색기에 그 항목의 상태 아이콘을 바로 다시 그리라고 알림 (몇 개만 고칠 때 — 많이 부르면 탐색기가 바빠짐)
 void RefreshShell(const std::wstring& path);
 // 동기화에서 뺀 보통 파일: 자리표시로 바꾸고 '맞춰짐' + '항상 이 장치에 유지' (NAS에 없으니 절대 비우지 않음)

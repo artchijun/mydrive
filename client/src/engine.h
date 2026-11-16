@@ -249,6 +249,7 @@ private:
     bool KeepBothLocal(const std::string& p);   // 로컬 판을 충돌 사본 이름으로 바꿔 둠
     void HealInSync();                          // 켠 뒤 한 번: 맞춰진 항목인데 '맞춰짐' 표시가 빠진 것에 다시 붙임
     bool healed_ = false;
+    int BrokenLocal(const std::string& p, int64_t size);   // PC 판 끝부분이 0 으로만 차 있고 NAS 판은 아님 (덜 받은 채 크기만 맞춰진 깨진 파일): 1 깨짐, 0 아님, -1 확인 못 함
     int SameContent(const std::string& p);      // 크기·시각이 같아도 내용(SHA-256)까지 같은지: 1 같음, 0 다름, -1 확인 못 함
     bool StatLocal(const std::string& p, LocalE& out);
     void SetBase(const std::string& p, const LocalE& l, const RemoteE& r, bool mark = true);   // mark=false: '맞춰짐' 표시는 부른 쪽이 잠금 밖에서

@@ -580,6 +580,7 @@ bool Engine::Download(const std::string& p, const RemoteE& r, const BaseE* b) {
     // 바꾸기 직전에 로컬이 그대로인지 확인 (그사이 사용자가 고쳤으면 덮지 않음)
     LocalE cur; bool exists = StatLocal(p, cur);
     bool safe = !exists ? true : (b && !cur.d && cur.s == b->ls && SameTime(cur.m, b->lm));
+    if (!safe && exists && !cur.d && (cur.a & FILE_ATTRIBUTE_REPARSE_POINT) && cloud::IsPartial(dst)) safe = true;   // 덜 받은 자리표시: 고친 내용이 없음
     if (!safe) { DeleteFileW(tmp.c_str()); Event("받기 보류", p, "로컬에서 그사이 바뀜 — 다음 차례에 판단"); return false; }
     if (!MoveFileExW(tmp.c_str(), dst.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         DWORD e = GetLastError(); DeleteFileW(tmp.c_str());
@@ -712,6 +713,27 @@ int Engine::SameContent(const std::string& p) {
     std::string rh = j.value("sha256", std::string());
     if (rh.empty()) return -1;
     return rh == lh ? 1 : 0;
+}
+
+// PC 판이 깨졌나: 끝 64 KB 가 모두 0 인데 NAS 판의 같은 자리는 아님 (1 MB 넘는 파일만 — 작은 파일은 끝이 0 인 형식이 흔함)
+//   덜 받은 파일이 크기만 맞춰진 채 남으면 앞부분은 맞고 뒷부분은 0 으로 참 → 내용 비교로는 '다름'이라 예전에는 충돌 사본으로 올렸음
+int Engine::BrokenLocal(const std::string& p, int64_t size) {
+    const int64_t K = 64 * 1024;
+    if (size < (1LL << 20)) return 0;
+    std::string tail(K, '\0');
+    HANDLE f = CreateFileW(Abs(cfg_.localRoot, p).c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return -1;
+    LARGE_INTEGER at; at.QuadPart = size - K;
+    DWORD got = 0;
+    bool rd = SetFilePointerEx(f, at, nullptr, FILE_BEGIN) && ReadFile(f, tail.data(), (DWORD)K, &got, nullptr) && got == (DWORD)K;
+    CloseHandle(f);
+    if (!rd) return -1;
+    auto zero = [](const std::string& s) { for (char c : s) if (c) return false; return true; };
+    if (!zero(tail)) return 0;
+    std::string rt;
+    Resp r = http_.Range("/v1/file", {{"root", cfg_.name}, {"path", p}}, size - K, K, rt);
+    if (!r.ok() || (int64_t)rt.size() != K) return -1;
+    return zero(rt) ? 0 : 1;   // 둘 다 끝이 0 이면 원래 그런 파일
 }
 
 // ---------- 이름 바꾸기 알아채기 (지우고 새로 올리는 대신 이름만 바꿈) ----------
@@ -1065,7 +1087,12 @@ bool Engine::RunPass() {
         // 온라인 전용(내용이 PC 에 없는) 파일은 PC 쪽에서 내용이 바뀔 수 없음 → 'PC 에서 바뀜'으로 보지 않음.
         //   안 그러면 내용 비교·올리기·충돌 사본을 하려고 Mydrive 가 스스로 그 파일을 통째로 내려받음 (8GB 파일을 받은 적이 있음).
         //   NAS 에 있으면 자리표시만 NAS 에 맞춤. NAS 에도 기록에도 없으면(올릴 내용이 없음) 건드리지 않고 알리기만 함.
-        if (cloudOn_ && l && !l->d && (l->a & FILE_ATTRIBUTE_REPARSE_POINT) && cloud::IsDehydrated(l->a) && (!b || !b->d)) {
+        //   내용을 일부만 받은 자리표시도 같음: 빈 부분은 열 때 NAS 에서 받아 채우는 것이라 PC 에서 고친 판이 아님.
+        //   예전에는 이런 파일을 'PC 에서 바뀜'으로 보고 충돌 사본으로 올려, 끝부분이 0 으로 찬 깨진 판(1 GB 넘는 pptx·pdf)이 NAS 에 생겼음.
+        bool partial = cloudOn_ && lc && l && !l->d && (l->a & FILE_ATTRIBUTE_REPARSE_POINT) && !cloud::IsDehydrated(l->a) && (!b || !b->d) &&
+                       cloud::IsPartial(Abs(cfg_.localRoot, p));
+        if (partial && warned_.insert("partial:" + p).second) Event("덜 받은 파일", p, "온라인 전용 파일의 내용을 일부만 받은 상태 — PC 에서 바뀐 것으로 보지 않고 NAS 판에 맞춤");
+        if (cloudOn_ && l && !l->d && (l->a & FILE_ATTRIBUTE_REPARSE_POINT) && (cloud::IsDehydrated(l->a) || partial) && (!b || !b->d)) {
             if (!b && !r) { if (warned_.insert(p).second) Event("건너뜀", p, "온라인 전용 파일인데 NAS 에 없음 — 받을 내용이 없어 그대로 둠"); continue; }
             lc = false;
             if (r && !r->d && (!b || l->s != r->s)) rc = true;   // 자리표시의 크기가 NAS 와 다르면 자리표시를 고침
@@ -1329,7 +1356,7 @@ bool Engine::RunPass() {
             // 필요할 때 받기: 새 파일이나 온라인 전용 파일은 내용을 받지 않고 목록(자리표시)만 — 단, '항상 유지' 폴더 안은 받음
             if (j.kind == Job::Down && cloudOn_ && !unregister_) {
                 uint8_t pin = j.hasL ? j.l.pin : ParentPin(p);
-                if (pin != 1 && (!j.hasL || cloud::IsDehydrated(j.l.a))) j.ph = true;
+                if (pin != 1 && (!j.hasL || cloud::IsDehydrated(j.l.a) || ((j.l.a & FILE_ATTRIBUTE_REPARSE_POINT) && cloud::IsPartial(Abs(cfg_.localRoot, p))))) j.ph = true;
             }
             j.size = j.ph ? 0 : std::max(j.l.s, j.r.s);
             if (j.size >= kBig && !bigWorkers_.empty()) {
@@ -1659,6 +1686,14 @@ bool Engine::RunJob(const Job& j) {
             std::lock_guard<std::recursive_mutex> g(mu_);
             if (StatLocal(j.p, now) && now.s == j.l.s && SameTime(now.m, j.l.m)) { SetBase(j.p, now, j.r); return true; }
             return false;   // 그사이 바뀜 → 다음 차례에
+        }
+        int broken = BrokenLocal(j.p, j.l.s);
+        if (broken < 0) return false;   // 확인 못 함 → 다음 차례에 다시
+        if (broken == 1) {
+            // 깨진 PC 판은 충돌 사본으로 올리지 않음 — PC 휴지통으로 보내고(되살릴 수 있음) NAS 판을 받음
+            Event("⚠ 깨진 PC 판", j.p, "끝부분이 0 으로만 차 있음 (덜 받은 채 크기만 맞춰진 파일) — PC 휴지통으로 보내고 NAS 판으로 바꿈");
+            { std::lock_guard<std::recursive_mutex> g(mu_); if (!DeleteLocal(j.p)) return false; }
+            return Download(j.p, j.r, nullptr);
         }
         if (!KeepBothLocal(j.p)) return false;
         return Download(j.p, j.r, nullptr);

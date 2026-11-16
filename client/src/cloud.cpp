@@ -320,6 +320,20 @@ int InSyncState(const std::wstring& path, bool dir) {
     if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_MORE_DATA)) return -1;
     return ((CF_PLACEHOLDER_BASIC_INFO*)buf)->InSyncState == CF_IN_SYNC_STATE_IN_SYNC ? 1 : 0;
 }
+// 자리표시(온라인 전용)인데 내용이 디스크에 다 있지 않은가 — 열어 읽으면 빈 부분은 NAS 에서 받아야 함.
+//   이런 파일을 'PC 에서 바뀜'으로 보고 올리거나 충돌 사본으로 만들면 덜 받은(깨진) 판이 NAS 에 올라감.
+bool IsPartial(const std::wstring& abs) {
+    HANDLE h = CreateFileW(abs.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT, nullptr);   // 열기만으로 내용을 받지 않게
+    if (h == INVALID_HANDLE_VALUE) return false;
+    alignas(8) char buf[1024];
+    DWORD got = 0;
+    HRESULT hr = CfGetPlaceholderInfo(h, CF_PLACEHOLDER_INFO_STANDARD, buf, sizeof buf, &got);
+    LARGE_INTEGER sz{}; GetFileSizeEx(h, &sz);
+    CloseHandle(h);
+    if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_MORE_DATA)) return false;   // 자리표시가 아님
+    return ((CF_PLACEHOLDER_STANDARD_INFO*)buf)->OnDiskDataSize.QuadPart < sz.QuadPart;
+}
 static thread_local std::wstring t_requester;
 std::wstring FetchRequester() { return t_requester; }
 static void CALLBACK OnFetchData(const CF_CALLBACK_INFO* ci, const CF_CALLBACK_PARAMETERS* cp) {
