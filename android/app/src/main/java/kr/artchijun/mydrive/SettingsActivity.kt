@@ -87,6 +87,8 @@ class SettingsActivity : Activity() {
         val sizes = arrayOf("작게", "보통", "크게")
         val ri = pf.int("rowIcon", 1)
         item("image", "목록 아이콘 크기", "파일 목록 왼쪽 아이콘과 사진 미리보기 크기", sizes[ri]) { choose("목록 아이콘 크기", sizes, ri) { pf.putInt("rowIcon", it); changed() } }
+        val gaps = arrayOf("조밀하게", "보통", "넓게"); val rg = pf.int("rowGap", 0).coerceIn(0, 2)
+        item("listview", "목록 줄 간격", "파일 목록에서 줄과 줄 사이 여백. 조밀하게 하면 한 화면에 더 많이", gaps[rg]) { choose("목록 줄 간격", gaps, rg) { pf.putInt("rowGap", it); changed() } }
         val hi = pf.int("tileSize", 1)
         item("home", "홈 아이콘 크기", "홈 바둑판 아이콘 크기. 작게 하면 한 줄에 더 많이 놓입니다", sizes[hi]) { choose("홈 아이콘 크기", sizes, hi) { pf.putInt("tileSize", it); changed() } }
         val colsNames = arrayOf("자동 (아이콘 크기에 맞춤)", "3개", "4개", "5개")

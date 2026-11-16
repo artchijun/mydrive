@@ -1661,12 +1661,13 @@ class MainActivity : Activity(), Transfers.Listener {
         private fun fileRow(convert: View?, it: Item): View {
             val v = (convert as? LinearLayout) ?: run {
                 val isz = intArrayOf(28, 34, 44)[pf.int("rowIcon", 1).coerceIn(0, 2)]
-                val icon = ImageView(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(isz + 12), ui.dp(isz + 12)); setPadding(ui.dp(6), ui.dp(6), ui.dp(6), ui.dp(6)); background = ui.press(null, (isz + 12) / 2); contentDescription = "고르기" }
+                val icon = ImageView(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(isz + 8), ui.dp(isz + 8)); setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4)); background = ui.press(null, (isz + 8) / 2); contentDescription = "고르기" }
                 val name = ui.label("", 15f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE }
                 val sub = ui.label("", 12f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.START }
                 val check = ImageView(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)) }
                 ui.row(icon, ui.col(name, sub).apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(8) } }, check).apply {
-                    setPadding(ui.dp(10), ui.dp(6), ui.dp(14), ui.dp(6)); minimumHeight = ui.dp(58)
+                    val gap = intArrayOf(2, 6, 11)[pf.int("rowGap", 0).coerceIn(0, 2)]   // 설정의 ‘목록 줄 간격’
+                    setPadding(ui.dp(10), ui.dp(gap), ui.dp(14), ui.dp(gap)); minimumHeight = ui.dp(isz + 8 + gap * 2)
                 }
             }
             val on = sel.contains(it.path)
