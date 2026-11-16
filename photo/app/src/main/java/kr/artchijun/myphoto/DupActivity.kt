@@ -35,6 +35,13 @@ class DupActivity : Activity() {
     private lateinit var go: android.widget.Button
     private lateinit var summary: TextView
     private val ns = Photos.TEAM
+    private var showing = false   // 결과 화면인가 (뒤로 가기 → 처음 화면)
+
+    companion object {
+        // 마지막으로 찾은 결과 — 화면을 닫았다 열어도 다시 찾지 않고 볼 수 있게 (앱이 살아 있는 동안)
+        var lastGroups: List<Dups.Group>? = null
+        var lastFoundAt = 0L
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,24 +60,30 @@ class DupActivity : Activity() {
         intro()
     }
     override fun onDestroy() { super.onDestroy(); stop = true; bg.shutdownNow() }
+    @Deprecated("") override fun onBackPressed() { if (showing) intro() else super.onBackPressed() }
 
     private fun bottomBar(): View = (window.decorView as ViewGroup).findViewWithTag("bottom")
 
     private fun intro() {
+        showing = false
         bottomBar().visibility = View.GONE
         val small = CheckBox(this).apply { text = "작게 줄인 사본도 찾기 (찍은 시각이 같고 해상도만 작은 것)"; setTextColor(ui.text); isChecked = pf.bool("dup_small", true)
             setOnCheckedChangeListener { _, b -> pf.putBool("dup_small", b) } }
         val rules = Dups.rules(this).filter { it.on }.mapIndexed { i, r -> "${i + 1}. " + Dups.ruleNames[r.key] + (if (r.key == "folder") " (" + Dups.preferred(this).joinToString(" > ").ifEmpty { "아직 안 정함" } + ")" else "") }
         val col = ui.col(
             ui.label("시놀로지 공유 공간 전체에서 중복을 찾습니다", 16f, ui.text, bold = true),
-            ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 앞뒤 내용까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
+            ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 내용(앞·가운데·뒤 일부)까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
             small.apply { layoutParams = ui.lp(top = 14) },
             ui.label("남길 것 고르는 규칙 (위에서부터)", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 18) },
             ui.label(rules.joinToString("\n"), 13.5f, ui.text).apply { layoutParams = ui.lp(top = 6) },
             ui.button("규칙 바꾸기", primary = false) { editRules() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 10) },
             ui.button("중복 찾기") { scan() }.apply { layoutParams = ui.lp(h = ui.dp(50), top = 20) },
-            ui.label("사진이 많으면 몇 분 걸립니다 (목록 읽기 → 후보만 내용 비교)", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 6); gravity = Gravity.CENTER },
+            ui.label("처음에는 사진이 많으면 10분 넘게 걸립니다. 비교한 것은 기억해 두므로 다음부터는 새로 들어온 것만 비교합니다.", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 6); gravity = Gravity.CENTER },
         ).apply { setPadding(ui.dp(18), ui.dp(18), ui.dp(18), ui.dp(24)) }
+        lastGroups?.takeIf { it.isNotEmpty() }?.let { l ->
+            val t = java.text.SimpleDateFormat("H:mm", java.util.Locale.KOREA).format(java.util.Date(lastFoundAt))
+            col.addView(ui.button("지난 결과 다시 보기 (${l.size}묶음 · $t 에 찾음)", primary = false) { groups = l; results() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 12) }, col.childCount)
+        }
         body.removeAllViews(); body.addView(ScrollView(this).apply { addView(col) })
     }
 
@@ -83,22 +96,26 @@ class DupActivity : Activity() {
             .apply { setPadding(ui.dp(24), ui.dp(40), ui.dp(24), 0) }
         body.removeAllViews(); body.addView(col)
         var last = 0L
-        var stName = ""; var stAt = 0L; var stDone = 0
+        var stName = ""; var stAt = 0L
+        val win = ArrayDeque<Pair<Long, Int>>()   // 최근 30초의 (시각, 한 개수) — 기억해 둔 것을 순식간에 넘긴 부분이 어림을 흐리지 않게
         bg.execute {
             val r = try { Result.success(Dups.scan(this, pf.bool("dup_small", true), { stop }) { p ->
-                val now = System.currentTimeMillis()
-                if (p.stage != stName) { stName = p.stage; stAt = now; stDone = p.done }
-                if (now - last < 250 && p.done < p.total) return@scan; last = now
-                // 남은 시간: 이 단계에서 지금까지의 빠르기로 어림 (10초 지나서부터)
-                val el = now - stAt; val dn = p.done - stDone
-                val eta = if (el > 10_000 && dn > 0 && p.total > p.done) ((p.total - p.done).toLong() * el / dn / 1000) else -1L
-                val etaText = when { eta < 0 -> ""; eta < 60 -> "\n남은 시간 1분 안쪽"; else -> "\n남은 시간 약 ${(eta + 59) / 60}분" }
-                runOnUiThread { stage.text = "${p.stage}  ${p.done} / ${p.total}$etaText"; bar.progress = if (p.total > 0) (p.done * 1000L / p.total).toInt() else 0 }
+                synchronized(win) {   // 여러 비교 스레드가 함께 부름
+                    val now = System.currentTimeMillis()
+                    if (p.stage != stName) { stName = p.stage; stAt = now; win.clear() }
+                    if (now - last < 250 && p.done < p.total) return@scan; last = now
+                    // 남은 시간: 최근 30초의 빠르기로 어림 (단계 시작 10초 뒤부터)
+                    win.addLast(now to p.done); while (win.size > 2 && now - win.first().first > 30_000) win.removeFirst()
+                    val el = now - win.first().first; val dn = p.done - win.first().second
+                    val eta = if (now - stAt > 10_000 && el > 5_000 && dn > 0 && p.total > p.done) ((p.total - p.done).toLong() * el / dn / 1000) else -1L
+                    val etaText = when { eta < 0 -> ""; eta < 60 -> "\n남은 시간 1분 안쪽"; else -> "\n남은 시간 약 ${(eta + 59) / 60}분" }
+                    runOnUiThread { stage.text = "${p.stage}  ${p.done} / ${p.total}$etaText"; bar.progress = if (p.total > 0) (p.done * 1000L / p.total).toInt() else 0 }
+                }
             }) } catch (e: Exception) { Result.failure(e) }
             runOnUiThread {
                 if (isFinishing) return@runOnUiThread
                 r.onFailure { e -> Toast.makeText(this, "찾지 못했습니다: ${e.message}", Toast.LENGTH_LONG).show(); intro() }
-                r.onSuccess { g -> if (stop) { intro(); return@onSuccess }; groups = g; results() }
+                r.onSuccess { g -> if (stop) { intro(); return@onSuccess }; groups = g; lastGroups = g; lastFoundAt = System.currentTimeMillis(); results() }
             }
         }
     }
@@ -106,6 +123,7 @@ class DupActivity : Activity() {
     // ---------- 결과 ----------
     private val list by lazy { ListView(this).apply { divider = null; setBackgroundColor(ui.bg) } }
     private fun results() {
+        showing = true; lastGroups = groups
         body.removeAllViews()
         if (groups.isEmpty()) { body.addView(ui.col(ui.label("중복을 찾지 못했습니다", 16f, ui.text), ui.button("처음으로", primary = false) { intro() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 16) }).apply { setPadding(ui.dp(24), ui.dp(40), ui.dp(24), 0) }); return }
         body.addView(list)

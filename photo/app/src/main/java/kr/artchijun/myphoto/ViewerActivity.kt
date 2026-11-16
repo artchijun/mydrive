@@ -137,7 +137,7 @@ class ViewerActivity : Activity() {
                 if (my != seq) return@runOnUiThread
                 spin.visibility = View.GONE
                 if (b != null) zv.set(BitmapDrawable(resources, b), b.width, b.height, true)
-                else if (zv.drawable == null) Toast.makeText(this, "사진을 불러오지 못했습니다", Toast.LENGTH_SHORT).show()
+                else loadOriginal(it, my, failToast = true)   // 시놀로지가 아직 썸네일을 못 만든 사진: 원본으로 보여 줌
             }
             // 이웃 사진 미리 받기
             for (k in intArrayOf(index + 1, index - 1)) items.getOrNull(k)?.takeIf { !it.video }?.let { n ->
@@ -147,8 +147,8 @@ class ViewerActivity : Activity() {
     }
 
     /** 크게 확대했을 때: 원본을 받아 더 선명하게 (한 번만) */
-    private fun loadOriginal(it: Item, my: Int) {
-        if (it.size > 60L * 1024 * 1024) return
+    private fun loadOriginal(it: Item, my: Int, failToast: Boolean = false) {
+        if (it.size > 60L * 1024 * 1024) { if (failToast) Toast.makeText(this, "사진을 불러오지 못했습니다", Toast.LENGTH_SHORT).show(); return }
         spin.visibility = View.VISIBLE
         bg.execute {
             val f = try { fetchOriginal(it) } catch (e: Exception) { null }
@@ -158,6 +158,7 @@ class ViewerActivity : Activity() {
                 spin.visibility = View.GONE
                 val zv = stage.getChildAt(0) as? ZoomView ?: return@runOnUiThread
                 if (b != null) zv.set(BitmapDrawable(resources, b), b.width, b.height, false)
+                else if (failToast) Toast.makeText(this, "사진을 불러오지 못했습니다", Toast.LENGTH_SHORT).show()
             }
         }
     }

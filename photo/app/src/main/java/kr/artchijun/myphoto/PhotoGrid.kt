@@ -202,7 +202,8 @@ class PhotoGrid(
     private fun bind(c: FrameLayout, it: Item, idx: Int) {
         val iv = c.getChildAt(0) as ImageView
         iv.scaleType = ImageView.ScaleType.CENTER_CROP
-        Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } }   // 시놀로지가 아직 썸네일을 못 만든 것
+        // 시놀로지가 아직 썸네일을 못 만든 것: 작은 사진은 원본을 줄여 보여 주고, 그래도 안 되면 그림 표시
+        Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) Thumbs.loadFromOriginal(iv, ns, it) { o -> if (o == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } } }
         c.getChildAt(1).visibility = if (it.video) View.VISIBLE else View.GONE
         val on = it.id in selected
         c.getChildAt(2).apply { visibility = if (on) View.VISIBLE else View.GONE; setBackgroundColor(0x5560CDFF) }

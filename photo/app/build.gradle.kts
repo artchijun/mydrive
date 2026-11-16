@@ -35,6 +35,8 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
             signingConfigs.findByName("release")?.let { signingConfig = it }
+            // 시험용: ./gradlew assembleRelease -PshrinkTest — 출시판 그대로를 디버그 열쇠로 서명 (기기에 깔린 디버그판 위에 덮어 깔아 로그인을 지우지 않고 확인)
+            if (project.hasProperty("shrinkTest")) signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

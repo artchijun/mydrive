@@ -58,3 +58,15 @@ go build -trimpath -ldflags '-s -w' -o build\mydrived .
 $env:MYDRIVE_TOKEN = '<동기화 토큰>'
 python client\test_cloud.py
 ```
+
+## 휴대폰 사진 앱 Myphoto (`photo/`)
+
+Synology Photos 휴대폰 앱을 대신하는 Android 앱. 서버는 Synology Photos 그대로 씀 (공유 공간 `SYNO.FotoTeam.*`).
+
+- 사진(일·월·년 묶음)·폴더·인물·장소 보기, 뷰어(정보·즐겨찾기·저장·공유·지우기)
+- 자동 백업: 고른 폴더를 NAS 폴더로 (원본 그대로, 위치 정보 유지). 이미 올라간 것은 이름·크기로 알아보고 건너뜀
+- 공간 확보: 서버에 있는 것을 다시 확인한 뒤 휴대폰에서만 지움 (모두 / 기간·크기·폴더로 고르기, 미리 보기)
+- 중복 정리(서버): 크기·찍은 시각이 같고 내용 일부까지 같은 것 + 줄인 사본. 남길 것은 규칙 순서(선호 폴더·해상도·크기·이름·날짜)로 고름
+- 접속: 집(192.168.0.6:5000)이 닿으면 바로, 아니면 Mydrive 서버(`/webapi` 중계, Cloudflare 터널). 밖에서 90MB 넘는 파일은 32MB 조각으로 나눠 올림
+- 빌드: `cd photo; ./gradlew assembleRelease` (서명 열쇠 `photo/keystore.properties` 는 저장소에 없음). 기기 로그인을 지우지 않고 출시판을 시험하려면 `-PshrinkTest`(디버그 열쇠로 서명)
+- 새 판: 이 저장소의 릴리스 중 `photo-v<판>` (앱 설정 → 새 판 확인)

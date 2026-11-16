@@ -7,7 +7,7 @@ import java.security.MessageDigest
 
 /**
  * 서버(공유 공간)의 중복 사진 찾기 — 지우는 것은 화면(DupActivity)에서 사람이 확인한 뒤.
- *   1) 정확한 중복: 크기와 찍은 시각이 같고, 파일 앞뒤 64KB 내용까지 같은 것 (내용 비교는 후보만 조금 받아서)
+ *   1) 정확한 중복: 크기와 찍은 시각이 같고, 파일 앞부분(큰 파일은 가운데·뒷부분도) 64KB 내용까지 같은 것 (내용 비교는 후보만 조금 받아서)
  *   2) 작게 줄인 사본: 찍은 시각이 같고 가로세로 비율이 같은데 해상도가 다른 것 (카톡 등으로 줄어든 사본)
  *   남길 것 고르기: 사람이 순서를 정한 규칙을 차례로 적용 (선호 폴더 · 해상도 · 파일 크기 · 이름 · 날짜)
  */
@@ -135,14 +135,14 @@ object Dups {
         return groups.sortedByDescending { g -> g.drop.sumOf { it.it.size } }
     }
 
-    /** 파일 앞 64KB + 뒤 64KB 의 해시 (원본 받기를 Range 로 조금만) */
+    /** 파일 앞 64KB (8MB 넘으면 가운데·뒤 64KB 도) 의 해시 (원본 받기를 Range 로 조금만) */
     private fun sample(syno: Syno, ns: String, it: Item): String {
         val md = MessageDigest.getInstance("SHA-256")
         val k = 64L * 1024
         val ranges = when {
             it.size <= k -> listOf(0L to it.size - 1)
             it.size < 8L * 1024 * 1024 -> listOf(0L to k - 1)   // 사진: 앞 64KB (EXIF·그림 앞부분) — 크기·찍은 시각까지 같으므로 충분
-            else -> listOf(0L to k - 1, it.size - k to it.size - 1)   // 큰 파일(동영상)은 뒷부분도
+            else -> { val m = it.size / 2 - k / 2; listOf(0L to k - 1, m to m + k - 1, it.size - k to it.size - 1) }   // 큰 파일(동영상)은 가운데·뒷부분도
         }
         for ((a, b) in ranges) {
             val c = URL(syno.originalUrl(ns, it)).openConnection() as HttpURLConnection
@@ -160,9 +160,9 @@ object Dups {
 
 /** 내용 비교 결과 기억 (dups.db) — 다시 찾을 때 이미 비교한 사진은 서버에서 받지 않음 */
 object SampleCache {
-    private class Db(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "dups.db", null, 1) {
+    private class Db(ctx: Context) : android.database.sqlite.SQLiteOpenHelper(ctx, "dups.db", null, 2) {
         override fun onCreate(d: android.database.sqlite.SQLiteDatabase) { d.execSQL("CREATE TABLE s(id INTEGER PRIMARY KEY, size INTEGER, time INTEGER, hash TEXT)") }
-        override fun onUpgrade(d: android.database.sqlite.SQLiteDatabase, a: Int, b: Int) {}
+        override fun onUpgrade(d: android.database.sqlite.SQLiteDatabase, a: Int, b: Int) { d.execSQL("DELETE FROM s") }   // 비교 방식이 바뀌면 다시 받음 (2: 큰 파일은 가운데도)
     }
     @Volatile private var db: Db? = null
     private fun db(ctx: Context) = (db ?: synchronized(this) { db ?: Db(ctx.applicationContext).also { db = it } }).writableDatabase

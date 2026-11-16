@@ -63,6 +63,34 @@ object Thumbs {
         return b
     }
 
+    /** 시놀로지가 아직 썸네일을 못 만든 작은 사진(8MB 이하): 원본을 받아 줄여서 칸에 넣음 (만든 것은 캐시에 둠) */
+    fun loadFromOriginal(iv: ImageView, ns: String, it: Item, onDone: (Bitmap?) -> Unit) {
+        val key = "$ns|orig|${it.cacheKey}|sm"
+        iv.tag = key
+        mem.get(key)?.let { b -> iv.setImageBitmap(b); onDone(b); return }
+        if (it.video || it.size <= 0 || it.size > 8L * 1024 * 1024) { onDone(null); return }
+        val ctx = iv.context.applicationContext
+        pool.execute {
+            if (iv.tag != key) return@execute
+            val bmp = try {
+                val f = File(disk(ctx), "orig_${it.cacheKey}_sm.jpg".replace('/', '_'))
+                if (f.length() > 0) BitmapFactory.decodeFile(f.path)
+                else {
+                    val syno = Syno(ctx)
+                    val bytes = syno.open({ syno.originalUrl(ns, it) }, 60_000).inputStream.use { inp -> inp.readBytes() }
+                    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+                    var smp = 1; while (minOf(o.outWidth, o.outHeight) / (smp * 2) >= 320) smp *= 2
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = smp })?.also { b ->
+                        f.outputStream().use { out -> b.compress(Bitmap.CompressFormat.JPEG, 85, out) }; trim(f.length())
+                    }
+                }
+            } catch (e: Exception) { null }
+            if (bmp != null) mem.put(key, bmp)
+            main.post { if (iv.tag == key) { if (bmp != null) iv.setImageBitmap(bmp); onDone(bmp) } }
+        }
+    }
+
     /** 캐시가 정한 크기를 넘으면 오래 안 본 것부터 지움 */
     @Synchronized private fun trim(added: Long) {
         val d = dir ?: return
