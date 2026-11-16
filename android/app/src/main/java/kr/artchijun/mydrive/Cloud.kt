@@ -1,9 +1,15 @@
 package kr.artchijun.mydrive
 
 // 클라우드 저장소 (Google Drive · OneDrive): 휴대폰에서 각 회사 서버로 바로 주고받음 (개발자 서버 없음).
-//   로그인: 휴대폰 브라우저로 동의 화면을 열고, 앱이 휴대폰 안(127.0.0.1)에서 잠깐 받는 주소로 결과를 받음 (PKCE).
+//   계정을 여러 개 붙일 수 있음 (구글 계정 둘 등). 계정마다 id: "gd:이메일", "od:이메일"
+//   구글 로그인 (파일관리자+ 같은 앱과 같은 방식): 휴대폰에 로그인된 구글 계정을 고르고 → 안드로이드 계정 관리자가
+//     허용 화면을 띄우고 토큰을 줌 (구글 클라우드 프로젝트에 앱 패키지·서명이 등록돼 있음). 브라우저를 거치지 않음.
+//   예비 방식 (원드라이브, 또는 계정 관리자로 안 될 때): 브라우저 동의 화면 → 휴대폰 안(127.0.0.1)으로 결과 받기 (PKCE).
+//     기다리는 동안 앱이 멈추지 않게 알림(포그라운드 서비스)을 띄워 둠.
 //   토큰은 앱 설정(휴대폰 안)에만 둠. 경로는 이름으로 (폴더/파일), 서버의 id 는 앱이 기억해 둠.
 
+import android.accounts.Account
+import android.accounts.AccountManager
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -24,15 +30,20 @@ import java.util.Locale
 import java.util.TimeZone
 import kotlin.concurrent.thread
 
-abstract class CloudDrive(protected val ctx: Context, val id: String, val title: String, val glyph: String) {
+abstract class CloudDrive(protected val ctx: Context, val id: String, val kind: String, val title: String) {
     protected val pf = Prefs(ctx)
     abstract val configured: Boolean                       // 앱에 등록 값(client id)이 들어 있나
-    val connected get() = state().optString("refresh").isNotEmpty()
-    val account get() = state().optString("email")
+    /** 안드로이드 계정 관리자로 토큰을 받는 계정 (구글) — 비면 브라우저 방식 */
+    open val deviceAccount: String get() = state().optString("acct")
+    val connected get() = state().optString("refresh").isNotEmpty() || deviceAccount.isNotEmpty()
+    val account get() = state().optString("email").ifEmpty { deviceAccount }
 
     protected fun state(): JSONObject = try { JSONObject(pf.str("cloud_$id", "{}")) } catch (e: Exception) { JSONObject() }
     protected fun save(j: JSONObject) = pf.putStr("cloud_$id", j.toString())
-    fun disconnect() { pf.putStr("cloud_$id", "{}"); ids.clear() }
+    fun disconnect() {
+        if (deviceAccount.isNotEmpty()) state().optString("access").takeIf { it.isNotEmpty() }?.let { try { AccountManager.get(ctx).invalidateAuthToken("com.google", it) } catch (e: Exception) { } }
+        pf.putStr("cloud_$id", "{}"); ids.clear(); forgetAccount(ctx, id)
+    }
 
     // ---------- 로그인 ----------
     protected abstract fun authUrl(redirect: String, challenge: String, st: String): String
@@ -48,7 +59,8 @@ abstract class CloudDrive(protected val ctx: Context, val id: String, val title:
         val st = rand(16)
         val ss = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1")).apply { soTimeout = 5 * 60_000 }
         val redirect = "http://127.0.0.1:${ss.localPort}"
-        thread {
+        // 브라우저에 가 있는 동안 안드로이드가 이 앱을 얼리지 않게: 알림을 띄운 채(포그라운드 서비스) 기다림
+        Transfers.add(a, Transfers.Job(Transfers.Kind.LOGIN, "", "$title 로그인") { _ ->
             val err = try {
                 var code: String? = null; var bad: String? = null
                 while (code == null && bad == null) {
@@ -72,6 +84,7 @@ abstract class CloudDrive(protected val ctx: Context, val id: String, val title:
                     if (j.optString("refresh").isEmpty()) "새로 고침 토큰을 받지 못했습니다" else {
                         save(j); ids.clear()
                         try { save(state().put("email", fetchEmail())) } catch (e: Exception) { }
+                        rememberAccount(ctx, id, kind)
                         null
                     }
                 }
@@ -82,12 +95,13 @@ abstract class CloudDrive(protected val ctx: Context, val id: String, val title:
                 if (!a.isFinishing) a.startActivity(Intent(a, a.javaClass).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or Intent.FLAG_ACTIVITY_SINGLE_TOP))
                 done(err)
             }
-        }
+            null
+        })
         try { a.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(authUrl(redirect, challenge, st))).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
         catch (e: Exception) { ss.close(); done("브라우저를 열지 못했습니다") }
     }
 
-    @Synchronized protected fun token(): String {
+    @Synchronized protected open fun token(): String {
         val s = state()
         if (s.optString("access").isNotEmpty() && s.optLong("exp") > System.currentTimeMillis()) return s.optString("access")
         val r = s.optString("refresh").ifEmpty { throw IOException("$title 에 연결되어 있지 않습니다 (설정 → 클라우드)") }
@@ -119,11 +133,14 @@ abstract class CloudDrive(protected val ctx: Context, val id: String, val title:
         c.disconnect()
         if (code !in 200..299) {
             val m = try { JSONObject(txt).let { j -> j.optJSONObject("error")?.optString("message")?.takeIf { it.isNotEmpty() } ?: j.optString("error_description").ifEmpty { j.optString("error") } } } catch (e: Exception) { "" }
-            if (code == 401) save(state().put("exp", 0))
+            if (code == 401) onUnauthorized()
             throw CloudException(code, "$title: " + m.ifEmpty { "HTTP $code" })
         }
         return if (txt.isBlank()) JSONObject() else JSONObject(txt)
     }
+    /** 토큰이 거절됨 → 다음 요청 때 새로 받게 */
+    protected open fun onUnauthorized() { save(state().put("exp", 0)) }
+
     protected fun form(url: String, vararg kv: Pair<String, String>): JSONObject =
         json(http("POST", url, kv.joinToString("&") { Api.enc(it.first) + "=" + Api.enc(it.second) }, "application/x-www-form-urlencoded", auth = false))
 
@@ -161,19 +178,69 @@ abstract class CloudDrive(protected val ctx: Context, val id: String, val title:
             SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.parse(s.take(19))?.time ?: 0
         } catch (e: Exception) { 0 }
 
-        private var all: List<CloudDrive>? = null
-        fun all(ctx: Context): List<CloudDrive> = all ?: listOf<CloudDrive>(GDrive(ctx.applicationContext), OneDrive(ctx.applicationContext)).also { all = it }
-        fun of(ctx: Context, id: String): CloudDrive = all(ctx).first { it.id == id }
+        /** 붙일 수 있는 종류: (kind, 이름) */
+        val kinds = listOf("gd" to "Google Drive", "od" to "OneDrive")
+
+        // 붙인 계정 목록: pref "cloudAccts" = [{"id","kind"}] (계정마다 상태는 "cloud_<id>")
+        private val cache = HashMap<String, CloudDrive>()
+        private fun ids(ctx: Context): List<Pair<String, String>> {
+            val p = Prefs(ctx)
+            val a = try { org.json.JSONArray(p.str("cloudAccts", "[]")) } catch (e: Exception) { org.json.JSONArray() }
+            val out = (0 until a.length()).map { a.getJSONObject(it).let { o -> o.optString("id") to o.optString("kind") } }.toMutableList()
+            // 0.6.0 에서 붙인 구글 드라이브 (id "gd", 브라우저 방식) 이어 쓰기
+            if (out.none { it.first == "gd" } && (try { JSONObject(p.str("cloud_gd", "{}")).optString("refresh") } catch (e: Exception) { "" }).isNotEmpty()) out.add(0, "gd" to "gd")
+            return out
+        }
+        fun rememberAccount(ctx: Context, id: String, kind: String) {
+            val p = Prefs(ctx)
+            val l = ids(ctx).filter { it.first != id } + (id to kind)
+            p.putStr("cloudAccts", org.json.JSONArray(l.map { JSONObject().put("id", it.first).put("kind", it.second) }).toString())
+        }
+        fun forgetAccount(ctx: Context, id: String) {
+            val p = Prefs(ctx)
+            p.putStr("cloudAccts", org.json.JSONArray(ids(ctx).filter { it.first != id }.map { JSONObject().put("id", it.first).put("kind", it.second) }).toString())
+            cache.remove(id)
+        }
+        fun make(ctx: Context, id: String, kind: String): CloudDrive = cache.getOrPut(id) {
+            if (kind == "gd") GDrive(ctx.applicationContext, id) else OneDrive(ctx.applicationContext, id)
+        }
+        /** 붙인 계정들 (연결이 살아 있는 것만) */
+        fun all(ctx: Context): List<CloudDrive> = ids(ctx).map { (id, k) -> make(ctx, id, k) }.filter { it.connected }
+        fun of(ctx: Context, id: String): CloudDrive = make(ctx, id, ids(ctx).firstOrNull { it.first == id }?.second ?: id.substringBefore(':'))
     }
 }
 
 class CloudException(val status: Int, message: String) : IOException(message)
 
 // ================= Google Drive (API v3) =================
-class GDrive(ctx: Context) : CloudDrive(ctx, "gd", "Google Drive", "gdrive") {
+class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Google Drive") {
     private val cid = BuildConfig.GD_CLIENT_ID
     private val secret = BuildConfig.GD_CLIENT_SECRET
-    override val configured get() = cid.isNotEmpty()
+    override val configured get() = true
+    companion object {
+        const val SCOPE = "oauth2:https://www.googleapis.com/auth/drive"
+        /** 휴대폰의 구글 계정으로 붙임 (CloudConnectActivity 가 허용까지 받은 뒤) */
+        fun addDeviceAccount(ctx: Context, email: String): CloudDrive {
+            val id = "gd:$email"
+            Prefs(ctx).putStr("cloud_$id", JSONObject().put("acct", email).put("email", email).toString())
+            rememberAccount(ctx, id, "gd")
+            return make(ctx, id, "gd")
+        }
+    }
+    // 휴대폰 구글 계정: 안드로이드 계정 관리자가 토큰을 줌 (만료되면 알아서 새로)
+    override fun token(): String {
+        val acct = deviceAccount
+        if (acct.isEmpty()) return super.token()
+        val t = try { AccountManager.get(ctx).blockingGetAuthToken(Account(acct, "com.google"), SCOPE, true) }
+            catch (e: Exception) { throw IOException("$title ($acct): 토큰을 받지 못했습니다 — ${e.message ?: e.javaClass.simpleName}") }
+            ?: throw IOException("$title ($acct): 허용이 필요합니다 — 홈의 클라우드에서 다시 연결해 주세요")
+        synchronized(this) { save(state().put("access", t)) }
+        return t
+    }
+    override fun onUnauthorized() {
+        if (deviceAccount.isEmpty()) { super.onUnauthorized(); return }
+        state().optString("access").takeIf { it.isNotEmpty() }?.let { AccountManager.get(ctx).invalidateAuthToken("com.google", it) }
+    }
     private val api = "https://www.googleapis.com/drive/v3"
     private val FOLDER = "application/vnd.google-apps.folder"
     /** 구글 문서류는 내려받을 때 바꿔서: 확장자 → 형식 */
@@ -212,7 +279,8 @@ class GDrive(ctx: Context) : CloudDrive(ctx, "gd", "Google Drive", "gdrive") {
         return ids[path]!!
     }
 
-    override fun list(path: String): List<Item> {
+    override fun list(path: String): List<Item> = try { list1(path) } catch (e: CloudException) { if (e.status == 401) list1(path) else throw e }
+    private fun list1(path: String): List<Item> {
         val pid = idOf(path)
         val out = ArrayList<Item>(); var page = ""
         do {
@@ -289,7 +357,7 @@ class GDrive(ctx: Context) : CloudDrive(ctx, "gd", "Google Drive", "gdrive") {
 }
 
 // ================= OneDrive (Microsoft Graph) =================
-class OneDrive(ctx: Context) : CloudDrive(ctx, "od", "OneDrive", "onedrive") {
+class OneDrive(ctx: Context, id: String = "od") : CloudDrive(ctx, id, "od", "OneDrive") {
     private val cid = BuildConfig.OD_CLIENT_ID
     override val configured get() = cid.isNotEmpty()
     private val g = "https://graph.microsoft.com/v1.0/me/drive"

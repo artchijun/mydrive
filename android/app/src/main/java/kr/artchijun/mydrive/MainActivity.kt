@@ -151,6 +151,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (pf.int("stamp", 0) != stamp) { saveTabs(); recreate(); return }   // 설정을 바꾸고 돌아옴
         Transfers.listener = this; onTransfers()
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
+        if (pf.int("cloudStamp", 0) != cloudStamp) { cloudStamp = pf.int("cloudStamp", 0); loadCloud(); refreshHome() }
         if (pf.bool("openHomeEdit", false)) { pf.putBool("openHomeEdit", false); if (tab.loc.kind != "home") navigate(Loc.HOME); editHome() }
         if (System.currentTimeMillis() - pf.lastUpdateCheck > 6 * 3600_000L) checkUpdate(false)
     }
@@ -527,10 +528,12 @@ class MainActivity : Activity(), Transfers.Listener {
                 nas += Row(1, "폴더 추가", "NAS 다른 폴더", icon = g("plus", ui.sub), act = { WebPick.start(this, ui, api) { loadNas() } })
             }
         }
-        val cloud = CloudDrive.all(this).map { c ->
-            if (c.connected) Row(1, c.title, cloudSub[c.id] ?: c.account.substringBefore('@'), icon = cloudIcon(c.id), go = Loc("cloud", c.id))
-            else Row(1, c.title, if (c.configured) "눌러서 연결" else "준비 중", icon = cloudIcon(c.id, false), act = { connectCloud(c) })
-        }
+        // 붙인 계정마다 한 칸 (같은 종류가 여럿이면 이메일로 구별) + [클라우드 추가]
+        val accts = CloudDrive.all(this)
+        val cloud = accts.map { c ->
+            val many = accts.count { it.kind == c.kind } > 1
+            Row(1, if (many) c.account.substringBefore('@') else c.title, cloudSub[c.id] ?: c.account.substringBefore('@'), icon = cloudIcon(c.id), go = Loc("cloud", c.id))
+        } + Row(1, "클라우드 추가", "구글 드라이브 · 원드라이브", icon = g("plus", ui.sub), act = { addCloud() })
         val tr = trashInfo
         return listOf(Triple("phone", "휴대폰", phone), Triple("nas", "NAS", nas), Triple("cloud", "클라우드", cloud),
             Triple("fav", "즐겨찾기", favList().map { l -> Row(1, tabTitle(l), placeText(l).substringBeforeLast('/').substringAfterLast('/'), icon = tabIcon(l), go = l) }),
@@ -563,12 +566,25 @@ class MainActivity : Activity(), Transfers.Listener {
 
     // ---------- 클라우드 ----------
     private val cloudSub = HashMap<String, String>()
-    private fun cloudIcon(id: String, on: Boolean = true) = Glyph("cloud", if (!on) ui.sub else if (id == "gd") 0xFF34A853.toInt() else 0xFF2F8FE8.toInt())
+    private var cloudStamp = -1
+    private fun cloudIcon(id: String, on: Boolean = true) = Glyph("cloud", if (!on) ui.sub else if (id.startsWith("gd")) 0xFF34A853.toInt() else 0xFF2F8FE8.toInt())
+    /** 클라우드 추가: 구글 드라이브(휴대폰 계정) · 구글 드라이브(브라우저) · 원드라이브 */
+    private fun addCloud() {
+        val od = CloudDrive.make(this, "od", "od")
+        val names = arrayOf("Google Drive — 휴대폰의 구글 계정으로 (권장)", "Google Drive — 브라우저로 로그인", "OneDrive" + (if (od.configured) "" else " (준비 중)"))
+        AlertDialog.Builder(this).setTitle("클라우드 추가").setItems(names) { _, w ->
+            when (w) {
+                0 -> CloudConnectActivity.start(this)
+                1 -> connectCloud(CloudDrive.make(this, "gd", "gd"))
+                2 -> connectCloud(od)
+            }
+        }.show()
+    }
     private fun connectCloud(c: CloudDrive) {
         if (!c.configured) { toast("${c.title} 연결은 다음 판에서 열립니다 (앱 등록 중)"); return }
         AlertDialog.Builder(this).setTitle("${c.title} 연결")
             .setMessage("브라우저에서 계정을 고르고 허용을 누르세요. 끝나면 이 앱으로 돌아옵니다.\n\n파일은 휴대폰과 ${c.title} 사이에서만 오가고, 로그인 정보는 이 휴대폰에만 둡니다." +
-                (if (c.id == "gd") "\n\n‘확인되지 않은 앱’ 경고가 나오면 [고급] → [Mydrive(으)로 이동] 을 누르세요 (개인용 앱이라 구글 심사를 받지 않았습니다)." else ""))
+                (if (c.kind == "gd") "\n\n‘확인되지 않은 앱’ 경고가 나오면 [고급] → [Mydrive(으)로 이동] 을 누르세요 (개인용 앱이라 구글 심사를 받지 않았습니다)." else ""))
             .setPositiveButton("연결") { _, _ -> c.connect(this) { err -> if (err != null) toast(err) else { toast("${c.title} 연결됨 · ${c.account}"); loadCloud(); refreshHome() } } }
             .setNegativeButton("취소", null).show()
     }
