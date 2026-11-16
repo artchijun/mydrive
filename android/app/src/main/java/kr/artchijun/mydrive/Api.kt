@@ -111,7 +111,7 @@ class Api(servers: List<String>, var token: String) {
     fun mkdir(root: String, path: String): Entry = retry { entry(JSONObject(readBody(open("POST", "/v1/mkdir", mapOf("root" to root, "path" to path))))) }
 
     /** 이름 바꾸기·옮기기 (같은 연결 폴더 안). 받는 쪽에 같은 이름이 있으면 409 */
-    fun move(root: String, from: String, to: String) { retry { readBody(open("POST", "/v1/move", mapOf("root" to root, "from" to from, "to" to to, "if" to "none"))) } }
+    fun move(root: String, from: String, to: String) { retry { readBody(open("POST", "/v1/move", mapOf("root" to root, "from" to from, "to" to to))) } }
 
     /** 지우기 → NAS 휴지통(#recycle)으로 */
     fun delete(root: String, path: String) { retry { readBody(open("DELETE", "/v1/file", mapOf("root" to root, "path" to path))) } }
@@ -122,6 +122,22 @@ class Api(servers: List<String>, var token: String) {
         val a = j.getJSONArray("entries")
         (0 until a.length()).map { entry(a.getJSONObject(it)) } to j.optBoolean("more")
     }
+
+    /** 웹 폴더 (서버 0.6.12+): 동기화하지 않는 NAS 폴더. 요청할 때 root 는 "~이름" */
+    fun webs(): List<RootInfo> = retry { parseRoots(readBody(open("GET", "/v1/webs", emptyMap()))) }
+    fun addWeb(name: String, dir: String): List<RootInfo> = retry { parseRoots(post("/v1/webs", JSONObject().put("add", JSONObject().put("name", name).put("dir", dir)).toString())) }
+    fun removeWeb(name: String): List<RootInfo> = retry { parseRoots(post("/v1/webs", JSONObject().put("remove", name).toString())) }
+    /** NAS 공유 폴더 둘러보기 → (지금 경로, 하위 폴더 이름들) */
+    fun nasDirs(path: String): Pair<String, List<String>> = retry {
+        val j = JSONObject(readBody(open("GET", "/v1/nasdirs", mapOf("path" to path))))
+        val a = j.getJSONArray("dirs"); j.optString("path", path) to (0 until a.length()).map { a.getString(it) }
+    }
+    private fun post(ep: String, body: String): String {
+        val c = open("POST", ep, emptyMap()); c.doOutput = true; c.setRequestProperty("Content-Type", "application/json")
+        c.outputStream.use { it.write(body.toByteArray()) }
+        return readBody(c)
+    }
+    private fun parseRoots(txt: String): List<RootInfo> { val a = JSONArray(txt); return (0 until a.length()).map { i -> val o = a.getJSONObject(i); RootInfo(o.getString("name"), o.optInt("items"), o.optString("share"), o.optLong("total"), o.optLong("free")) } }
 
     /** 파일 하나 정보 (없으면 null) — 폴더 안 목록에서 찾음 */
     fun stat(root: String, path: String): Entry? {

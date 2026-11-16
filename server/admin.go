@@ -35,6 +35,7 @@ type RootCfg struct {
 
 type ServerCfg struct {
 	Roots      []RootCfg     `json:"roots"`
+	Webs       []RootCfg     `json:"webs,omitempty"` // 웹 폴더 (동기화 안 함)
 	Versions   VerPolicy     `json:"versions"`
 	SyncToken  string        `json:"syncToken"`
 	AdminToken string        `json:"adminToken"`

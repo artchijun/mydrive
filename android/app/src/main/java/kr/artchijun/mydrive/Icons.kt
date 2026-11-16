@@ -65,6 +65,14 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "eye" -> { path.reset(); path.moveTo(2.5f, 12f); path.quadTo(12f, 3f, 21.5f, 12f); path.quadTo(12f, 21f, 2.5f, 12f); cv.drawPath(path, p); cv.drawCircle(12f, 12f, 3f, p) }
             "openwith" -> { poly(14f, 4f, 20f, 4f, 20f, 10f); ln(20f, 4f, 11f, 13f); poly(17f, 14f, 17f, 20f, 4f, 20f, 4f, 7f, 10f, 7f) }
             "chart" -> { path.reset(); path.moveTo(11f, 13f); path.lineTo(11f, 5f); path.arcTo(RectF(3f, 5f, 19f, 21f), -90f, -270f); path.close(); cv.drawPath(path, p); path.reset(); path.moveTo(14f, 10f); path.lineTo(14f, 2.5f); path.arcTo(RectF(6.5f, 2.5f, 21.5f, 17.5f), -90f, 90f); path.close(); cv.drawPath(path, p) }
+            "image" -> { rr(3.5f, 5f, 20.5f, 19f, 2f); poly(3.5f, 16.5f, 9f, 11f, 13f, 15f, 15.5f, 12.5f, 20.5f, 17f); cv.drawCircle(15.5f, 8.8f, 1.6f, p) }
+            "music" -> { ln(9f, 17f, 9f, 5.5f); poly(9f, 5.5f, 19f, 3.5f, 19f, 15f); cv.drawCircle(6.6f, 17f, 2.4f, f); cv.drawCircle(16.6f, 15f, 2.4f, f) }
+            "film" -> { rr(4f, 3.5f, 20f, 20.5f, 1.5f); ln(8f, 3.5f, 8f, 20.5f); ln(16f, 3.5f, 16f, 20.5f); ln(8f, 12f, 16f, 12f); for (y in floatArrayOf(6.5f, 10f, 14f, 17.5f)) { ln(4.6f, y, 7.4f, y); ln(16.6f, y, 19.4f, y) } }
+            "doc" -> { ln(5f, 6f, 19f, 6f); ln(5f, 10f, 17f, 10f); ln(5f, 14f, 19f, 14f); ln(5f, 18f, 13f, 18f) }
+            "android" -> { cv.drawArc(RectF(6f, 6f, 18f, 17f), 180f, 180f, false, p); ln(6f, 11.5f, 18f, 11.5f); rr(6f, 13f, 18f, 20f, 1.5f); ln(8.5f, 6.8f, 7f, 4.5f); ln(15.5f, 6.8f, 17f, 4.5f); cv.drawCircle(9.6f, 9.3f, 0.9f, f); cv.drawCircle(14.4f, 9.3f, 0.9f, f) }
+            "globe" -> { cv.drawCircle(12f, 12f, 8.5f, p); cv.drawOval(RectF(8.2f, 3.5f, 15.8f, 20.5f), p); ln(3.5f, 12f, 20.5f, 12f); ln(5f, 7.5f, 19f, 7.5f); ln(5f, 16.5f, 19f, 16.5f) }
+            "range" -> { rr(3.5f, 3.5f, 9.5f, 9.5f, 1.5f); rr(14.5f, 14.5f, 20.5f, 20.5f, 1.5f); for (t in floatArrayOf(11.5f, 13.5f)) cv.drawCircle(t, t, 0.9f, f); ln(6.5f, 12.5f, 6.5f, 17.5f); ln(6.5f, 17.5f, 11.5f, 17.5f) }
+            "openas" -> { poly(14f, 4f, 20f, 4f, 20f, 10f); ln(20f, 4f, 11f, 13f); poly(17f, 14f, 17f, 20f, 4f, 20f, 4f, 7f, 10f, 7f); cv.drawCircle(8f, 16f, 1f, f) }
             "grid" -> { rr(4f, 4f, 10.5f, 10.5f, 1.5f); rr(13.5f, 4f, 20f, 10.5f, 1.5f); rr(4f, 13.5f, 10.5f, 20f, 1.5f); rr(13.5f, 13.5f, 20f, 20f, 1.5f) }
         }
         cv.restore()

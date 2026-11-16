@@ -42,6 +42,7 @@ import java.util.concurrent.Executors
  * 휴대폰 파일은 그대로, NAS 파일은 앱 안에 받아서 (동영상만 바로 흘려 받기)
  */
 class ViewerActivity : Activity() {
+    override fun attachBaseContext(base: android.content.Context) { super.attachBaseContext(Ui.wrap(base)) }
     companion object {
         const val IMG = "image"; const val VID = "video"; const val PDF = "pdf"; const val TXT = "text"
         private val textExt = setOf("txt", "md", "log", "csv", "json", "xml", "ini", "cfg", "conf", "yaml", "yml", "py", "kt", "java", "js", "ts", "c", "cpp", "h", "cs", "go", "sh", "bat", "ps1", "html", "css", "srt", "gh", "properties")

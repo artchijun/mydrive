@@ -10,6 +10,7 @@ import kotlin.concurrent.thread
 
 // 처음 연결: 서버 주소 + DSM 계정 → 이 휴대폰 전용 열쇠(토큰)를 받음. 비밀번호는 저장하지 않음
 class SetupActivity : Activity() {
+    override fun attachBaseContext(base: android.content.Context) { super.attachBaseContext(Ui.wrap(base)) }
     override fun onCreate(savedInstanceState: Bundle?) {
         val ui = Ui(this); if (!ui.dark) setTheme(R.style.AppTheme_Light)
         super.onCreate(savedInstanceState)

@@ -63,6 +63,9 @@ func saveVersion(rt *Root, rel, abs string) {
 
 // 폴더를 지울 때: 안의 파일마다 버전을 남김
 func saveVersionsUnder(rt *Root, rel, abs string, isDir bool) {
+	if rt.Web {
+		return
+	}
 	if !isDir {
 		saveVersion(rt, rel, abs)
 		return
@@ -91,6 +94,9 @@ func saveVersionsUnder(rt *Root, rel, abs string, isDir bool) {
 }
 
 func saveVersionNoPrune(rt *Root, rel, abs string) string {
+	if rt.Web {
+		return ""
+	}
 	fi, err := os.Lstat(abs)
 	if err != nil || !fi.Mode().IsRegular() {
 		return ""

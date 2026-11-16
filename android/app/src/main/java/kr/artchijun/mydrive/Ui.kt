@@ -20,6 +20,16 @@ import android.widget.TextView
 // 화면을 코드로 만드는 작은 도구 (XML·외부 부품 없이 가볍게). 색은 PC 의 Myplorer 테마와 같게
 //   어두운 화면: Windows 11 탐색기 회색 (목록 191919, 제목줄 202020, 탭·주소 2C2C2C, 선택 505050) + 하늘색 강조 60CDFF
 class Ui(val a: Activity) {
+    companion object {
+        /** 설정의 ‘화면 크기’: 글자·아이콘·여백을 함께 (화면 밀도를 바꿔서). 모든 화면의 attachBaseContext 에서 */
+        fun wrap(base: android.content.Context): android.content.Context {
+            val pct = base.getSharedPreferences("mydrive", 0).getInt("uiScale", 100)
+            if (pct == 100) return base
+            val c = Configuration(base.resources.configuration)
+            c.densityDpi = c.densityDpi * pct / 100
+            return base.createConfigurationContext(c)
+        }
+    }
     // 테마: 0 어두운 (Myplorer 기본) · 1 밝은 · 2 휴대폰 설정 따름
     val dark = when (a.getSharedPreferences("mydrive", 0).getInt("theme", 0)) {
         1 -> false

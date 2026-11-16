@@ -41,6 +41,7 @@ type Change struct {
 type Root struct {
 	Name string
 	Dir  string
+	Web  bool // 웹 폴더 (webfolders.go): 색인 없이 디스크를 바로 읽음
 
 	rescanMu sync.Mutex // 전체 비교를 한 번에 하나만 (주기 비교 · PC 요청)
 
@@ -338,6 +339,9 @@ func (r *Root) emitLocked(op string, e Entry) {
 
 // 한 경로의 현재 상태를 디스크에서 읽어 색인에 반영 (폴더면 그 아래 전체)
 func (r *Root) Apply(rel string) {
+	if r.Web {
+		return
+	}
 	if rel == "" || rel == "." || skipRel(rel) {
 		return
 	}
@@ -576,6 +580,9 @@ func (r *Root) Info() (string, int64, int) {
 
 // List: 폴더 하나의 바로 아래 항목 (휴대폰 앱처럼 전체 목록을 받지 않고 폴더씩 볼 때). ok=false 면 그런 폴더가 없음
 func (r *Root) List(dir string) ([]Entry, bool) {
+	if r.Web {
+		return r.webList(dir)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if dir != "" {
@@ -594,6 +601,9 @@ func (r *Root) List(dir string) ([]Entry, bool) {
 }
 
 func (r *Root) Get(rel string) (Entry, bool) {
+	if r.Web {
+		return r.webGet(rel)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	e, ok := r.idx[rel]
@@ -602,6 +612,9 @@ func (r *Root) Get(rel string) (Entry, bool) {
 
 // Search: 이름에 q 가 들어간 항목(대소문자 무시) — 휴대폰 탐색기의 검색. under 아래만, exts 가 있으면 그 확장자 파일만, 최대 limit 개
 func (r *Root) Search(under, q string, exts []string, limit int) ([]Entry, bool) {
+	if r.Web {
+		return r.webSearch(under, q, exts, limit)
+	}
 	q = strings.ToLower(q)
 	r.mu.Lock()
 	defer r.mu.Unlock()
