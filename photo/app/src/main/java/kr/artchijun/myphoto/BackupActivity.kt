@@ -101,7 +101,7 @@ class BackupActivity : Activity() {
         // 개수: 기다림 · 올림 · 이미 있음 · 실패 — 누르면 파일 목록
         countRow = ui.row().apply { layoutParams = ui.lp(top = 12) }
         val now = ui.button("지금 백업") { startNow() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f).apply { rightMargin = ui.dp(8) } }
-        val stop = ui.button("멈추기", primary = false) { BackupService.stopAsked = true; tick() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f) }
+        val stop = ui.button("멈추기", primary = false) { BackupService.stopAsked = true; Backup.requestStop(this); tick() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f) }
         val free = ui.button("공간 확보 — 백업된 사진을 휴대폰에서 지우기", primary = false) { startActivity(android.content.Intent(this, FreeUpActivity::class.java)) }.apply { layoutParams = ui.lp(h = ui.dp(46), top = 8) }
         body.addView(card(stateBig, stateSub, countRow, curBox, bar, nextBox, ui.row(now, stop).apply { layoutParams = ui.lp(top = 14) }, free,
             ui.button("파일별 백업 기록 보기", primary = false) { startActivity(android.content.Intent(this, BackupListActivity::class.java)) }.apply { layoutParams = ui.lp(h = ui.dp(46), top = 8) }))
@@ -114,8 +114,8 @@ class BackupActivity : Activity() {
             item("백업할 휴대폰 폴더", BucketPickActivity.describe(st.buckets).ifEmpty { "(고르지 않음)" }) { pickBuckets() },
             toggle("와이파이에서만", "모바일 데이터를 쓰지 않음", st.wifiOnly) { b -> st.wifiOnly = b; BackupSchedule.schedule(this) },
             toggle("충전 중에만", "배터리를 아낌", st.chargingOnly) { b -> st.chargingOnly = b; BackupSchedule.schedule(this) },
-            toggle("동영상도", "끄면 사진만 올림", st.videos) { b -> st.videos = b },
-            toggle("연/월 폴더로 나누기", "…/Camera/2026/11 처럼 찍은 달마다 폴더", st.byMonth) { b -> st.byMonth = b },
+            toggle("동영상도", "끄면 사진만 올림", st.videos) { b -> st.videos = b; rulesChanged() },
+            toggle("연/월 폴더로 나누기", "…/Camera/2026/11 처럼 찍은 달마다 폴더", st.byMonth) { b -> st.byMonth = b; rulesChanged() },
             item("배터리 최적화 빼기", if (ignoringBattery()) "빠져 있음 — 배경에서도 끊기지 않음" else "권장 — 휴대폰이 배경 백업을 멈추지 않게") { askBattery() },
         ))
 
@@ -164,7 +164,7 @@ class BackupActivity : Activity() {
                     val sec = (System.currentTimeMillis() - p.started) / 1000.0
                     val speed = if (sec > 0.5 && p.bytes > 0) p.bytes / sec else 0.0
                     val left = if (speed > 0) ((p.size - p.bytes) / speed).toLong() else -1
-                    curName.text = (if (p.key % 2 == 1L) "동영상 · " else "") + "${p.name}  (${p.done}/${p.total})"
+                    curName.text = if (p.total == 0) p.name else (if (p.key % 2 == 1L) "동영상 · " else "") + "${p.name}  (${p.done}/${p.total})"
                     curWhere.text = "휴대폰 ${p.rel.trimEnd('/').ifEmpty { "(맨 위)" }}  →  서버 ${p.target}"
                     cur.text = "${Fmt.size(p.bytes)} / ${Fmt.size(p.size)}" + (if (speed > 0) "  ·  ${Fmt.size(speed.toLong())}/s" else "") +
                         (if (left >= 0) "  ·  " + (if (left < 60) "${left}초 남음" else "약 ${(left + 59) / 60}분 남음") else "")
@@ -205,6 +205,14 @@ class BackupActivity : Activity() {
         Thumbs.loadLocal(iv, uri.toString()) {}
     }
 
+    /** 백업 규칙(폴더·올릴 곳·동영상·연/월)을 바꾸면 바로: 목록을 다시 세고, 돌고 있는 백업은 알아서 다시 셈, 안 돌고 있으면 곧 시작 */
+    private fun rulesChanged() {
+        bg.execute {
+            try { Backup.scan(this) } catch (e: Exception) { }
+            runOnUiThread { tick(); if (st.on && !Backup.running && Backup.Settings(this).pausedUntil < System.currentTimeMillis()) BackupSchedule.soon(this, 2_000) }
+        }
+    }
+
     private fun startNow() {
         if (!st.on) { st.on = true; BackupSchedule.schedule(this); build() }
         if (!hasMediaPermission()) { askPermissions(); return }
@@ -222,11 +230,11 @@ class BackupActivity : Activity() {
                 spin.dismiss()
                 val items = (names + "새 이름…").toTypedArray()
                 AlertDialog.Builder(this).setTitle("올릴 기기 폴더 (공유 공간)").setItems(items) { _, i ->
-                    if (i < names.size) { st.root = names[i]; build() }
+                    if (i < names.size) { st.root = names[i]; build(); rulesChanged() }
                     else {
                         val e = ui.input("예: JUN PHONE", Build.MODEL ?: "")
                         AlertDialog.Builder(this).setTitle("새 기기 폴더 이름").setView(ui.col(e).apply { setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0) })
-                            .setPositiveButton("확인") { _, _ -> e.text.toString().trim().takeIf { it.isNotEmpty() }?.let { st.root = it; build() } }.setNegativeButton("그만", null).show()
+                            .setPositiveButton("확인") { _, _ -> e.text.toString().trim().takeIf { it.isNotEmpty() }?.let { st.root = it; build(); rulesChanged() } }.setNegativeButton("그만", null).show()
                     }
                 }.show()
             }
@@ -239,7 +247,7 @@ class BackupActivity : Activity() {
     }
     @Deprecated("") override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         @Suppress("DEPRECATION") super.onActivityResult(req, res, data)
-        if (req == 51 && res == RESULT_OK) build()
+        if (req == 51 && res == RESULT_OK) { build(); rulesChanged() }
     }
 
     // ---------- 권한 ----------

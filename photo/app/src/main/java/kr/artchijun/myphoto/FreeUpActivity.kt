@@ -338,7 +338,7 @@ class FreeUpActivity : Activity() {
         val left = side("휴대폰", pi, listOf(p.name, p.rel.trimEnd('/').ifEmpty { "(맨 위)" }, Fmt.size(p.size) + " (${"%,d".format(p.size)} B)", df.format(Date(p.taken))))
         val box = ui.col().apply { setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0) }
         if (m == null) {
-            box.addView(ui.label("서버에서 같은 사진을 찾지 못했습니다.\n이름·크기가 같거나, 크기가 같고 찍은 때가 하루 안쪽인 것을 찾았습니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(); setPadding(0, 0, 0, ui.dp(10)) })
+            box.addView(ui.label("서버에서 같은 사진을 찾지 못했습니다.\n이름·크기가 같거나, 크기가 같고 찍은 때가 같은(몇 초 안쪽, 시간대 차이는 허용) 것을 찾았습니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(); setPadding(0, 0, 0, ui.dp(10)) })
             box.addView(ui.row(left))
             AlertDialog.Builder(this).setTitle("서버에 없음").setView(ScrollView(this).apply { addView(box) }).setPositiveButton("닫기", null).show()
             return
@@ -354,7 +354,7 @@ class FreeUpActivity : Activity() {
             val path = Library.folderPath(this, s.folderId)
             runOnUiThread { if (b != null) si.setImageBitmap(b); pathLbl.text = path }
         }
-        val same = if (m.how == "이름·크기") "이름과 크기(바이트)가 같아 같은 사진으로 봤습니다." else "이름은 다르지만 크기(바이트)가 같고 찍은 때가 하루 안쪽이라 같은 사진으로 봤습니다."
+        val same = if (m.how == "이름·크기") "이름과 크기(바이트)가 같아 같은 사진으로 봤습니다." else "이름은 다르지만 크기(바이트)와 찍은 때(몇 초 안쪽, 시간대 차이는 허용)가 같아 같은 사진으로 봤습니다."
         box.addView(ui.label(same, 13.5f, ui.sub).apply { setPadding(0, 0, 0, ui.dp(10)) })
         box.addView(ui.row(left, View(this).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(12), 1) }, right).apply { gravity = Gravity.TOP })
         val out = p.key in excluded

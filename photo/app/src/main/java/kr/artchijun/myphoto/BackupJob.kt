@@ -48,12 +48,12 @@ object BackupSchedule {
                 .setRequiredNetworkType(net(ctx)).setRequiresCharging(st.chargingOnly).build())
     }
 
-    /** 조건(와이파이·충전)이 맞으면 곧 돌리기 — 망이 끊겨 멈췄을 때 다시 잇기용 */
-    fun soon(ctx: Context) {
+    /** 조건(와이파이·충전)이 맞으면 곧 돌리기 — 망이 끊겨 멈췄을 때 다시 잇기용 (규칙을 바꿨을 때는 latency 를 짧게) */
+    fun soon(ctx: Context, latency: Long = 30_000) {
         if (!Backup.Settings(ctx).on) return
         ctx.getSystemService(JobScheduler::class.java).schedule(JobInfo.Builder(JOB_NOW, ComponentName(ctx, BackupJob::class.java))
             .setRequiredNetworkType(net(ctx)).setRequiresCharging(Backup.Settings(ctx).chargingOnly)
-            .setMinimumLatency(30_000).setBackoffCriteria(60_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())
+            .setMinimumLatency(latency).setBackoffCriteria(60_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())
     }
 }
 
@@ -66,7 +66,7 @@ class BackupJob : JobService() {
         worker = Thread {
             val done = try { Backup.run(this, { stop }) { pr -> Notes.progress(this, pr) } } catch (e: Exception) { false }
             BackupSchedule.schedule(this)   // 새 사진 감시 다시 걸기
-            if (!done && !stop) BackupSchedule.soon(this)
+            if (!done && !stop && !Backup.stopAsked) BackupSchedule.soon(this)
             Notes.summary(this)
             jobFinished(p, false)
         }.apply { start() }
@@ -83,15 +83,16 @@ class BackupJob : JobService() {
 class BackupService : Service() {
     companion object {
         @Volatile var stopAsked = false
-        fun start(ctx: Context) { stopAsked = false; ctx.startForegroundService(Intent(ctx, BackupService::class.java)) }
+        /** [지금 백업]: 멈춤(쉼)을 풀고 바로 */
+        fun start(ctx: Context) { stopAsked = false; Backup.stopAsked = false; Backup.Settings(ctx).pausedUntil = 0; ctx.startForegroundService(Intent(ctx, BackupService::class.java)) }
     }
     override fun onBind(i: Intent?): IBinder? = null
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "stop") { stopAsked = true; return START_NOT_STICKY }
+        if (intent?.action == "stop") { stopAsked = true; Backup.requestStop(this); return START_NOT_STICKY }
         startForeground(Notes.ID_RUN, Notes.running(this, null), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
         Thread {
             val done = try { Backup.run(this, { stopAsked }) { pr -> Notes.update(this, pr) } } catch (e: Exception) { false }
-            if (!done && !stopAsked) BackupSchedule.soon(this)
+            if (!done && !stopAsked && !Backup.stopAsked) BackupSchedule.soon(this)
             stopForeground(STOP_FOREGROUND_REMOVE)
             Notes.summary(this)
             stopSelf()
@@ -120,7 +121,7 @@ object Notes {
         channel(ctx)
         val stop = PendingIntent.getService(ctx, 1, Intent(ctx, BackupService::class.java).setAction("stop"), PendingIntent.FLAG_IMMUTABLE)
         val b = Notification.Builder(ctx, CH).setSmallIcon(R.drawable.ic_stat).setOngoing(true).setContentIntent(open(ctx))
-            .setContentTitle(if (p == null) "사진 백업 준비 중" else "사진 백업 ${p.done}/${p.total}")
+            .setContentTitle(if (p == null || p.total == 0) "사진 백업 준비 중" else "사진 백업 ${p.done}/${p.total}")
             .setContentText(p?.name ?: "")
             .addAction(Notification.Action.Builder(null, "멈추기", stop).build())
         if (p != null) b.setProgress(1000, if (p.size > 0) (p.bytes * 1000 / p.size).toInt() else 0, false)
@@ -144,7 +145,7 @@ object Notes {
         last = now
         channel(ctx)
         nm.notify(ID_RUN, Notification.Builder(ctx, CH).setSmallIcon(R.drawable.ic_stat).setContentIntent(open(ctx)).setOnlyAlertOnce(true)
-            .setContentTitle("사진 백업 ${p.done}/${p.total}").setContentText(p.name)
+            .setContentTitle(if (p.total == 0) "사진 백업 준비 중" else "사진 백업 ${p.done}/${p.total}").setContentText(p.name)
             .setProgress(1000, if (p.size > 0) (p.bytes * 1000 / p.size).toInt() else 0, false).build())
     }
 

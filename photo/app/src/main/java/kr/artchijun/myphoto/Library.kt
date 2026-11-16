@@ -14,7 +14,7 @@ import java.util.TimeZone
  *   서버 목록 (가벼운 정보만, library.db): 백업 폴더(올릴 곳 기기 폴더 아래)만 읽은 것 — 빠름, 기본
  *                                         서버 전체(공유 공간 모든 사진)를 읽은 것 — 넓혀 볼 때 (12만 장에 30초쯤)
  *   휴대폰 목록: MediaStore 의 모든 사진·동영상 (어느 폴더든)
- *   같은 것 찾기: ① 이름(대소문자 무시)·크기가 같음  ② 이름은 달라도 크기가 같고 찍은 때가 하루 안쪽
+ *   같은 것 찾기: ① 이름(대소문자 무시)·크기가 같음  ② 이름은 달라도 크기가 같고 찍은 때가 몇 초 안쪽 (시간대 차이로 몇 시간 어긋난 것 포함)
  *   상태: 백업됨(둘 다 있음) · 서버에만 · 휴대폰에만(백업 안 됨)
  */
 object Library {
@@ -144,6 +144,23 @@ object Library {
         Index(ns, HashMap(bs.mapValues { it.value.toLongArray() }), tm).also { index[scope] = it }
     }
 
+    /** 백업으로 방금 올린 것을 목록에도 적어 둠 (다음 대조에서 바로 '이미 있음'으로 — 목록을 다시 읽기 전에도) */
+    fun addServer(ctx: Context, p: Phone, folderId: Long, scope: Int = BACKUP) {
+        if (!hasServer(ctx, scope)) return
+        val id = -1_000_000_000_000L - p.key   // 서버 번호를 모를 때: 서버 번호(양수)와 겹치지 않게
+        db(ctx).insertWithOnConflict(table(scope), null, ContentValues().apply {
+            put("id", id); put("name", p.name); put("size", p.size); put("time", p.srvTime); put("folder", folderId)
+            put("type", if (p.video) "video" else "photo"); put("ck", ""); put("unit", 0); put("w", 0); put("h", 0)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+        synchronized(this) {
+            index[scope]?.let { ix ->
+                ix.byNameSize.putIfAbsent(p.name.lowercase() + "|" + p.size, id)
+                ix.bySize[p.size] = (ix.bySize[p.size] ?: LongArray(0)) + id
+                ix.time[id] = p.srvTime
+            }
+        }
+    }
+
     fun serverItem(ctx: Context, id: Long, scope: Int = ALL): Item? = db(ctx).rawQuery("SELECT id,name,size,time,folder,type,ck,unit,w,h FROM ${table(scope)} WHERE id=?", arrayOf(id.toString())).use { c ->
         if (!c.moveToFirst()) null else Item(c.getLong(0), c.getString(1), c.getLong(2), c.getLong(3), c.getString(5), c.getLong(4), c.getString(6), c.getLong(7), c.getInt(8), c.getInt(9), 1, false)
     }
@@ -155,6 +172,16 @@ object Library {
         return p
     }
 
+    /**
+     * 이름이 다를 때 같은 사진으로 볼 찍은 때: 몇 초 안쪽으로 같음 (시간대 차이로 정확히 몇 시간 어긋난 것도 — 여행 중 찍은 사진 등).
+     * 크기가 같고 하루 안쪽이면 같다고 보던 것은 너무 느슨해서(크기만 같은 다른 사진을 '이미 있음'으로 건너뛸 수 있음) 고침
+     */
+    fun sameMoment(a: Long, b: Long): Boolean {
+        val d = Math.abs(a - b); if (d > 15 * 3600) return false
+        val r = d % 3600
+        return r <= 5 || 3600 - r <= 5
+    }
+
     /** 이 휴대폰 파일이 서버(그 범위)에 있나 */
     fun matchOnServer(ctx: Context, p: Phone, scope: Int = ALL): Match? {
         if (!hasServer(ctx, scope)) return null
@@ -163,8 +190,7 @@ object Library {
         val cands = ix.bySize[p.size] ?: return null
         if (p.size < 50_000) return null   // 아주 작은 파일은 크기만으로는 믿지 않음
         val t = p.srvTime
-        val best = cands.minByOrNull { Math.abs((ix.time[it] ?: 0) - t) } ?: return null
-        if (Math.abs((ix.time[best] ?: 0) - t) > 26 * 3600) return null
+        val best = cands.firstOrNull { sameMoment(ix.time[it] ?: 0, t) } ?: return null
         return serverItem(ctx, best, scope)?.let { Match(it, "크기·찍은 때") }
     }
 
@@ -204,7 +230,7 @@ object Library {
         if (phone == null) return false
         if (phByNameSize.containsKey(it.name.lowercase() + "|" + it.size)) return true
         if (it.size < 50_000) return false
-        return phBySize[it.size]?.any { p -> Math.abs(p.srvTime - it.time) <= 26 * 3600 } == true
+        return phBySize[it.size]?.any { p -> sameMoment(p.srvTime, it.time) } == true
     }
     val phoneLoaded get() = phone != null
 
