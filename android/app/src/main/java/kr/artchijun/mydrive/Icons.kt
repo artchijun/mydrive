@@ -64,7 +64,7 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "filter" -> poly(4f, 5f, 20f, 5f, 14f, 12.5f, 14f, 19f, 10f, 17f, 10f, 12.5f, close = true)
             "eye" -> { path.reset(); path.moveTo(2.5f, 12f); path.quadTo(12f, 3f, 21.5f, 12f); path.quadTo(12f, 21f, 2.5f, 12f); cv.drawPath(path, p); cv.drawCircle(12f, 12f, 3f, p) }
             "openwith" -> { poly(14f, 4f, 20f, 4f, 20f, 10f); ln(20f, 4f, 11f, 13f); poly(17f, 14f, 17f, 20f, 4f, 20f, 4f, 7f, 10f, 7f) }
-            "chart" -> { cv.drawArc(RectF(3.5f, 4.5f, 18.5f, 19.5f), -10f, 280f, false, p); ln(11f, 12f, 11f, 4.5f); ln(11f, 12f, 18.4f, 10.7f); poly(13.5f, 3f, 13.5f, 9.5f, 20.2f, 8.4f); cv.drawArc(RectF(6.5f, -3.5f, 20.5f, 9.5f), 90f, 82f, false, p) }
+            "chart" -> { path.reset(); path.moveTo(11f, 13f); path.lineTo(11f, 5f); path.arcTo(RectF(3f, 5f, 19f, 21f), -90f, -270f); path.close(); cv.drawPath(path, p); path.reset(); path.moveTo(14f, 10f); path.lineTo(14f, 2.5f); path.arcTo(RectF(6.5f, 2.5f, 21.5f, 17.5f), -90f, 90f); path.close(); cv.drawPath(path, p) }
             "grid" -> { rr(4f, 4f, 10.5f, 10.5f, 1.5f); rr(13.5f, 4f, 20f, 10.5f, 1.5f); rr(4f, 13.5f, 10.5f, 20f, 1.5f); rr(13.5f, 13.5f, 20f, 20f, 1.5f) }
         }
         cv.restore()

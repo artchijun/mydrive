@@ -403,7 +403,7 @@ class MainActivity : Activity(), Transfers.Listener {
         list.setSelectionFromTop(tab.scroll, tab.scrollTop)
         val l = tab.loc
         empty.visibility = if (err != null || (rows.isEmpty() && l.kind != "home")) View.VISIBLE else View.GONE
-        empty.text = err ?: when (l.kind) { "trash" -> "휴지통이 비어 있습니다"; "search" -> "찾은 것이 없습니다"; else -> "빈 폴더" }
+        empty.text = err ?: when (l.kind) { "trash" -> "휴지통이 비어 있습니다"; "search" -> "찾은 것이 없습니다"; "usage" -> if (l.path == "dup") "중복 파일이 없습니다 — 모두 하나씩입니다" else "해당하는 파일이 없습니다"; else -> "빈 폴더" }
         if (l.kind == "home") { statusText.text = "Mydrive ${Update.current(this)}"; return }
         if (l.kind == "usage") { statusText.text = usageStatus(l); return }
         val d = items.count { it.dir }; val f = items.size - d
@@ -472,6 +472,13 @@ class MainActivity : Activity(), Transfers.Listener {
                 var acc = ""; if (l.path.isNotEmpty()) for (s in l.path.split('/')) { acc = if (acc.isEmpty()) s else "$acc/$s"; parts += s to l.copy(path = acc) }
             }
             "search" -> { Loc.parse(l.root)?.let { parts += placeText(it) to it }; parts += tabTitle(l) to l }
+            "usage" -> { Loc.parse(l.root)?.let { b ->
+                parts += placeText(b) to b; parts += "분석" to l.copy(path = "")
+                val v = l.path
+                if (v.startsWith("d:")) { parts += "폴더별" to l.copy(path = "d:" + b.path)
+                    val rest = v.substring(2).removePrefix(b.path).trim('/'); var acc = b.path
+                    if (rest.isNotEmpty()) for (seg in rest.split('/')) { acc = if (acc.isEmpty()) seg else "$acc/$seg"; parts += seg to l.copy(path = "d:$acc") } }
+                else if (v.isNotEmpty()) parts += tabTitle(l) to l } }
             else -> parts += tabTitle(l) to l
         }
         parts.forEachIndexed { i, (name, to) ->
@@ -1080,7 +1087,7 @@ class MainActivity : Activity(), Transfers.Listener {
                 val denom = maxOf(r.total + other + trash, 1L).toFloat()
                 val segs = cats.map { (k, sz, _) -> Triple(Usage.catColor(k), sz / denom, Usage.catName(k) + " " + Fmt.size(sz)) } +
                     (if (other > 0) listOf(Triple(ui.sub, other / denom, "앱·시스템 " + Fmt.size(other))) else emptyList()) +
-                    (if (trash > 0) listOf(Triple(ui.line, trash / denom, "휴지통 " + Fmt.size(trash))) else emptyList())
+                    (if (trash > 0) listOf(Triple(if (ui.dark) 0xFF6B6B6B.toInt() else 0xFF9AA0AA.toInt(), trash / denom, "휴지통 " + Fmt.size(trash))) else emptyList())
                 out += Row(3, Fmt.size(r.total), "파일 %,d개 · 폴더 %,d개".format(r.fileCount, r.dirs.size - 1) +
                     (vol?.let { " · 저장소 ${Fmt.size(used)} 사용 / ${Fmt.size(it.total)}" } ?: "") +
                     (if (r.blocked > 0) "\n읽을 수 없는 폴더 ${r.blocked}개는 빠졌습니다" else ""), segs = segs)
@@ -1092,7 +1099,7 @@ class MainActivity : Activity(), Transfers.Listener {
                 val (ds, fl) = Usage.children(r, base.path)
                 if (ds.isNotEmpty()) {
                     out += Row(0, "큰 폴더")
-                    ds.take(6).forEach { (p, d) -> out += dirCard(base, p, d, total) }
+                    ds.filter { it.second.size > 0 }.take(6).forEach { (p, d) -> out += dirCard(base, p, d, total) }
                     out += Row(1, "폴더별 용량 모두 보기", "폴더 ${ds.size}개" + (if (fl.isNotEmpty()) " · 이 자리 파일 ${fl.size}개" else "") + " — 눌러서 안으로 들어가며 봅니다", icon = g("grid", ui.sub), act = { navigate(go("d:" + base.path)) })
                 }
                 out += Row(0, "정리하기")
@@ -1131,17 +1138,19 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun usageMenu(opts: MutableList<Pair<String, () -> Unit>>) {
         val l = tab.loc; val base = Loc.parse(l.root) ?: return
+        val mine = mutableListOf<Pair<String, () -> Unit>>()
         if (l.path == "dup") {
-            opts.add(0, "하나씩만 남기고 고르기 (가장 오래된 것 남김)" to {
+            mine += "하나씩만 남기고 고르기 (가장 오래된 것 남김)" to {
                 val ds = Usage.get(base)?.dups ?: emptyList()
                 sel.clear(); ds.forEach { gp -> gp.drop(1).forEach { sel.add(it.path) } }
                 adapter.notifyDataSetChanged(); refreshChrome()
                 if (sel.isNotEmpty()) toast("${sel.size}개를 골랐습니다 — 확인하고 [삭제]를 누르세요")
-            })
-            opts.add(1, "중복 다시 찾기" to { Usage.get(base)?.dups = null; load() })
+            }
+            mine += "중복 다시 찾기" to { Usage.get(base)?.dups = null; load() }
         }
-        if (l.path.startsWith("d:")) { val p = l.path.substring(2); opts.add(0, "이 폴더 열기" to { navigate(base.copy(path = p)) }) }
-        opts.add(0, "다시 분석" to { Usage.forget(base); usageErr.remove(l.root); load() })
+        if (l.path.startsWith("d:")) { val p = l.path.substring(2); mine += "이 폴더 열기" to { navigate(base.copy(path = p)) } }
+        mine += "다시 분석 (처음부터 다시 셈)" to { Usage.forget(base); usageErr.remove(l.root); load() }
+        opts.addAll(0, mine)
     }
 
     /** 분석 첫 칸: 큰 글씨 합계 + 종류별 색 막대 + 범례 */
@@ -1150,7 +1159,7 @@ class MainActivity : Activity(), Transfers.Listener {
             val big = ui.label("", 26f, ui.text, bold = true)
             val sub = ui.label("", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 2) }
             val bar = SegBar().apply { layoutParams = ui.lp(h = ui.dp(14), top = 12) }
-            val legend = ui.label("", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 10); setLineSpacing(ui.dpf(3f), 1f) }
+            val legend = ui.col().apply { layoutParams = ui.lp(top = 8) }
             val inner = ui.col(big, sub, bar, legend).apply { setPadding(ui.dp(16), ui.dp(14), ui.dp(16), ui.dp(14)); background = ui.round(ui.panel2, 8) }
             FrameLayout(this).apply { setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(4)); addView(inner) }
         }
@@ -1158,13 +1167,18 @@ class MainActivity : Activity(), Transfers.Listener {
         (inner.getChildAt(0) as TextView).text = r.title
         (inner.getChildAt(1) as TextView).text = r.sub
         (inner.getChildAt(2) as SegBar).apply { segs = r.segs; invalidate() }
-        val sb = android.text.SpannableStringBuilder()
-        r.segs.forEachIndexed { i, (c, _, t) ->
-            if (i > 0) sb.append("    ")
-            val s0 = sb.length; sb.append("● "); sb.setSpan(android.text.style.ForegroundColorSpan(c), s0, s0 + 1, 0)
-            sb.append(t.replace(" ", " "))
+        // 범례: 두 칸씩 (글자가 중간에서 꺾이지 않게)
+        val lg = inner.getChildAt(3) as LinearLayout; lg.removeAllViews()
+        r.segs.chunked(2).forEach { pair ->
+            val line = ui.row()
+            for (k in 0 until 2) {
+                val cell = pair.getOrNull(k)
+                val t = ui.label("", 12.5f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp(0, weight = 1f).apply { topMargin = ui.dp(4) } }
+                if (cell != null) { val sb = android.text.SpannableStringBuilder("● " + cell.third); sb.setSpan(android.text.style.ForegroundColorSpan(cell.first), 0, 1, 0); t.text = sb }
+                line.addView(t)
+            }
+            lg.addView(line)
         }
-        (inner.getChildAt(3) as TextView).text = sb
         return v
     }
 
@@ -1176,7 +1190,7 @@ class MainActivity : Activity(), Transfers.Listener {
             val w = width.toFloat(); val h = height.toFloat()
             clip.reset(); clip.addRoundRect(0f, 0f, w, h, h / 2, h / 2, android.graphics.Path.Direction.CW)
             c.save(); c.clipPath(clip)
-            p.color = ui.line; c.drawRect(0f, 0f, w, h, p)
+            p.color = if (ui.dark) 0xFF3A3A3A.toInt() else ui.line; c.drawRect(0f, 0f, w, h, p)
             var x = 0f
             for ((col, f, _) in segs) { val ww = f * w; if (ww <= 0f) continue; p.color = col; c.drawRect(x, 0f, x + ww, h, p); x += ww
                 p.color = ui.panel2; c.drawRect(x - ui.dpf(1f), 0f, x, h, p) }
