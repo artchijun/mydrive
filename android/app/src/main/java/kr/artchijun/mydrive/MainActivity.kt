@@ -672,7 +672,7 @@ class MainActivity : Activity(), Transfers.Listener {
             pending.isNotEmpty() -> {
                 banner.visibility = View.VISIBLE
                 if (l.writable) { bannerText.text = "받은 파일 ${pending.size}개 — 이 폴더에 저장할까요?"; bannerBtn.visibility = View.VISIBLE; bannerBtn.text = "여기에 저장"; bannerBtn.setOnClickListener { val u = pending; pending = emptyList(); importUris(u); refreshChrome() } }
-                else { bannerText.text = "받은 파일 ${pending.size}개 — 저장할 폴더로 들어가세요"; bannerBtn.visibility = View.VISIBLE; bannerBtn.text = "취소"; bannerBtn.setOnClickListener { pending = emptyList(); refreshChrome() } }
+                else { bannerText.text = "받은 파일 ${pending.size}개 — 저장할 곳을 고르세요"; bannerBtn.visibility = View.VISIBLE; bannerBtn.text = "저장할 곳"; bannerBtn.setOnClickListener { pickSaveDest() } }
             }
             upd != null -> { banner.visibility = View.VISIBLE; bannerText.text = "새 판 ${upd!!.version} 이 나왔습니다"; bannerBtn.visibility = View.VISIBLE; bannerBtn.text = "설치"; bannerBtn.setOnClickListener { installUpdate(upd!!) } }
             else -> banner.visibility = View.GONE
@@ -1038,7 +1038,52 @@ class MainActivity : Activity(), Transfers.Listener {
         }
         if (uris.isEmpty()) return
         pending = uris
-        if (::title.isInitialized) refreshChrome()
+        setIntent(Intent(this, MainActivity::class.java))   // 화면을 다시 만들 때(설정 바꿈 등) 같은 파일을 또 받지 않게
+        if (::title.isInitialized) { refreshChrome(); list.postDelayed({ pickSaveDest() }, 700) }   // NAS 목록이 올 틈을 조금 둠
+    }
+
+    // ---------- 받은 파일을 저장할 곳 고르기 ----------
+    //   처음 목록: 지난번 저장한 곳 · 지금 폴더 · 즐겨찾기 · 최근 · 휴대폰 · NAS · 웹 폴더 · 클라우드 → 폴더를 골라 들어가며 [여기에 저장]
+    private fun pickSaveDest() {
+        if (pending.isEmpty() || isFinishing) return
+        val seen = HashSet<String>()
+        val places = mutableListOf<Pair<String, Loc>>()
+        fun add(label: String, l: Loc?) { if (l != null && l.writable && seen.add(l.key())) places += label to l }
+        Loc.parse(pf.str("lastSave", ""))?.let { add("지난번 저장한 곳 · " + placeText(it), it) }
+        if (tab.loc.writable) add("지금 폴더 · " + placeText(tab.loc), tab.loc)
+        favList().forEach { add("★ " + placeText(it), it) }
+        recentList().filter { it.writable }.take(5).forEach { add("최근 · " + placeText(it), it) }
+        val prim = fs.volumes().first().root.path
+        add("휴대폰 · 다운로드", Loc("local", prim, "Download"))
+        fs.volumes().forEach { v -> add("휴대폰 · " + v.title, Loc("local", v.root.path)) }
+        nasRoots.filter { it.name !in nasHidden() }.forEach { add("NAS · " + it.name, Loc("nas", it.name)) }
+        webRoots.forEach { add("NAS 웹 폴더 · " + it.name, Loc("nas", "~" + it.name)) }
+        CloudDrive.all(this).forEach { c -> add(c.title + " · " + c.account, Loc("cloud", c.id)) }
+        AlertDialog.Builder(this).setTitle("받은 파일 ${pending.size}개 — 저장할 곳")
+            .setItems(places.map { it.first }.toTypedArray()) { _, w -> browseSaveDest(places[w].second) }
+            .setNegativeButton("나중에", null).show()
+    }
+
+    private fun browseSaveDest(l: Loc) {
+        bg({ fs.list(l, false) }) { kids ->
+            if (isFinishing || pending.isEmpty()) return@bg
+            val dirs = kids.filter { it.dir }.sortedWith { a, b -> coll.compare(a.name, b.name) }
+            val names = listOf((if (l.path.isEmpty()) "◀  처음 목록" else "⬆  위 폴더로")) + dirs.map { "📁  " + it.name }
+            AlertDialog.Builder(this).setTitle(placeText(l))
+                .setItems(names.toTypedArray()) { _, w ->
+                    if (w == 0) { if (l.path.isEmpty()) pickSaveDest() else browseSaveDest(l.parent()!!) }
+                    else browseSaveDest(l.copy(path = dirs[w - 1].path))
+                }
+                .setPositiveButton("여기에 저장") { _, _ ->
+                    val u = pending; pending = emptyList()
+                    pf.putStr("lastSave", l.key()); addRecent(l)
+                    importUris(u, l, kids); refreshChrome()
+                    toast("${u.size}개를 ‘${placeText(l)}’ 에 저장합니다")
+                }
+                .setNeutralButton("새 폴더") { _, _ ->
+                    ask("새 폴더", "") { n -> bg({ fs.mkdir(l, n.trim()) }) { browseSaveDest(l.child(n.trim())) } }
+                }.show()
+        }
     }
 
     private class Src(val uri: Uri, val name: String, val size: Long, val mtimeNs: Long)
@@ -1062,11 +1107,11 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     /** 다른 앱이 준 파일(공유·고르기)을 지금 폴더로: 휴대폰 폴더면 복사, NAS 면 올리기 */
-    private fun importUris(uris: List<Uri>) {
-        val l = tab.loc
+    private fun importUris(uris: List<Uri>, dest: Loc = tab.loc, known: List<Item>? = null) {
+        val l = dest
         if (!l.writable) { toast("저장할 폴더로 들어가 주세요"); return }
         askNotify()
-        val taken = items.map { it.name.lowercase() }.toMutableSet()
+        val taken = (known ?: if (dest == tab.loc) items else emptyList()).map { it.name.lowercase() }.toMutableSet()
         for (u in uris) {
             val s = describe(u)
             val name = Fmt.uniqueName(s.name) { taken.contains(it.lowercase()) }
