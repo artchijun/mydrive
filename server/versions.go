@@ -19,6 +19,7 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"io/fs"
 	"log"
@@ -402,3 +403,103 @@ func versionsStart() {
 }
 
 func isVerRel(rel string) bool { return rel == verDirName || strings.HasPrefix(rel, verDirName+"/") }
+
+// ---------- 관리 콘솔: 지운 파일의 버전 비우기 ----------
+//
+//	GET  /v1/admin/deleted?root=        지운 파일마다 남은 판 수·판 크기 합 (큰 것부터)
+//	POST /v1/admin/purge?root=  {paths} 그 지운 파일들의 판을 모두 지움 (되돌릴 수 없음)
+//	지금 있는 파일의 판은 지우지 않음 — 그 판은 보관 규칙대로만 정리됨
+
+func hAdminDeleted(w http.ResponseWriter, r *http.Request) {
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	base := filepath.Join(rt.Dir, verDirName)
+	type Del struct {
+		P     string `json:"p"`
+		N     int    `json:"n"`     // 남은 판 수
+		Bytes int64  `json:"bytes"` // 판 크기 합
+		Last  int64  `json:"last"`  // 가장 최근 판이 바뀐(지워진) 시각 ns
+	}
+	out := []Del{}
+	var total int64
+	filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() || p == base {
+			return nil
+		}
+		vs := listVersions(p)
+		if len(vs) == 0 {
+			return nil
+		}
+		rel, _ := filepath.Rel(base, p)
+		rel = filepath.ToSlash(rel)
+		if _, exists := statRel(rt, rel); exists {
+			return nil
+		}
+		e := Del{P: rel, N: len(vs), Last: vs[0].Replaced}
+		for _, v := range vs {
+			e.Bytes += v.S
+		}
+		total += e.Bytes
+		out = append(out, e)
+		return nil
+	})
+	sort.Slice(out, func(i, j int) bool { return out[i].Bytes > out[j].Bytes })
+	writeJSON(w, r, map[string]any{"files": out, "bytes": total})
+}
+
+func hAdminPurge(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&req) != nil || len(req.Paths) == 0 {
+		httpErr(w, 400, "bad_json", "요청 형식 오류")
+		return
+	}
+	rt := getRoot(w, r)
+	if rt == nil {
+		return
+	}
+	base := filepath.Join(rt.Dir, verDirName)
+	files, skipped := 0, 0
+	var bytes int64
+	verMu.Lock()
+	defer verMu.Unlock()
+	for _, p := range req.Paths {
+		rel, ok := cleanRel(p)
+		if !ok || isVerRel(rel) {
+			skipped++
+			continue
+		}
+		if _, exists := statRel(rt, rel); exists { // 지금 있는 파일의 판은 그대로
+			skipped++
+			continue
+		}
+		dir := verDir(rt, rel)
+		for _, v := range listVersions(dir) { // 판 파일(이름이 시각)만 지움 — 하위의 다른 파일 판 폴더는 그대로
+			if os.Remove(filepath.Join(dir, v.ID)) == nil {
+				files++
+				bytes += v.S
+			}
+		}
+		for d := dir; d != base && strings.HasPrefix(d, base+string(filepath.Separator)); d = filepath.Dir(d) {
+			if os.Remove(d) != nil { // 비었을 때만 지워짐
+				break
+			}
+		}
+	}
+	who, _ := r.Context().Value(ctxUser{}).(string)
+	log.Printf("[%s] 지운 파일의 버전 비움: 파일 %d개의 판 %d개, %s (%s)", rt.Name, len(req.Paths)-skipped, files, humanSize(bytes), who)
+	writeJSON(w, r, map[string]any{"ok": true, "versions": files, "bytes": bytes, "skipped": skipped})
+}
+
+func humanSize(b int64) string {
+	f, u := float64(b), []string{"B", "KB", "MB", "GB", "TB"}
+	i := 0
+	for f >= 1024 && i < len(u)-1 {
+		f /= 1024
+		i++
+	}
+	return strconv.FormatFloat(f, 'f', 1, 64) + " " + u[i]
+}

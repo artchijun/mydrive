@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.18"
+const version = "0.6.19"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
@@ -133,6 +133,8 @@ func main() {
 	mux.HandleFunc("/v1/admin/roots", adminAuth(hAdminRoots))
 	mux.HandleFunc("/v1/admin/webs", adminAuth(hWebs)) // 웹 폴더 (관리 콘솔)
 	mux.HandleFunc("/v1/admin/policy", adminAuth(hAdminPolicy))
+	mux.HandleFunc("/v1/admin/deleted", adminAuth(hAdminDeleted)) // 지운 파일의 버전 (versions.go)
+	mux.HandleFunc("/v1/admin/purge", adminAuth(hAdminPurge))     // 그 버전 비우기
 	mux.HandleFunc("/v1/admin/token", adminAuth(hAdminToken))
 	mux.HandleFunc("/v1/admin/devices", adminAuth(hAdminDevices))
 	mux.HandleFunc("/v1/admin/whoami", adminAuth(hAdminWhoami))
