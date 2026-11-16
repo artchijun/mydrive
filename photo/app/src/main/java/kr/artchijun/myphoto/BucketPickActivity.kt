@@ -50,13 +50,13 @@ class BucketPickActivity : Activity() {
         ui = Ui(this); st = Backup.Settings(this)
         window.statusBarColor = ui.panel; window.navigationBarColor = ui.panel
         val top = ui.row(ui.iconBtn(Glyph("back", ui.text), "그만") { finish() },
-            ui.label("백업할 휴대폰 폴더", 19f, ui.text, bold = true).apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(4) } })
+            ui.label(intent.getStringExtra("title") ?: "백업할 휴대폰 폴더", 19f, ui.text, bold = true).apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(4) } })
             .apply { setBackgroundColor(ui.panel); setPadding(ui.dp(4), ui.dp(4), ui.dp(8), ui.dp(4)); minimumHeight = ui.dp(56) }
-        val hint = ui.label("폴더를 고르면 그 안의 하위 폴더도 함께 백업합니다. 왼쪽 ›를 누르면 펼쳐집니다.", 13f, ui.sub)
+        val hint = ui.label(intent.getStringExtra("hint") ?: "폴더를 고르면 그 안의 하위 폴더도 함께 백업합니다. 왼쪽 ›를 누르면 펼쳐집니다.", 13f, ui.sub)
             .apply { setPadding(ui.dp(18), ui.dp(10), ui.dp(18), ui.dp(6)) }
         list = ListView(this).apply { divider = null; selector = android.graphics.drawable.ColorDrawable(0); setBackgroundColor(ui.bg); adapter = this@BucketPickActivity.adapter }
         summary = ui.label("", 13.5f, ui.sub)
-        ok = ui.button("확인") { st.buckets = sel.toSet(); setResult(RESULT_OK); finish() }
+        ok = ui.button("확인") { save(sel.toSet()); setResult(RESULT_OK); finish() }
         val bottom = ui.col(summary, ok.apply { layoutParams = ui.lp(h = ui.dp(50), top = 8) })
             .apply { setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel) }
         val rootView = ui.col(top, hint.apply { setBackgroundColor(ui.bg) }, list.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom)
@@ -70,6 +70,11 @@ class BucketPickActivity : Activity() {
     }
     override fun onDestroy() { super.onDestroy(); bg.shutdownNow() }
 
+    // 어디에 적을지: 기본은 백업할 폴더, intent 의 "key" 가 있으면 그 설정 (예: 공간 확보의 휴대폰 폴더)
+    private val key get() = intent.getStringExtra("key")
+    private fun saved(): Set<String> = key?.let { k -> Prefs(this).str(k, "").split('\n').filter { it.isNotEmpty() }.toSet() } ?: st.buckets
+    private fun save(v: Set<String>) { val k = key; if (k == null) st.buckets = v else Prefs(this).putStr(k, v.joinToString("\n")) }
+
     // ---------- 나무 만들기 ----------
     private fun load(all: List<Pair<String, Int>>) {
         for ((rel, n) in all) {
@@ -81,7 +86,7 @@ class BucketPickActivity : Activity() {
         }
         fun fin(x: Node): Int { x.kids.sortWith(compareBy({ !(x === root && it.name == "DCIM") }, { it.name.lowercase() })); x.total = x.own + x.kids.sumOf { fin(it) }; return x.total }
         fin(root)
-        sel += st.buckets
+        sel += saved()
         // 처음 펼침: DCIM, 그리고 고른 것이 있는 곳까지
         open += "DCIM/"
         for (e in sel) { var p = e.removePrefix("=").trimEnd('/'); while (p.contains('/')) { p = p.substringBeforeLast('/'); open += "$p/" }; if (e.startsWith("=")) open += e.removePrefix("=") }
@@ -204,6 +209,11 @@ class BucketPickActivity : Activity() {
     }
 
     companion object {
+        /** 이 휴대폰 폴더(RELATIVE_PATH, "DCIM/Camera/")가 고른 것에 드나 — 하위 폴더 포함("X/") · 그 폴더만("=X/") · 맨 위("=") */
+        fun covers(set: Set<String>, rel: String): Boolean {
+            val r = rel.trim('/').let { if (it.isEmpty()) "" else "$it/" }
+            return set.any { e -> when { e == "=" -> r.isEmpty(); e.startsWith("=") -> r == e.removePrefix("="); else -> r.startsWith(e) } }
+        }
         /** 고른 것을 사람이 읽기 좋게 ("DCIM/Camera", "DCIM (이 폴더만)") */
         fun describe(set: Set<String>): String = set.sorted().joinToString(", ") { e ->
             when {

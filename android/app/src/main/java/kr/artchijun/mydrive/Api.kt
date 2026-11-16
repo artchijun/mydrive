@@ -113,6 +113,11 @@ class Api(servers: List<String>, var token: String) {
     /** 이름 바꾸기·옮기기 (같은 연결 폴더 안). 받는 쪽에 같은 이름이 있으면 409 */
     fun move(root: String, from: String, to: String) { retry { readBody(open("POST", "/v1/move", mapOf("root" to root, "from" to from, "to" to to))) } }
 
+    /** 파일 내용의 SHA-256 (NAS 가 직접 계산 — 받지 않음). 중복 파일 찾기용 */
+    fun hash(root: String, path: String): String = retry {
+        JSONObject(readBody(open("GET", "/v1/hash", mapOf("root" to root, "path" to path), 600000))).getString("sha256")
+    }
+
     /** 지우기 → NAS 휴지통(#recycle)으로 */
     fun delete(root: String, path: String) { retry { readBody(open("DELETE", "/v1/file", mapOf("root" to root, "path" to path))) } }
 

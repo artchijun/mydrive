@@ -50,7 +50,8 @@ object Library {
     private fun db(ctx: Context) = (dbh ?: synchronized(this) { dbh ?: Db(ctx.applicationContext).also { dbh = it } }).writableDatabase
 
     // ---------- 서버 목록 ----------
-    @Volatile var refreshing = false; private set
+    private val busy = HashSet<Int>()   // 지금 읽는 중인 범위 (범위마다 따로 — 서버 전체를 읽는 동안에도 백업 폴더는 읽을 수 있게)
+    fun isRefreshing(scope: Int) = synchronized(busy) { scope in busy }
     /** 마지막으로 서버 목록을 읽은 때 (ms) · 그때 읽은 장수 · (백업 폴더) 그때의 폴더 경로 */
     fun serverAt(ctx: Context, scope: Int = ALL) = Prefs(ctx).long(key(scope, "at"), 0)
     fun serverCount(ctx: Context, scope: Int = ALL) = Prefs(ctx).int(key(scope, "n"), 0)
@@ -68,7 +69,7 @@ object Library {
      *   BACKUP: 올릴 곳(기기 폴더)과 그 아래 폴더만 — progress(읽은 장수, -읽은 폴더 수)
      */
     fun refreshServer(ctx: Context, scope: Int = ALL, stop: () -> Boolean = { false }, progress: (Int, Int) -> Unit = { _, _ -> }): Boolean {
-        if (!synchronized(this) { if (refreshing) false else { refreshing = true; true } }) return false
+        if (!synchronized(busy) { busy.add(scope) }) return false
         try {
             val ph = Photos(ctx); val ns = Photos.TEAM
             val all = ArrayList<Item>()
@@ -123,7 +124,7 @@ object Library {
             if (scope == BACKUP) pf.putStr("libb_root", backupRoot(ctx))
             synchronized(this) { index.remove(scope) }
             return true
-        } finally { refreshing = false }
+        } finally { synchronized(busy) { busy.remove(scope) } }
     }
 
     // 서버 찾기표 (범위마다, 처음 쓸 때 DB 에서 만듦)

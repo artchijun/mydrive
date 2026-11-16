@@ -833,10 +833,32 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun paste() {
         val c = clip ?: return; val dst = tab.loc
         if (!dst.writable) { toast("여기에는 붙여 넣을 수 없습니다"); return }
+        // 받는 폴더에 같은 이름이 있으면 어떻게 할지 먼저 묻기
+        bg({ fs.conflicts(c.items, dst) }) { (files, dirs, same) ->
+            val saved = dupPf.getInt("paste_policy", -1)   // 설정에서 정해 둔 방식 (-1: 매번 묻기)
+            if (files == 0 || saved >= 0) { startPaste(c, dst, if (saved >= 0) saved else Fs.SKIP); return@bg }
+            val names = arrayOf("건너뛰기 — 받는 쪽 것을 그대로 둠", "덮어쓰기 — 새것으로 바꿈 (덮이는 것은 NAS 이전 버전·휴지통으로)", "번호 붙이기 — '이름 (2)' 로 둘 다 둠")
+            var pick = Fs.SKIP
+            val more = listOfNotNull(if (dirs > 0) "같은 이름 폴더 ${dirs}개는 합칩니다 (안에서 겹치는 파일도 고른 방식대로)." else null,
+                if (same > 0) "크기·바뀐 때가 같은 파일 ${same}개는 묻지 않고 건너뜁니다." else null).joinToString("\n")
+            val remember = android.widget.CheckBox(this).apply { text = "다음에도 이렇게 (묻지 않음 — 설정에서 바꿈)"; setTextColor(ui.text) }
+            val head = ui.col(ui.label("받는 폴더에 같은 이름의 파일이 ${files}개 있습니다." + (if (more.isNotEmpty()) "\n$more" else ""), 13.5f, ui.sub)).apply { setPadding(ui.dp(22), ui.dp(12), ui.dp(22), 0) }
+            AlertDialog.Builder(this).setTitle(if (c.move) "옮기기 — 이름이 겹칩니다" else "붙여 넣기 — 이름이 겹칩니다")
+                .setView(ui.col(head, android.widget.ListView(this).apply {
+                    choiceMode = android.widget.ListView.CHOICE_MODE_SINGLE
+                    adapter = android.widget.ArrayAdapter(this@MainActivity, android.R.layout.simple_list_item_single_choice, names)
+                    setItemChecked(pick, true); setOnItemClickListener { _, _, w, _ -> pick = w }
+                    layoutParams = ui.lp(h = ui.dp(56) * 3, top = 6)
+                }, remember.apply { layoutParams = ui.lp().apply { leftMargin = ui.dp(16) } }))
+                .setPositiveButton("계속") { _, _ -> if (remember.isChecked) dupPf.edit().putInt("paste_policy", pick).apply(); startPaste(c, dst, pick) }
+                .setNegativeButton("취소", null).show()
+        }
+    }
+    private fun startPaste(c: Clip, dst: Loc, policy: Int) {
         clip = null; refreshChrome(); askNotify()
         val title = if (c.items.size == 1) c.items[0].name else "${c.items.size}개"
         val kind = when { c.move -> Transfers.Kind.MOVE; (dst.kind == "nas" || dst.kind == "cloud") && c.loc.kind != dst.kind -> Transfers.Kind.UP; dst.kind == "local" && (c.loc.kind == "nas" || c.loc.kind == "cloud") -> Transfers.Kind.OPEN; else -> Transfers.Kind.COPY }
-        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") })
+        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move, policy) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") })
     }
 
     private fun renameSel() {
@@ -1173,7 +1195,10 @@ class MainActivity : Activity(), Transfers.Listener {
         opts += "새로 고침" to { if (tab.loc.kind == "home") loadNas(); load() }
         if (tab.loc.browsable) opts += "이 위치를 새 탭으로" to { newTab(tab.loc) }
         if (tab.loc.browsable) opts += (if (favList().contains(tab.loc)) "즐겨찾기에서 빼기" else "즐겨찾기에 넣기") to { toggleFav() }
-        if (tab.loc.kind == "local") opts += "이 폴더 용량 분석" to { analyze(tab.loc) }
+        if (tab.loc.kind == "local" || tab.loc.kind == "nas") {
+            opts += "이 폴더에서 중복 파일 찾기 (하위 폴더까지)" to { navigate(Loc("usage", tab.loc.key(), "dup")) }
+            opts += "이 폴더 용량 분석" to { analyze(tab.loc) }
+        }
         if (tab.loc.kind == "home" && pf.paired) opts += "홈에 보일 NAS 폴더 고르기" to { pickNasShown() }
         if (tab.loc.kind == "usage") usageMenu(opts)
         opts += "보기 방식 (목록·바둑판·큰 그림)" to { viewMenu() }
@@ -1393,19 +1418,19 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun loadUsage(l: Loc, seq: Int) {
         val base = Loc.parse(l.root) ?: return; val bk = l.root; val view = l.path
-        if (base.kind != "local") { tab.loc = base; renderTabs(); load(); return }
+        if (base.kind != "local" && base.kind != "nas") { tab.loc = base; renderTabs(); load(); return }
         val r = Usage.get(base)
         fun wait(title: String, sub: String) { items = emptyList(); rows = listOf(Row(1, title, sub, icon = g("chart", ui.accent))); showList() }
         if (r == null) {
             usageErr[bk]?.let { e -> items = emptyList(); rows = listOf(Row(1, "분석하지 못했습니다", e + " — 눌러서 다시", icon = g("info", ui.red), act = { usageErr.remove(bk); load() })); showList(); return }
-            usageJob(bk, bk) { say -> say("분석 중…"); Usage.scan(base, { n -> say("분석 중… 파일 %,d개".format(n)) }) { isFinishing } }
+            usageJob(bk, bk) { say -> say(if (base.kind == "nas") "NAS 폴더 훑는 중…" else "분석 중…"); Usage.scan(base, { n -> say("훑는 중… 파일 %,d개".format(n)) }, { isFinishing }, if (base.kind == "nas") api else null) }
             wait("분석하는 중…", "파일이 많으면 1~2분 걸립니다. 다른 탭을 써도 계속합니다.")
             return
         }
         if (view == "dup" && r.dups == null) {
             usageErr["$bk|dup"]?.let { e -> items = emptyList(); rows = listOf(Row(1, "중복 파일을 찾지 못했습니다", e + " — 눌러서 다시", icon = g("info", ui.red), act = { usageErr.remove("$bk|dup"); load() })); showList(); return }
-            usageJob("$bk|dup", bk) { say -> say("중복 파일 찾는 중…"); Usage.findDups(r, say) { isFinishing } }
-            wait("중복 파일 찾는 중…", "크기가 같은 파일끼리 내용을 비교합니다. 큰 파일이 많으면 몇 분 걸립니다.")
+            usageJob("$bk|dup", bk) { say -> say("중복 파일 찾는 중…"); Usage.findDups(r, say, { isFinishing }, if (base.kind == "nas") api else null) }
+            wait("중복 파일 찾는 중…", "크기가 같은 파일끼리 내용을 비교합니다" + (if (base.kind == "nas") " (NAS 가 직접 계산)" else "") + ". 큰 파일이 많으면 몇 분 걸립니다.")
             return
         }
         statusText.text = "정리하는 중…"
@@ -1469,7 +1494,12 @@ class MainActivity : Activity(), Transfers.Listener {
             }
             view == "dup" -> {
                 val ds = r.dups ?: emptyList()
-                if (ds.isNotEmpty()) out += Row(0, "${ds.size}묶음 — ⋮ › ‘하나씩만 남기고 고르기’ 로 한꺼번에 고를 수 있습니다")
+                if (ds.isNotEmpty()) {
+                    val rs = Usage.rules(dupPf).filter { it.on }.joinToString(" › ") { Usage.ruleNames[it.key]!!.substringBefore(" (") }
+                    out += Row(0, "${ds.size}묶음 · ${Fmt.size(ds.sumOf { it[0].size * (it.size - 1) })} 줄일 수 있음")
+                    out += Row(1, "규칙대로 하나씩 남기고 나머지 고르기", "남길 것: $rs", icon = g("check", ui.accent), act = { pickDupByRules() })
+                    out += Row(1, "남길 것 고르는 규칙 바꾸기", "순서·켜고 끄기 · 선호 폴더 " + Usage.preferred(dupPf).size + "곳", icon = g("sort", ui.sub), act = { editDupRules() })
+                }
                 for (gp in ds) { out += Row(0, "같은 파일 ${gp.size}개 · 각 ${Fmt.size(gp[0].size)} · ${Fmt.size(gp[0].size * (gp.size - 1))} 줄일 수 있음"); files(gp) }
             }
         }
@@ -1487,17 +1517,59 @@ class MainActivity : Activity(), Transfers.Listener {
         val l = tab.loc; val base = Loc.parse(l.root) ?: return
         val mine = mutableListOf<Pair<String, () -> Unit>>()
         if (l.path == "dup") {
-            mine += "하나씩만 남기고 고르기 (가장 오래된 것 남김)" to {
-                val ds = Usage.get(base)?.dups ?: emptyList()
-                sel.clear(); ds.forEach { gp -> gp.drop(1).forEach { sel.add(it.path) } }
-                adapter.notifyDataSetChanged(); refreshChrome()
-                if (sel.isNotEmpty()) toast("${sel.size}개를 골랐습니다 — 확인하고 [삭제]를 누르세요")
-            }
+            mine += "규칙대로 하나씩 남기고 고르기" to { pickDupByRules() }
+            mine += "남길 것 고르는 규칙…" to { editDupRules() }
             mine += "중복 다시 찾기" to { Usage.get(base)?.dups = null; load() }
         }
         if (l.path.startsWith("d:")) { val p = l.path.substring(2); mine += "이 폴더 열기" to { navigate(base.copy(path = p)) } }
         mine += "다시 분석 (처음부터 다시 셈)" to { Usage.forget(base); usageErr.remove(l.root); load() }
         opts.addAll(0, mine)
+    }
+
+    // ---------- 중복 파일: 남길 것 고르는 규칙 ----------
+    private val dupPf by lazy { getSharedPreferences("mydrive", MODE_PRIVATE) }
+    private fun pickDupByRules() {
+        val base = Loc.parse(tab.loc.root) ?: return
+        val ds = Usage.get(base)?.dups ?: emptyList()
+        val drop = Usage.pickToDelete(dupPf, ds)
+        sel.clear(); drop.forEach { sel.add(it.path) }
+        adapter.notifyDataSetChanged(); refreshChrome()
+        if (sel.isNotEmpty()) toast("묶음마다 하나씩 남기고 ${sel.size}개(${Fmt.size(drop.sumOf { it.size })})를 골랐습니다 — 확인하고 [삭제]")
+    }
+    /** 규칙: 켜고 끄기 + 위아래로 순서 + 선호 폴더 */
+    private fun editDupRules() {
+        val rules = Usage.rules(dupPf).toMutableList()
+        val box = ui.col().apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0) }
+        fun build() {
+            box.removeAllViews()
+            box.addView(ui.label("위에 있는 규칙부터 비교해 묶음마다 하나를 남깁니다. 끝까지 같으면 경로가 짧은 것.", 12.5f, ui.sub).apply { setPadding(0, 0, 0, ui.dp(8)) })
+            rules.forEachIndexed { i, r ->
+                val cb = android.widget.CheckBox(this).apply { text = Usage.ruleNames[r.key]; isChecked = r.on; setTextColor(ui.text); layoutParams = ui.lp(0, weight = 1f)
+                    setOnCheckedChangeListener { _, b -> rules[i] = r.copy(on = b) } }
+                val up = ui.label("▲", 15f, if (i > 0) ui.accent else ui.line).apply { setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8)); setOnClickListener { if (i > 0) { rules.add(i - 1, rules.removeAt(i)); build() } } }
+                val dn = ui.label("▼", 15f, if (i < rules.size - 1) ui.accent else ui.line).apply { setPadding(ui.dp(10), ui.dp(8), ui.dp(10), ui.dp(8)); setOnClickListener { if (i < rules.size - 1) { rules.add(i + 1, rules.removeAt(i)); build() } } }
+                box.addView(ui.row(cb, up, dn))
+            }
+            val pref = Usage.preferred(dupPf)
+            box.addView(ui.label("선호 폴더: " + (if (pref.isEmpty()) "없음" else pref.joinToString(" › ") { "/" + it }), 13f, ui.text).apply { setPadding(0, ui.dp(10), 0, 0) })
+            box.addView(ui.label("선호 폴더 고르기", 14f, ui.accent, bold = true).apply { setPadding(0, ui.dp(8), 0, ui.dp(8)); setOnClickListener { pickPreferred { build() } } })
+        }
+        build()
+        AlertDialog.Builder(this).setTitle("남길 것 고르는 규칙").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("저장") { _, _ -> Usage.saveRules(dupPf, rules); load() }.setNegativeButton("취소", null).show()
+    }
+    /** 선호 폴더: 중복 결과에 나온 폴더들 중에서 고르고 순서 (앞일수록 먼저 남김) */
+    private fun pickPreferred(done: () -> Unit) {
+        val base = Loc.parse(tab.loc.root) ?: return
+        val dirs = (Usage.get(base)?.dups ?: emptyList()).flatten().map { it.path.substringBeforeLast('/', "") }.groupingBy { it }.eachCount().entries.sortedByDescending { it.value }.map { it.key }
+        val cur = Usage.preferred(dupPf).toMutableList()
+        val all = (cur + dirs).distinct()
+        if (all.isEmpty()) { toast("중복 파일을 먼저 찾아 주세요"); return }
+        val names = all.map { "/" + it }.toTypedArray()
+        val checked = BooleanArray(all.size) { all[it] in cur }
+        AlertDialog.Builder(this).setTitle("선호 폴더 (고른 순서대로 먼저 남김)").setMultiChoiceItems(names, checked) { _, w, b ->
+            if (b) { if (all[w] !in cur) cur += all[w] } else cur -= all[w]
+        }.setPositiveButton("확인") { _, _ -> Usage.savePreferred(dupPf, cur); done() }.setNegativeButton("취소", null).show()
     }
 
     /** 분석 첫 칸: 큰 글씨 합계 + 종류별 색 막대 + 범례 */

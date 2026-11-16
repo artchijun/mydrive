@@ -80,6 +80,7 @@ class FreeUpActivity : Activity() {
         seg = ui.row().apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(4)) }
         scopeRow = ui.row().apply { setPadding(ui.dp(14), ui.dp(4), ui.dp(14), ui.dp(2)) }
         filters = ui.col()
+        phoneRow = ui.row().apply { setPadding(ui.dp(14), ui.dp(2), ui.dp(14), ui.dp(2)) }
         val search = ui.input("이름으로 찾기 (예: 20250612, IMG_1234)").apply {
             textSize = 14f; layoutParams = ui.lp(top = 4).apply { leftMargin = ui.dp(14); rightMargin = ui.dp(14) }
             addTextChangedListener(object : TextWatcher {
@@ -90,17 +91,17 @@ class FreeUpActivity : Activity() {
         }
         summary = ui.label("", 13.5f, ui.sub).apply { setPadding(ui.dp(18), ui.dp(10), ui.dp(18), ui.dp(8)) }
         grid = GridView(this).apply { numColumns = 4; verticalSpacing = ui.dp(2); horizontalSpacing = ui.dp(2); setBackgroundColor(ui.bg); selector = android.graphics.drawable.ColorDrawable(0)
-            setOnItemClickListener { _, _, p, _ -> compare(shown[p]) }
-            setOnItemLongClickListener { _, _, p, _ -> if (tab == 0) toggleOut(shown[p].p.key); true } }
+            setOnItemClickListener { _, _, p, _ -> if (tab == 0) toggleOut(shown[p].p.key) else compare(shown[p]) }   // 누르면 빼기/넣기
+            setOnItemLongClickListener { _, _, p, _ -> compare(shown[p]); true } }   // 길게 누르면 서버의 것과 나란히
         preview = CheckBox(this).apply { text = "정리하기 전에 미리 보기"; setTextColor(ui.text); isChecked = pf.bool("fu_preview", true)
             setOnCheckedChangeListener { _, b -> pf.putBool("fu_preview", b); refresh() } }
         go = ui.button("지울 항목 없음") { start() }
         val bottom = ui.col(ui.row(preview).apply { gravity = Gravity.CENTER }, go.apply { layoutParams = ui.lp(h = ui.dp(52), top = 8) })
             .apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel); tag = "bottom" }
-        val root = ui.col(top, scopeRow, statusRow, seg, filters, search, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
+        val root = ui.col(top, scopeRow, phoneRow, statusRow, seg, filters, search, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
         ui.insets(root)
         setContentView(root)
-        buildScope(); buildSeg(); buildFilters()
+        buildScope(); buildPhone(); buildSeg(); buildFilters()
         // 고른 범위의 서버 목록이 1시간보다 오래됐으면(또는 그 뒤 백업으로 올린 것이 있으면) 새로 읽고 대조
         load(force = Library.stale(this, 3_600_000L, scope))
     }
@@ -130,27 +131,56 @@ class FreeUpActivity : Activity() {
         load(force = Library.stale(this, 3_600_000L, k))
     }
 
+    // ---------- 휴대폰 쪽 범위: 모든 폴더 · 고른 폴더 ----------
+    private lateinit var phoneRow: LinearLayout
+    private val phoneAll get() = pf.bool("fu_phone_all", true)
+    private fun phoneSet(): Set<String> = pf.str("fu_phone", "").split('\n').filter { it.isNotEmpty() }.toSet()
+    private fun buildPhone() {
+        phoneRow.removeAllViews()
+        val set = phoneSet()
+        listOf(true to "휴대폰 모든 폴더", false to (if (set.isEmpty()) "휴대폰 폴더 고르기" else "휴대폰 " + BucketPickActivity.describe(set))).forEachIndexed { i, (all, name) ->
+            val sel = all == phoneAll
+            phoneRow.addView(ui.row(ImageView(this).apply { setImageDrawable(Glyph(if (all) "phone" else "folder", if (sel) ui.accent else ui.sub)); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(6) } },
+                ui.label(name, 13.5f, if (sel) ui.text else ui.sub, bold = sel).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END }).apply {
+                gravity = Gravity.CENTER; setPadding(ui.dp(10), 0, ui.dp(10), 0)
+                layoutParams = LinearLayout.LayoutParams(0, ui.dp(38), if (all) 0.8f else 1.2f).apply { if (i == 0) rightMargin = ui.dp(8) }
+                background = ui.press(ui.round(if (sel) ui.select else ui.bg, 10, stroke = if (sel) ui.accent else ui.line), 10)
+                setOnClickListener {
+                    if (all) { if (!phoneAll) { pf.putBool("fu_phone_all", true); buildPhone(); buildSeg(); refresh() } }
+                    else {   // 고른 폴더: 나무에서 고르기 (이미 골라져 있고 그쪽이 켜져 있으면 다시 고르기)
+                        @Suppress("DEPRECATION") startActivityForResult(Intent(this@FreeUpActivity, BucketPickActivity::class.java)
+                            .putExtra("key", "fu_phone").putExtra("title", "대조할 휴대폰 폴더")
+                            .putExtra("hint", "공간 확보에서 서버와 대조할 휴대폰 폴더입니다. 폴더를 고르면 하위 폴더도 함께. 왼쪽 ›를 누르면 펼쳐집니다."), 43)
+                    }
+                }
+            })
+        }
+    }
+
     // ---------- 대조 ----------
+    @Volatile private var loadSeq = 0
     private fun load(force: Boolean) {
         again.isEnabled = false; again.alpha = 0.4f
         summary.text = "휴대폰 사진을 읽는 중…"
         val sc = scope
+        val my = ++loadSeq   // 범위를 바꾸면 앞서 하던 대조는 멈추고 화면에 쓰지 않음
         rows = emptyList(); buildSeg(); refresh()
         bg.execute {
             var err: String? = null
             if (force || !Library.hasServer(this, sc)) {
                 var last = 0L
-                val ok = try { Library.refreshServer(this, sc, { stop }) { n, t ->
+                val ok = try { Library.refreshServer(this, sc, { stop || my != loadSeq }) { n, t ->
                     val now = System.currentTimeMillis(); if (now - last < 300) return@refreshServer; last = now
-                    runOnUiThread { status.text = if (t < 0) "백업 폴더 읽는 중  폴더 ${-t}개 · 사진 ${"%,d".format(n)}장" else "서버 전체 읽는 중  ${"%,d".format(n)} / ${"%,d".format(t)}" }
+                    runOnUiThread { if (my == loadSeq) status.text = if (t < 0) "백업 폴더 읽는 중  폴더 ${-t}개 · 사진 ${"%,d".format(n)}장" else "서버 전체 읽는 중  ${"%,d".format(n)} / ${"%,d".format(t)}" }
                 } } catch (e: Exception) { err = e.message; false }
-                if (!ok && err == null && Library.refreshing) err = "다른 곳에서 서버 목록을 읽는 중 — 잠시 뒤 다시"
+                if (!ok && err == null && Library.isRefreshing(sc)) err = "다른 곳에서 서버 목록을 읽는 중 — 잠시 뒤 다시"
             }
+            if (my != loadSeq) return@execute
             val ph = Library.phone(this, force = true)
-            runOnUiThread { status.text = "휴대폰 ${"%,d".format(ph.size)}개를 대조하는 중…" }
+            runOnUiThread { if (my == loadSeq) status.text = "휴대폰 ${"%,d".format(ph.size)}개를 대조하는 중…" }
             val out = if (Library.hasServer(this, sc)) ph.map { Row(it, Library.matchOnServer(this, it, sc)) } else emptyList()
             runOnUiThread {
-                if (isFinishing || sc != scope) return@runOnUiThread
+                if (isFinishing || my != loadSeq) return@runOnUiThread
                 again.isEnabled = true; again.alpha = 1f
                 rows = out
                 val at = if (Library.hasServer(this, sc)) Library.serverAt(this, sc) else 0L
@@ -167,7 +197,9 @@ class FreeUpActivity : Activity() {
 
     private fun buildSeg() {
         seg.removeAllViews()
-        val on = rows.count { it.m != null }; val off = rows.size - on
+        val ps = phoneSet()
+        val mine = if (phoneAll) rows else rows.filter { BucketPickActivity.covers(ps, it.p.rel) }   // 고른 휴대폰 폴더만
+        val on = mine.count { it.m != null }; val off = mine.size - on
         listOf("서버에 있음  ${"%,d".format(on)}", "서버에 없음  ${"%,d".format(off)}").forEachIndexed { i, s ->
             val sel = i == tab
             seg.addView(ui.label(s, 14f, if (sel) ui.onAccent else ui.text, bold = sel).apply {
@@ -206,8 +238,7 @@ class FreeUpActivity : Activity() {
             AlertDialog.Builder(this).setTitle("파일 크기").setSingleChoiceItems(sizes.map { it.second }.toTypedArray(), sizes.indexOfFirst { it.first == minMb }) { d, i ->
                 pf.putLong("fu_size", sizes[i].first); d.dismiss(); buildFilters(); refresh() }.show()
         })
-        val fs = folders()
-        filters.addView(row("휴대폰 폴더", if (fs.isEmpty()) "모든 폴더" else fs.joinToString(", ") { it.trimEnd('/') }, null) { pickFolders() })
+
     }
 
     private fun pickFolders() {
@@ -224,12 +255,13 @@ class FreeUpActivity : Activity() {
     /** 지금 조건에 맞는 것 */
     private fun refresh() {
         val now = System.currentTimeMillis()
-        val fs = folders()
         val q = query.lowercase()
+        val ps = phoneSet()
+        val inPhone = { r: Row -> phoneAll || BucketPickActivity.covers(ps, r.p.rel) }
         shown = rows.filter { r ->
-            (if (tab == 0) r.m != null else r.m == null) &&
+            inPhone(r) && (if (tab == 0) r.m != null else r.m == null) &&
                 (q.isEmpty() || r.p.name.lowercase().contains(q) || (r.m?.server?.name?.lowercase()?.contains(q) == true)) &&
-                (tab == 1 || !custom || ((ageDays == 0 || now - r.p.taken > ageDays * 86_400_000L) && (minMb == 0L || r.p.size > minMb * 1024 * 1024) && (fs.isEmpty() || r.p.rel in fs)))
+                (tab == 1 || !custom || ((ageDays == 0 || now - r.p.taken > ageDays * 86_400_000L) && (minMb == 0L || r.p.size > minMb * 1024 * 1024)))
         }
         findViewByTag<View>("bottom")?.visibility = if (tab == 0) View.VISIBLE else View.GONE
         if (tab == 0) {
@@ -237,7 +269,7 @@ class FreeUpActivity : Activity() {
             val bytes = pick.sumOf { it.p.size }
             summary.text = if (shown.isEmpty()) (if (rows.isEmpty()) "" else "조건과 일치하는 항목 없음.") else
                 "${"%,d".format(shown.size)}개 중 ${"%,d".format(pick.size)}개 (${StatusBadge.kinds(pick.count { !it.p.video }, pick.count { it.p.video })}) · ${Fmt.size(bytes)} 확보" + (if (shown.size > pick.size) " (뺀 것 ${shown.size - pick.size}개)" else "") +
-                    (if (preview.isChecked) "\n누르면 서버의 것과 나란히 비교 · 길게 누르면 빼기/넣기" else "")
+                    (if (preview.isChecked) "\n누르면 빼기/넣기 · 길게 누르면 서버의 것과 나란히 비교" else "")
             go.text = if (pick.isEmpty()) "지울 항목 없음" else "${"%,d".format(pick.size)}개 지우기 (${Fmt.size(bytes)})"
             go.isEnabled = pick.isNotEmpty(); go.alpha = if (pick.isEmpty()) 0.5f else 1f
         } else {
@@ -370,6 +402,7 @@ class FreeUpActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(code: Int, result: Int, data: Intent?) {
         @Suppress("DEPRECATION") super.onActivityResult(code, result, data)
+        if (code == 43) { if (result == RESULT_OK) { pf.putBool("fu_phone_all", phoneSet().isEmpty()); excluded.clear(); buildPhone(); buildSeg(); refresh() }; return }
         if (code != 41) return
         if (result != RESULT_OK) { Toast.makeText(this, "지우지 않았습니다", Toast.LENGTH_SHORT).show(); return }
         val bytes = pending.sumOf { it.p.size }

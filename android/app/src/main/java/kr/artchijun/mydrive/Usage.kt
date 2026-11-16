@@ -7,7 +7,7 @@ import java.security.MessageDigest
 
 /**
  * 저장소 분석: 어디에 용량이 들었는지 (종류별·폴더별·큰 파일·오래된 큰 파일·중복 파일).
- *   휴대폰 저장소만 (NAS 는 PC·관리 화면에서). 폴더를 직접 훑음.
+ *   휴대폰 저장소와 NAS 폴더 (NAS 는 목록을 폴더마다 물어 훑고, 중복 비교는 NAS 가 직접 해시를 계산). 폴더를 직접 훑음.
  *   결과는 앱이 켜져 있는 동안 기억 (지우면 그만큼 빼 줌). [다시 분석] 으로 새로.
  */
 object Usage {
@@ -47,7 +47,7 @@ object Usage {
         }
     }
 
-    fun scan(base: Loc, progress: (Int) -> Unit, canceled: () -> Boolean): Result {
+    fun scan(base: Loc, progress: (Int) -> Unit, canceled: () -> Boolean, api: Api? = null): Result {
         val files = ArrayList<F>(4096); val dirs = HashMap<String, D>(); var blocked = 0
         dirs[base.path] = D()
         when (base.kind) {
@@ -72,6 +72,24 @@ object Usage {
                     }
                     // Android 11 부터 Android/data·obb 는 다른 앱 것이라 목록이 비어 보임
                     if (list.isEmpty() && (rel(d, root) == "Android/data" || rel(d, root) == "Android/obb")) blocked++
+                }
+            }
+            "nas" -> {
+                val nas = api ?: throw IOException("NAS 에 연결되어 있지 않습니다")
+                val stack = ArrayDeque<String>().apply { add(base.path) }
+                while (stack.isNotEmpty()) {
+                    if (canceled()) throw IOException("취소함")
+                    val d = stack.removeLast()
+                    val list = try { nas.list(base.root, d) } catch (e: Exception) { if (d == base.path) throw e; blocked++; continue }
+                    for (e in list) {
+                        val name = e.path.substringAfterLast('/')
+                        if (name.startsWith("#") || name.startsWith("@") || name == ".mydrive-versions") continue   // 휴지통·시놀로지 내부 폴더
+                        if (e.dir) { dirs.getOrPut(e.path) { D() }; stack.add(e.path) }
+                        else {
+                            val f = F(e.path, e.size, e.mtimeNs / 1_000_000); files += f; add(dirs, base.path, e.path, f.size)
+                            if (files.size % 200 == 0) progress(files.size)
+                        }
+                    }
                 }
             }
             else -> throw IOException("여기는 분석할 수 없습니다")
@@ -116,10 +134,28 @@ object Usage {
     // ---------- 중복 파일 (크기가 같은 것끼리만 내용 비교) ----------
     const val DUP_MIN_LOCAL = 100L * 1024
 
-    fun findDups(r: Result, progress: (String) -> Unit, canceled: () -> Boolean): List<List<F>> {
+    fun findDups(r: Result, progress: (String) -> Unit, canceled: () -> Boolean, api: Api? = null): List<List<F>> {
         val same = synchronized(this) { r.files.toList() }.filter { it.size >= DUP_MIN_LOCAL }.groupBy { it.size }.values.filter { it.size > 1 }.sortedByDescending { it[0].size * (it.size - 1) }
         val out = ArrayList<List<F>>(); val root = File(r.base.root)
         val total = same.sumOf { it.size }; var done = 0
+        if (r.base.kind == "nas") {
+            // NAS: 크기가 같은 것만 NAS 에게 해시를 물음 (4개씩 함께) — 파일을 받지 않음
+            val nas = api ?: throw IOException("NAS 에 연결되어 있지 않습니다")
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+            val n = java.util.concurrent.atomic.AtomicInteger()
+            try {
+                val futures = same.map { g -> pool.submit<List<List<F>>> {
+                    if (canceled()) return@submit emptyList()
+                    val by = g.groupBy { try { nas.hash(r.base.root, it.path) } catch (e: Exception) { "x" + it.path } }
+                    progress("중복 파일 찾는 중… ${n.addAndGet(g.size)} / $total")
+                    by.filter { (k, v) -> v.size > 1 && !k.startsWith("x") }.values.map { it.sortedBy { f -> f.mtimeMs } }
+                } }
+                for (f in futures) { if (canceled()) throw IOException("취소함"); out.addAll(f.get()) }
+            } finally { pool.shutdownNow() }
+            out.sortByDescending { it[0].size * (it.size - 1) }
+            r.dups = out
+            return out
+        }
         for (g in same) {
             if (canceled()) throw IOException("취소함")
             // 앞뒤 64KB 로 먼저 가르고, 같은 것만 끝까지 읽어 확인
@@ -146,4 +182,49 @@ object Usage {
         hex(md.digest())
     }
     private fun hex(b: ByteArray) = b.joinToString("") { "%02x".format(it) }
+
+    // ---------- 남길 것 고르는 규칙 (위에서부터 차례로 비교) ----------
+    val ruleNames = linkedMapOf(
+        "pref" to "선호 폴더에 있는 것",
+        "clean" to "이름이 깔끔한 것 ('(2)'·'복사본'·'copy' 가 없는 것)",
+        "old" to "먼저 만든 것 (바뀐 때가 이른 것)",
+        "new" to "나중에 바뀐 것",
+        "shallow" to "얕은 폴더에 있는 것 (경로가 짧은 것)",
+        "deep" to "깊은 폴더에 있는 것",
+    )
+    data class Rule(val key: String, val on: Boolean)
+    fun rules(pf: android.content.SharedPreferences): List<Rule> {
+        val s = pf.getString("dup_rules", "pref:1,clean:1,old:1,shallow:1,new:0,deep:0") ?: ""
+        val out = s.split(',').mapNotNull { p -> p.split(':').takeIf { it.size == 2 && it[0] in ruleNames }?.let { Rule(it[0], it[1] == "1") } }.toMutableList()
+        ruleNames.keys.filter { k -> out.none { it.key == k } }.forEach { out += Rule(it, false) }
+        return out
+    }
+    fun saveRules(pf: android.content.SharedPreferences, r: List<Rule>) = pf.edit().putString("dup_rules", r.joinToString(",") { it.key + ":" + (if (it.on) "1" else "0") }).apply()
+    fun preferred(pf: android.content.SharedPreferences): List<String> = (pf.getString("dup_pref", "") ?: "").split('\n').filter { it.isNotEmpty() }
+    fun savePreferred(pf: android.content.SharedPreferences, l: List<String>) = pf.edit().putString("dup_pref", l.joinToString("\n")).apply()
+
+    private val copyMark = Regex("""(\(\d+\)|복사본|사본|copy|\s-\s\d+)(\.[^.]+)?$""", RegexOption.IGNORE_CASE)
+    /** 묶음마다 규칙으로 하나를 남김 → 지울 것들 */
+    fun pickToDelete(pf: android.content.SharedPreferences, groups: List<List<F>>): List<F> {
+        val rs = rules(pf).filter { it.on }; val pref = preferred(pf)
+        fun prefRank(f: F): Int { val d = f.path.substringBeforeLast('/', ""); val i = pref.indexOfFirst { d == it || d.startsWith("$it/") }; return if (i < 0) pref.size else i }
+        fun messy(f: F) = if (copyMark.containsMatchIn(f.name)) 1 else 0
+        fun depth(f: F) = f.path.count { it == '/' }
+        val cmp = Comparator<F> { a, b ->
+            for (r in rs) {
+                val c = when (r.key) {
+                    "pref" -> prefRank(a).compareTo(prefRank(b))
+                    "clean" -> messy(a).compareTo(messy(b))
+                    "old" -> a.mtimeMs.compareTo(b.mtimeMs)
+                    "new" -> b.mtimeMs.compareTo(a.mtimeMs)
+                    "shallow" -> depth(a).compareTo(depth(b))
+                    "deep" -> depth(b).compareTo(depth(a))
+                    else -> 0
+                }
+                if (c != 0) return@Comparator c
+            }
+            a.path.length.compareTo(b.path.length).takeIf { it != 0 } ?: a.path.compareTo(b.path)
+        }
+        return groups.flatMap { g -> val keep = g.minWith(cmp); g.filter { it !== keep } }
+    }
 }
