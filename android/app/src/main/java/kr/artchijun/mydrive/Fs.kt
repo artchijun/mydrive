@@ -22,6 +22,7 @@ import java.util.zip.ZipOutputStream
  *  nas   : NAS 연결 폴더 — root = 연결 폴더 이름 (desktop, drive …), path = 그 아래
  *  zip   : 압축 파일 안 (읽기만) — root = 압축 파일 절대 경로, path = 안쪽 폴더
  *  trash : 휴대폰 휴지통
+ *  cloud : 클라우드 저장소 — root = gd(Google Drive)·od(OneDrive), path = 이름 경로
  *  search: 검색 결과 — root = 찾은 곳(Loc.key), path = "검색어\u0001확장자"
  */
 data class Loc(val kind: String, val root: String = "", val path: String = "") {
@@ -29,8 +30,8 @@ data class Loc(val kind: String, val root: String = "", val path: String = "") {
     fun child(name: String) = copy(path = if (path.isEmpty()) name else "$path/$name")
     fun parent(): Loc? = if (path.isEmpty()) null else copy(path = path.substringBeforeLast('/', ""))
     val name: String get() = path.substringAfterLast('/')
-    val browsable get() = kind == "local" || kind == "nas" || kind == "zip"
-    val writable get() = kind == "local" || kind == "nas"
+    val browsable get() = kind == "local" || kind == "nas" || kind == "zip" || kind == "cloud"
+    val writable get() = kind == "local" || kind == "nas" || kind == "cloud"
     companion object {
         fun parse(k: String): Loc? { val p = k.split('\u0002'); return if (p.size == 3) Loc(p[0], p[1], p[2]) else null }
         val HOME = Loc("home")
@@ -106,6 +107,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             Item(e.name, e.dir, e.size, e.mtimeNs / 1_000_000, e.path)
         }
         "zip" -> zipList(File(loc.root), loc.path)
+        "cloud" -> cloud(loc).list(loc.path).filter { showHidden || !it.name.startsWith(".") }
         "trash" -> trashList()
         else -> emptyList()
     }
@@ -118,6 +120,7 @@ class Fs(private val ctx: Context, private val api: Api) {
         when (loc.kind) {
             "local" -> { val f = File(file(loc), name); if (f.exists()) throw IOException("같은 이름이 있습니다"); if (!f.mkdirs()) throw IOException("폴더를 만들지 못했습니다") }
             "nas" -> api.mkdir(loc.root, loc.child(name).path)
+            "cloud" -> { if (cloud(loc).list(loc.path).any { it.name.equals(name, true) }) throw IOException("같은 이름이 있습니다"); cloud(loc).mkdir(loc.child(name).path) }
             else -> throw IOException("여기에는 만들 수 없습니다")
         }
     }
@@ -135,6 +138,7 @@ class Fs(private val ctx: Context, private val api: Api) {
                 scan(b)
             }
             "nas" -> try { api.move(loc.root, it.path, to) } catch (e: ApiException) { if (e.status == 409) throw IOException("같은 이름이 있습니다") else throw e }
+            "cloud" -> cloud(loc).rename(it.path, newName)
             else -> throw IOException("여기서는 이름을 바꿀 수 없습니다")
         }
     }
@@ -144,10 +148,13 @@ class Fs(private val ctx: Context, private val api: Api) {
         for (it in items) when (loc.kind) {
             "local" -> toTrash(File(loc.root, it.path))
             "nas" -> api.delete(loc.root, it.path)
+            "cloud" -> cloud(loc).trash(it.path)   // 클라우드 휴지통으로
             "trash" -> purge(it)
             else -> throw IOException("여기서는 지울 수 없습니다")
         }
     }
+
+    fun cloud(l: Loc) = CloudDrive.of(ctx, l.root)
 
     private fun checkName(n: String) { if (n.isBlank() || n.contains('/') || n == "." || n == "..") throw IOException("이름이 올바르지 않습니다") }
 
@@ -260,6 +267,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             "local" -> File(loc.root, it.path).listFiles()?.forEach { f -> walk(loc, Item(f.name, f.isDirectory, if (f.isDirectory) 0 else f.length(), f.lastModified(), "${it.path}/${f.name}"), out, here) }
             "nas" -> api.list(loc.root, it.path).forEach { e -> walk(loc, Item(e.name, e.dir, e.size, e.mtimeNs / 1_000_000, e.path), out, here) }
             "zip" -> zipList(File(loc.root), it.path).forEach { c -> walk(loc, c, out, here) }
+            "cloud" -> cloud(loc).list(it.path).forEach { c -> walk(loc, c, out, here) }
         }
     }
 
@@ -282,7 +290,7 @@ class Fs(private val ctx: Context, private val api: Api) {
         val taken = list(dst, true).map { it.name.lowercase() }.toMutableSet()
         var renamed = 0
         // 같은 곳 안에서 옮기기는 이름만 바꿈 (빠름)
-        if (move && src.kind == dst.kind && src.root == dst.root && (src.kind == "local" || src.kind == "nas")) {
+        if (move && src.kind == dst.kind && src.root == dst.root && (src.kind == "local" || src.kind == "nas" || src.kind == "cloud")) {
             for (it in items) {
                 if (job.cancel) throw Canceled()
                 if (it.path.substringBeforeLast('/', "") == dst.path) continue   // 제자리
@@ -291,7 +299,8 @@ class Fs(private val ctx: Context, private val api: Api) {
                 if (src.kind == "local") {
                     val a = File(src.root, it.path); val b = File(src.root, to)
                     if (!a.renameTo(b)) { copyTree(job, src, it, dst, n); a.deleteRecursively(); scan(a) } else { scan(a); scan(b) }
-                } else api.move(src.root, it.path, to)
+                } else if (src.kind == "cloud") { cloud(src).move(it.path, dst.path); if (n != it.name) cloud(src).rename(dst.child(it.name).path, n) }
+                else api.move(src.root, it.path, to)
             }
             return if (renamed > 0) "같은 이름이 있어 ${renamed}개는 번호를 붙였습니다" else null
         }
@@ -305,6 +314,7 @@ class Fs(private val ctx: Context, private val api: Api) {
         if (move) for ((it, _) in plan) when (src.kind) {
             "local" -> { val f = File(src.root, it.path); f.deleteRecursively(); scan(f) }
             "nas" -> api.delete(src.root, it.path)
+            "cloud" -> cloud(src).trash(it.path)
         }
         return if (renamed > 0) "같은 이름이 있어 ${renamed}개는 번호를 붙였습니다" else null
     }
@@ -315,7 +325,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             if (job.cancel) throw Canceled()
             val rel = topName + nd.rel.removePrefix(top.name)
             val to = dst.child(rel)
-            if (nd.dir) { when (dst.kind) { "local" -> file(to).mkdirs(); "nas" -> try { api.mkdir(dst.root, to.path) } catch (e: ApiException) { if (e.status != 409) throw e } }; continue }
+            if (nd.dir) { when (dst.kind) { "local" -> file(to).mkdirs(); "nas" -> try { api.mkdir(dst.root, to.path) } catch (e: ApiException) { if (e.status != 409) throw e }; "cloud" -> cloud(dst).mkdir(to.path) }; continue }
             copyFile(job, src, srcPath(src, top, nd.rel), nd, dst, to)
         }
     }
@@ -329,24 +339,30 @@ class Fs(private val ctx: Context, private val api: Api) {
                 when (src.kind) {
                     "local" -> { File(src.root, sp).inputStream().use { inp -> out.outputStream().use { pump(job, inp, it) } } }
                     "nas" -> api.download(src.root, Entry(sp, false, nd.size, nd.mtimeMs * 1_000_000), out, prog, { job.cancel })
+                    "cloud" -> cloud(src).download(sp, nd.size, out, prog) { job.cancel }
                     "zip" -> openZip(File(src.root)).use { z -> z.getInputStream(z.getEntry(sp)).use { inp -> out.outputStream().use { pump(job, inp, it) } } }
                 }
                 if (nd.mtimeMs > 0) out.setLastModified(nd.mtimeMs)
                 scan(out)
             }
-            dst.kind == "nas" -> {
+            dst.kind == "nas" || dst.kind == "cloud" -> {
                 var tmp: File? = null
+                var size = nd.size
                 val open: () -> InputStream = when (src.kind) {
                     "local" -> { { File(src.root, sp).inputStream() } }
                     else -> {   // NAS·압축 파일 → 일단 앱 안에 받아 두고 올림
                         val t = File(File(ctx.cacheDir, "xfer").apply { mkdirs() }, Api.newId()); tmp = t
                         if (src.kind == "nas") api.download(src.root, Entry(sp, false, nd.size, nd.mtimeMs * 1_000_000), t, { _, _ -> }, { job.cancel })
+                        else if (src.kind == "cloud") cloud(src).download(sp, nd.size, t, { _, _ -> }) { job.cancel }
                         else openZip(File(src.root)).use { z -> z.getInputStream(z.getEntry(sp)).use { inp -> t.outputStream().use { inp.copyTo(it) } } }
                         ({ t.inputStream() })
                     }
                 }
-                try { api.upload(dst.root, to.path, nd.size, maxOf(nd.mtimeMs, 1) * 1_000_000, open, prog, { job.cancel }) }
-                finally { tmp?.delete() }
+                tmp?.let { size = it.length() }   // 구글 문서는 받으면서 크기가 정해짐
+                try {
+                    if (dst.kind == "nas") api.upload(dst.root, to.path, size, maxOf(nd.mtimeMs, 1) * 1_000_000, open, prog, { job.cancel })
+                    else cloud(dst).upload(to.path.substringBeforeLast('/', ""), to.name, size, open, prog) { job.cancel }
+                } finally { tmp?.delete() }
             }
         }
         job.done = base + nd.size; Transfers.progress(job, job.done, job.total)
@@ -408,6 +424,7 @@ class Fs(private val ctx: Context, private val api: Api) {
                 }
                 out to (out.size >= limit)
             }
+            "cloud" -> throw IOException("클라우드 저장소에서는 아직 찾기를 할 수 없습니다")
             else -> emptyList<Item>() to false
         }
     }

@@ -132,7 +132,8 @@ func (r *Root) subtreeLocked(rel string) []string {
 func skipName(name string) bool {
 	switch {
 	case name == "#recycle", name == "@eaDir", name == "#snapshot", name == "@tmp",
-		name == ".SynologyWorkingDirectory", name == "@SynoDrive", name == "@SynoResource", name == verDirName:
+		name == ".SynologyWorkingDirectory", name == "@SynoDrive", name == "@SynoResource", name == verDirName,
+		name == "$RECYCLE.BIN", name == "System Volume Information": // 윈도우 형식 USB 디스크
 		return true
 	case strings.HasPrefix(name, ".mydrive-tmp-"):
 		return true

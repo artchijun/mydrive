@@ -105,6 +105,7 @@ class SettingsActivity : Activity() {
 
         // ===== 홈 =====
         head("홈")
+        item("home", "홈 편집", "홈의 섹션과 아이콘 순서를 끌어서 바꾸고, 쓰지 않는 것은 숨깁니다 (홈의 섹션 제목을 길게 눌러도 됨)") { pf.putBool("openHomeEdit", true); finish() }
         val hid = hiddenNas()
         item("nas", "홈에 보일 NAS 폴더", "Mydrive 연결 폴더 가운데 홈과 왼쪽 메뉴에 보일 것만 고릅니다", if (hid.isEmpty()) "모두 보임" else "${hid.size}개 숨김") { pickNas() }
 
@@ -121,6 +122,14 @@ class SettingsActivity : Activity() {
             ask("인터넷 주소", pf.outside) { pf.outside = it.trimEnd('/'); changed() }
         }
         item("refresh", "연결 확인", "두 주소에 지금 닿는지 확인합니다") { checkConn() }
+        for (c in CloudDrive.all(this)) {
+            if (c.connected) item("cloud", "${c.title} 연결 끊기", "이 휴대폰의 로그인 정보만 지웁니다. 클라우드의 파일은 그대로", c.account) {
+                AlertDialog.Builder(this).setMessage("${c.title} (${c.account}) 연결을 끊을까요?").setPositiveButton("끊기") { _, _ -> c.disconnect(); changed() }.setNegativeButton("취소", null).show() }
+            else item("cloud", "${c.title} 연결", if (c.configured) "브라우저에서 계정을 고르면 홈의 ‘클라우드’에 나옵니다. 파일은 휴대폰과 ${c.title} 사이에서만 오갑니다" else "앱 등록을 마치는 대로 다음 판에서 열립니다", "연결 안 됨") {
+                if (!c.configured) Toast.makeText(this, "아직 준비 중입니다", Toast.LENGTH_SHORT).show()
+                else c.connect(this) { err -> Toast.makeText(this, err ?: "${c.title} 연결됨 · ${c.account}", Toast.LENGTH_LONG).show(); changed() }
+            }
+        }
 
         // ===== 정보 =====
         head("정보")

@@ -11,6 +11,12 @@ val ks = Properties().apply {
     if (f.exists()) f.inputStream().use { load(it) }
 }
 
+// 클라우드 저장소 앱 등록 값: android/cloud.properties (저장소에 넣지 않음). 없으면 클라우드 연결이 '준비 중'
+val cloud = Properties().apply {
+    val f = rootProject.file("cloud.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     namespace = "kr.artchijun.mydrive"
     compileSdk = 35
@@ -18,9 +24,13 @@ android {
         applicationId = "kr.artchijun.mydrive"
         minSdk = 29          // 안드로이드 10 이상 (다운로드 폴더에 바로 저장)
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.5.2"
+        versionCode = 10
+        versionName = "0.6.0"
+        buildConfigField("String", "GD_CLIENT_ID", "\"" + cloud.getProperty("gdClientId", "") + "\"")
+        buildConfigField("String", "GD_CLIENT_SECRET", "\"" + cloud.getProperty("gdClientSecret", "") + "\"")
+        buildConfigField("String", "OD_CLIENT_ID", "\"" + cloud.getProperty("odClientId", "") + "\"")
     }
+    buildFeatures { buildConfig = true }
     signingConfigs {
         if (ks.getProperty("storeFile") != null) create("release") {
             storeFile = rootProject.file(ks.getProperty("storeFile"))

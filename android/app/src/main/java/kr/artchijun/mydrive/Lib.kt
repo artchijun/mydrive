@@ -68,14 +68,43 @@ object Lib {
         return out
     }
 
-    /** 한 종류의 파일들 (새것부터) → 목록 줄. path 는 볼륨 기준 */
-    fun list(ctx: Context, root: String, key: String, limit: Int = 3000): List<Item> {
+    /** 폴더별로 묶어 보는 종류 (이미지·오디오·동영상·문서). 새 파일·앱은 한 줄로 */
+    fun grouped(key: String) = key == "image" || key == "audio" || key == "video" || key == "doc"
+
+    /** Loc("lib").path = "종류" (폴더 목록) 또는 "종류/폴더" (그 폴더의 파일). 볼륨 맨 위 폴더는 "종류/" */
+    fun keyOfPath(path: String) = path.substringBefore('/')
+    fun dirOfPath(path: String): String? = if (path.contains('/')) path.substringAfter('/') else null
+
+    /** 한 종류의 파일들 (새것부터) → 목록 줄. path 는 볼륨 기준. dir 을 주면 그 폴더 바로 안의 것만 */
+    fun list(ctx: Context, root: String, key: String, dir: String? = null, limit: Int = 5000): List<Item> {
         val out = ArrayList<Item>()
         val cut = System.currentTimeMillis() - NEW_DAYS * 86_400_000L
         query(ctx, root) { p, sz, m, t ->
             val hit = if (key == "new") m >= cut else keyOf(p, t) == key
-            if (hit) out += Item(p.substringAfterLast('/'), false, sz, m, p.substring(root.length + 1))
+            if (!hit) return@query
+            val rel = p.substring(root.length + 1)
+            if (dir != null && rel.substringBeforeLast('/', "") != dir) return@query
+            out += Item(p.substringAfterLast('/'), false, sz, m, rel)
         }
         return out.sortedByDescending { it.mtimeMs }.take(limit)
+    }
+
+    /** 그 종류를 담고 있는 폴더들 (최근에 바뀐 폴더부터). Item: path = 폴더(볼륨 기준), count = 파일 수,
+     *  size = 합계, mtimeMs = 가장 새 파일, extra = 가장 새 파일 경로 (미리보기; 앞에 '!' 면 갤러리 숨김) */
+    fun folders(ctx: Context, root: String, key: String, rootTitle: String): List<Item> {
+        class F(var n: Int = 0, var size: Long = 0, var m: Long = 0, var newest: String = "")
+        val map = HashMap<String, F>()
+        query(ctx, root) { p, sz, m, t ->
+            if (keyOf(p, t) != key) return@query
+            val rel = p.substring(root.length + 1)
+            val f = map.getOrPut(rel.substringBeforeLast('/', "")) { F() }
+            f.n++; f.size += sz
+            if (m >= f.m) { f.m = m; f.newest = rel }
+        }
+        val media = key == "image" || key == "video"
+        // extra 앞의 '!' = 갤러리에서 숨긴 폴더 (.nomedia)
+        return map.entries.map { (d, f) -> Item(if (d.isEmpty()) rootTitle else d.substringAfterLast('/'), true, f.size, f.m, d, f.n,
+            (if (File(File(root, d), ".nomedia").exists()) "!" else "") + (if (media) f.newest else "")) }
+            .sortedByDescending { it.mtimeMs }
     }
 }

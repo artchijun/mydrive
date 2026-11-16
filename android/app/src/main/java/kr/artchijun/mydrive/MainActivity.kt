@@ -127,7 +127,7 @@ class MainActivity : Activity(), Transfers.Listener {
         restoreTabs()
         if (!takeGo(intent)) takeShare(intent)
         renderTabs(); load()
-        loadNas()
+        loadNas(); loadCloud()
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); if (!takeGo(intent)) takeShare(intent) }
@@ -151,6 +151,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (pf.int("stamp", 0) != stamp) { saveTabs(); recreate(); return }   // 설정을 바꾸고 돌아옴
         Transfers.listener = this; onTransfers()
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
+        if (pf.bool("openHomeEdit", false)) { pf.putBool("openHomeEdit", false); if (tab.loc.kind != "home") navigate(Loc.HOME); editHome() }
         if (System.currentTimeMillis() - pf.lastUpdateCheck > 6 * 3600_000L) checkUpdate(false)
     }
 
@@ -274,14 +275,16 @@ class MainActivity : Activity(), Transfers.Listener {
         "trash" -> "휴지통"
         "search" -> "검색: " + l.path.substringBefore('\u0001').ifEmpty { "." + l.path.substringAfter('\u0001') }
         "usage" -> usageTitle(l)
-        "lib" -> Lib.cat(l.path).title
+        "lib" -> Lib.dirOfPath(l.path)?.let { d -> if (d.isEmpty()) volTitle(l.root) else d.substringAfterLast('/') } ?: Lib.cat(Lib.keyOfPath(l.path)).title
         "nas" -> if (l.path.isEmpty()) l.root.removePrefix("~") else l.name
+        "cloud" -> if (l.path.isEmpty()) fs.cloud(l).title else l.name
         "zip" -> if (l.path.isEmpty()) File(l.root).name else l.name
         else -> if (l.path.isEmpty()) volTitle(l.root) else l.name
     }
     private fun tabIcon(l: Loc): Drawable = when (l.kind) {
-        "home" -> g("home", ui.sub); "trash" -> g("trash", ui.sub); "search" -> g("search", ui.sub); "usage" -> g("chart", ui.accent); "lib" -> Lib.cat(l.path).let { Glyph(it.glyph, it.color) }
+        "home" -> g("home", ui.sub); "trash" -> g("trash", ui.sub); "search" -> g("search", ui.sub); "usage" -> g("chart", ui.accent); "lib" -> Lib.cat(Lib.keyOfPath(l.path)).let { Glyph(it.glyph, it.color) }
         "nas" -> if (l.path.isEmpty()) g(if (l.root.startsWith("~")) "globe" else "nas", ui.accent) else FileIcon(true, l.name)
+        "cloud" -> if (l.path.isEmpty()) cloudIcon(l.root) else FileIcon(true, l.name)
         "zip" -> FileIcon(false, "a.zip")
         else -> if (l.path.isEmpty()) g(if (l.root == fs.volumes().first().root.path) "phone" else "sd", ui.accent) else if (l.path == "Download") FileIcon(true, "", "download") else FileIcon(true, l.name)
     }
@@ -371,7 +374,7 @@ class MainActivity : Activity(), Transfers.Listener {
         when {
             l.kind == "search" -> Loc.parse(l.root)?.let { navigate(it) }
             l.kind == "usage" -> usageUp(l)
-            l.kind == "lib" -> navigate(Loc.HOME)
+            l.kind == "lib" -> navigate(if (Lib.dirOfPath(l.path) != null) l.copy(path = Lib.keyOfPath(l.path)) else Loc.HOME)
             l.parent() != null -> navigate(l.parent()!!)
             l.kind == "zip" -> { val f = File(l.root); vol(f)?.let { v -> navigate(Loc("local", v.root.path, f.parentFile!!.relativeTo(v.root).path)) } }
             l.kind != "home" -> navigate(Loc.HOME)
@@ -410,7 +413,8 @@ class MainActivity : Activity(), Transfers.Listener {
         net.execute {
             var err: String? = null; var out: List<Item> = emptyList(); var more = false
             try {
-                if (l.kind == "lib") out = Lib.list(this, l.root, l.path)
+                if (l.kind == "lib") { val k = Lib.keyOfPath(l.path); val d = Lib.dirOfPath(l.path)
+                    out = if (Lib.grouped(k) && d == null) Lib.folders(this, l.root, k, volTitle(l.root)) else Lib.list(this, l.root, k, d) }
                 else if (l.kind == "search") {
                     val base = Loc.parse(l.root)!!; val q = l.path.substringBefore('\u0001'); val ext = l.path.substringAfter('\u0001', "")
                     val r = fs.search(base, q, ext, showHidden) { seq != loadSeq }; out = r.first; more = r.second
@@ -484,7 +488,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (l.kind == "home") { statusText.text = "Mydrive ${Update.current(this)}"; return }
         if (l.kind == "usage") { statusText.text = usageStatus(l); return }
         val d = items.count { it.dir }; val f = items.size - d
-        statusText.text = (if (l.kind == "search") "찾음 · " else if (l.kind == "lib") "새것부터 · " else "") + (if (d > 0 || l.kind != "lib") "폴더 ${d}개, " else "") + "파일 ${f}개 (${Fmt.size(items.filter { !it.dir }.sumOf { it.size })})" + (if (more) " · 더 있음 (검색어를 좁혀 주세요)" else "")
+        statusText.text = (if (l.kind == "search") "찾음 · " else if (l.kind == "lib" && d == 0) "새것부터 · " else "") + (if (l.kind == "lib" && d > 0) "폴더 ${d}개 · 파일 ${items.sumOf { maxOf(0, it.count) }}개 (${Fmt.size(items.sumOf { it.size })})" else (if (d > 0 || l.kind != "lib") "폴더 ${d}개, " else "") + "파일 ${f}개 (${Fmt.size(items.filter { !it.dir }.sumOf { it.size })})") + (if (more) " · 더 있음 (검색어를 좁혀 주세요)" else "")
     }
 
     // ---------- 처음 화면 ----------
@@ -503,11 +507,8 @@ class MainActivity : Activity(), Transfers.Listener {
     private val tileWant by lazy { intArrayOf(58, 72, 88)[pf.int("tileSize", 1).coerceIn(0, 2)] }
     private val tileBox get() = minOf(tileWant, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / homeCols()).toInt() - 18)
 
-    private fun homeRows(): List<Row> {
-        val out = mutableListOf<Row>()
-        if (!fs.canReadAll()) out += Row(1, "휴대폰 파일을 보려면 권한이 필요합니다", "눌러서 ‘모든 파일 접근’을 허용해 주세요", icon = g("info", ui.accent), act = { askAllFiles() })
-        val cols = homeCols()
-        fun grid(head: String, ts: List<Row>) { if (ts.isEmpty()) return; if (head.isNotEmpty()) out += Row(0, head); ts.chunked(cols).forEach { out += Row(4, tiles = it) } }
+    /** 홈 섹션들 (키, 제목, 아이콘 줄) — 순서·숨김은 홈 편집에서 (HomeEdit) */
+    private fun homeSections(): List<Triple<String, String, List<Row>>> {
         fun sz(b: Long) = Fmt.size(b).replace(" ", "")
         val phone = mutableListOf<Row>()
         for (v in fs.volumes()) phone += Row(1, v.title, "${sz(v.total - v.free)} / ${sz(v.total)}", icon = g(if (v.removable) "sd" else "phone", ui.accent), go = Loc("local", v.root.path))
@@ -515,7 +516,6 @@ class MainActivity : Activity(), Transfers.Listener {
         phone += Row(1, "다운로드", File(prim, "Download").list()?.let { "${it.size}개" } ?: "", icon = FileIcon(true, "", "download"), go = Loc("local", prim, "Download"))
         val sums = libSums
         for (c in Lib.cats.filter { it.key != "apk" }) phone += Row(1, c.title, sums?.get(c.key)?.let { "${sz(it.size)} (${it.count})" } ?: "…", icon = Glyph(c.glyph, c.color), go = Loc("lib", prim, c.key))
-        grid("", phone)
         val nas = mutableListOf<Row>()
         when {
             !pf.paired -> nas += Row(1, "NAS 연결", "눌러서 연결", icon = g("nas", ui.sub), act = { startActivity(Intent(this, SetupActivity::class.java)) })
@@ -527,13 +527,56 @@ class MainActivity : Activity(), Transfers.Listener {
                 nas += Row(1, "폴더 추가", "NAS 다른 폴더", icon = g("plus", ui.sub), act = { WebPick.start(this, ui, api) { loadNas() } })
             }
         }
-        grid("NAS", nas)
-        grid("즐겨찾기", favList().map { l -> Row(1, tabTitle(l), placeText(l).substringBeforeLast('/').substringAfterLast('/'), icon = tabIcon(l), go = l) })
+        val cloud = CloudDrive.all(this).map { c ->
+            if (c.connected) Row(1, c.title, cloudSub[c.id] ?: c.account.substringBefore('@'), icon = cloudIcon(c.id), go = Loc("cloud", c.id))
+            else Row(1, c.title, if (c.configured) "눌러서 연결" else "준비 중", icon = cloudIcon(c.id, false), act = { connectCloud(c) })
+        }
         val tr = trashInfo
-        grid("도구", listOf(Row(1, "저장소 분석", "큰 파일 · 중복", icon = g("chart", ui.accent), act = { pickAnalyze() }),
-            Row(1, "휴지통", tr?.let { if (it.first == 0) "비어 있음" else sz(it.second) } ?: "", icon = g("trash", ui.sub), go = Loc.TRASH),
-            Row(1, "설정", "화면 · 연결", icon = g("settings", ui.sub), act = { openSettings() })))
+        return listOf(Triple("phone", "휴대폰", phone), Triple("nas", "NAS", nas), Triple("cloud", "클라우드", cloud),
+            Triple("fav", "즐겨찾기", favList().map { l -> Row(1, tabTitle(l), placeText(l).substringBeforeLast('/').substringAfterLast('/'), icon = tabIcon(l), go = l) }),
+            Triple("tools", "도구", listOf(Row(1, "저장소 분석", "큰 파일 · 중복", icon = g("chart", ui.accent), act = { pickAnalyze() }),
+                Row(1, "휴지통", tr?.let { if (it.first == 0) "비어 있음" else sz(it.second) } ?: "", icon = g("trash", ui.sub), go = Loc.TRASH),
+                Row(1, "설정", "화면 · 연결", icon = g("settings", ui.sub), act = { openSettings() }))))
+    }
+    private fun tileKey(r: Row) = r.go?.key() ?: ("t:" + r.title)
+
+    /** 처음 화면: 큰 아이콘 바둑판 (휴대폰 · NAS · 클라우드 · 즐겨찾기 · 도구), 순서는 홈 편집대로 */
+    private fun homeRows(): List<Row> {
+        val out = mutableListOf<Row>()
+        if (!fs.canReadAll()) out += Row(1, "휴대폰 파일을 보려면 권한이 필요합니다", "눌러서 ‘모든 파일 접근’을 허용해 주세요", icon = g("info", ui.accent), act = { askAllFiles() })
+        val cols = homeCols()
+        val lay = HomeEdit.load(pf)
+        var first = true
+        for ((key, head, ts0) in lay.order(homeSections(), lay.secs.ifEmpty { null }) { it.first }) {
+            if ("sec:$key" in lay.hide) continue
+            val ts = lay.order(ts0, lay.tiles[key]) { tileKey(it) }.filter { tileKey(it) !in lay.hide }
+            if (ts.isEmpty()) continue
+            // 휴대폰 섹션이 맨 위면 제목 없이 (참고 앱처럼)
+            if (!(first && key == "phone")) out += Row(0, head, long = { editHome() })
+            first = false
+            ts.chunked(cols).forEach { out += Row(4, tiles = it) }
+        }
         return out
+    }
+
+    private fun editHome() = HomeEdit.show(this, ui, pf, homeSections().map { (k, t, rs) -> HomeEdit.Sec(k, t, rs.map { r -> HomeEdit.Tile(tileKey(r), r.title, r.icon) }) }) { refreshHome() }
+
+    // ---------- 클라우드 ----------
+    private val cloudSub = HashMap<String, String>()
+    private fun cloudIcon(id: String, on: Boolean = true) = Glyph("cloud", if (!on) ui.sub else if (id == "gd") 0xFF34A853.toInt() else 0xFF2F8FE8.toInt())
+    private fun connectCloud(c: CloudDrive) {
+        if (!c.configured) { toast("${c.title} 연결은 다음 판에서 열립니다 (앱 등록 중)"); return }
+        AlertDialog.Builder(this).setTitle("${c.title} 연결")
+            .setMessage("브라우저에서 계정을 고르고 허용을 누르세요. 끝나면 이 앱으로 돌아옵니다.\n\n파일은 휴대폰과 ${c.title} 사이에서만 오가고, 로그인 정보는 이 휴대폰에만 둡니다." +
+                (if (c.id == "gd") "\n\n‘확인되지 않은 앱’ 경고가 나오면 [고급] → [Mydrive(으)로 이동] 을 누르세요 (개인용 앱이라 구글 심사를 받지 않았습니다)." else ""))
+            .setPositiveButton("연결") { _, _ -> c.connect(this) { err -> if (err != null) toast(err) else { toast("${c.title} 연결됨 · ${c.account}"); loadCloud(); refreshHome() } } }
+            .setNegativeButton("취소", null).show()
+    }
+    private fun loadCloud() {
+        for (c in CloudDrive.all(this).filter { it.connected }) net.execute {
+            val q = c.quota()
+            runOnUiThread { if (q != null) { cloudSub[c.id] = Fmt.size(q.first).replace(" ", "") + (if (q.second > 0) " / " + Fmt.size(q.second).replace(" ", "") else ""); refreshHome() } }
+        }
     }
     private var trashInfo: Pair<Int, Long>? = null
 
@@ -549,6 +592,7 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun placeText(l: Loc) = when (l.kind) {
         "nas" -> "NAS " + l.root.removePrefix("~") + (if (l.path.isEmpty()) "" else "/" + l.path)
+        "cloud" -> fs.cloud(l).title + (if (l.path.isEmpty()) "" else "/" + l.path)
         "local" -> volTitle(l.root) + (if (l.path.isEmpty()) "" else "/" + l.path)
         "zip" -> File(l.root).name + (if (l.path.isEmpty()) "" else "/" + l.path)
         else -> tabTitle(l)
@@ -563,12 +607,13 @@ class MainActivity : Activity(), Transfers.Listener {
         crumbs.removeAllViews()
         val parts = mutableListOf<Pair<String, Loc>>()
         when (l.kind) {
-            "local", "nas", "zip" -> {
-                parts += (if (l.kind == "nas") "NAS " + l.root.removePrefix("~") else if (l.kind == "zip") File(l.root).name else volTitle(l.root)) to l.copy(path = "")
+            "local", "nas", "zip", "cloud" -> {
+                parts += (if (l.kind == "nas") "NAS " + l.root.removePrefix("~") else if (l.kind == "cloud") fs.cloud(l).title else if (l.kind == "zip") File(l.root).name else volTitle(l.root)) to l.copy(path = "")
                 var acc = ""; if (l.path.isNotEmpty()) for (s in l.path.split('/')) { acc = if (acc.isEmpty()) s else "$acc/$s"; parts += s to l.copy(path = acc) }
             }
             "search" -> { Loc.parse(l.root)?.let { parts += placeText(it) to it }; parts += tabTitle(l) to l }
-            "lib" -> { parts += "홈" to Loc.HOME; parts += tabTitle(l) to l }
+            "lib" -> { parts += "홈" to Loc.HOME; val k = Lib.keyOfPath(l.path); parts += Lib.cat(k).title to l.copy(path = k)
+                Lib.dirOfPath(l.path)?.let { parts += tabTitle(l) to l } }
             "usage" -> { Loc.parse(l.root)?.let { b ->
                 parts += placeText(b) to b; parts += "분석" to l.copy(path = "")
                 val v = l.path
@@ -622,6 +667,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val l = tab.loc
         when {
             l.kind == "trash" -> trashMenu(it)
+            l.kind == "lib" && it.dir && Lib.dirOfPath(l.path) == null -> navigate(l.copy(path = l.path + "/" + it.path))
             l.kind == "search" || l.kind == "usage" || l.kind == "lib" -> { val base = baseOf(l); if (it.dir) navigate(base.copy(path = it.path)) else openItem(base, it) }
             it.dir -> navigate(l.copy(path = it.path))
             else -> openItem(l, it)
@@ -630,6 +676,7 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun longTap(pos: Int) {
         val r = rows.getOrNull(pos) ?: return
+        if (r.type == 0) { r.long?.invoke(); return }
         if (r.type == 1) { cardMenu(r); return }
         if (r.type == 2) toggle(r.item!!)
     }
@@ -637,8 +684,12 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun cardTap(r: Row) { r.act?.invoke() ?: r.go?.let { navigate(it) } }
     private fun cardMenu(r: Row) {
         r.long?.let { it(); return }
-        val g = r.go ?: return
+        val home = tab.loc.kind == "home"
+        val g = r.go ?: run { if (home) AlertDialog.Builder(this).setTitle(r.title).setItems(arrayOf("홈 편집 (순서·숨기기)")) { _, _ -> editHome() }.show(); return }
         val opts = mutableListOf<Pair<String, () -> Unit>>("새 탭에서 열기" to { newTab(g) }, (if (favList().contains(g)) "즐겨찾기에서 빼기" else "즐겨찾기에 넣기") to { toggleFav(g) })
+        if (g.kind == "cloud" && g.path.isEmpty()) { val c = fs.cloud(g)
+            opts += "연결 끊기" to { AlertDialog.Builder(this).setMessage("${c.title} (${c.account}) 연결을 끊습니다. 이 휴대폰의 로그인 정보만 지우고, 클라우드의 파일은 그대로 있습니다.")
+                .setPositiveButton("끊기") { _, _ -> c.disconnect(); cloudSub.remove(c.id); refreshHome() }.setNegativeButton("취소", null).show() } }
         if (g.kind == "local") opts += "저장소 분석" to { analyze(g) }
         if (g.kind == "nas" && g.path.isEmpty() && g.root.startsWith("~")) {
             val n = g.root.removePrefix("~")
@@ -649,6 +700,7 @@ class MainActivity : Activity(), Transfers.Listener {
             opts += "홈에서 숨기기" to { pf.putStr("nasHide", JSONArray(nasHidden() + g.root).toString()); refreshHome() }
             opts += "보일 NAS 폴더 고르기" to { pickNasShown() }
         }
+        if (home) opts += "홈 편집 (순서·숨기기)" to { editHome() }
         AlertDialog.Builder(this).setTitle(r.title).setItems(opts.map { it.first }.toTypedArray()) { _, w -> opts[w].second() }.show()
     }
 
@@ -665,8 +717,8 @@ class MainActivity : Activity(), Transfers.Listener {
             .setNegativeButton("취소", null).show()
     }
 
-    private fun toggle(it: Item) { if (!sel.remove(it.path)) sel.add(it.path); adapter.notifyDataSetChanged(); refreshChrome() }
-    private fun selItems() = items.filter { sel.contains(it.path) }
+    private fun toggle(it: Item) { if (it.dir && it.path.isEmpty()) { toast("저장소 맨 위는 고를 수 없습니다"); return }; if (!sel.remove(it.path)) sel.add(it.path); adapter.notifyDataSetChanged(); refreshChrome() }
+    private fun selItems() = items.filter { sel.contains(it.path) && !(it.dir && it.path.isEmpty()) }   // 저장소 맨 위(모아 보기 폴더 줄)는 빼고
     private fun clearSel() { sel.clear(); adapter.notifyDataSetChanged(); refreshChrome() }
     private fun clearSelSilently() { sel.clear() }
     /** 고른 것 가운데 처음과 끝 사이를 모두 고름 */
@@ -700,7 +752,7 @@ class MainActivity : Activity(), Transfers.Listener {
                 val f = File(l.root, it.path)
                 if (ext == "zip") navigate(Loc("zip", f.path)) else openFile(f)
             }
-            "nas" -> fetch(l, it) { f -> if (ext == "zip") navigate(Loc("zip", f.path)) else openFile(f) }
+            "nas", "cloud" -> fetch(l, it) { f -> if (ext == "zip") navigate(Loc("zip", f.path)) else openFile(f) }
             "zip" -> {
                 Transfers.add(this, Transfers.Job(Transfers.Kind.OPEN, "", it.name) { job ->
                     val dst = File(File(cacheDir, "open/zip"), it.name); dst.parentFile?.mkdirs(); dst.delete()
@@ -719,7 +771,8 @@ class MainActivity : Activity(), Transfers.Listener {
         afterFetch[f.path] = then
         Transfers.add(this, Transfers.Job(Transfers.Kind.OPEN, l.root, it.name) { job ->
             f.parentFile?.mkdirs()
-            api.download(l.root, Entry(it.path, false, it.size, it.mtimeMs * 1_000_000), f, { d, t -> Transfers.progress(job, d, t) }, { job.cancel })
+            if (l.kind == "cloud") fs.cloud(l).download(it.path, it.size, f, { d, t -> Transfers.progress(job, d, t) }) { job.cancel }
+            else api.download(l.root, Entry(it.path, false, it.size, it.mtimeMs * 1_000_000), f, { d, t -> Transfers.progress(job, d, t) }, { job.cancel })
             f.path
         })
     }
@@ -745,7 +798,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (!dst.writable) { toast("여기에는 붙여 넣을 수 없습니다"); return }
         clip = null; refreshChrome(); askNotify()
         val title = if (c.items.size == 1) c.items[0].name else "${c.items.size}개"
-        val kind = when { c.move -> Transfers.Kind.MOVE; dst.kind == "nas" && c.loc.kind != "nas" -> Transfers.Kind.UP; dst.kind == "local" && c.loc.kind == "nas" -> Transfers.Kind.OPEN; else -> Transfers.Kind.COPY }
+        val kind = when { c.move -> Transfers.Kind.MOVE; (dst.kind == "nas" || dst.kind == "cloud") && c.loc.kind != dst.kind -> Transfers.Kind.UP; dst.kind == "local" && (c.loc.kind == "nas" || c.loc.kind == "cloud") -> Transfers.Kind.OPEN; else -> Transfers.Kind.COPY }
         Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") })
     }
 
@@ -762,7 +815,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun deleteSel() {
         val its = selItems(); if (its.isEmpty()) return
         val view = tab.loc; val l = baseOf(view)
-        val where = when (l.kind) { "local" -> "휴대폰 휴지통으로 옮깁니다 (되살릴 수 있음)"; "nas" -> "NAS 휴지통으로 옮깁니다 (DSM 에서 되살릴 수 있음)"; "trash" -> "완전히 지웁니다. 되살릴 수 없습니다."; else -> "" }
+        val where = when (l.kind) { "local" -> "휴대폰 휴지통으로 옮깁니다 (되살릴 수 있음)"; "nas" -> "NAS 휴지통으로 옮깁니다 (DSM 에서 되살릴 수 있음)"; "cloud" -> fs.cloud(l).title + " 휴지통으로 옮깁니다 (웹에서 되살릴 수 있음)"; "trash" -> "완전히 지웁니다. 되살릴 수 없습니다."; else -> "" }
         if (where.isEmpty()) { toast("여기서는 지울 수 없습니다"); return }
         // 중복 파일: 한 묶음을 모두 고르면 하나도 남지 않음
         val whole = if (view.kind == "usage" && view.path == "dup") Usage.get(l)?.dups?.count { g -> g.all { sel.contains(it.path) } } ?: 0 else 0
@@ -817,7 +870,11 @@ class MainActivity : Activity(), Transfers.Listener {
         if (one != null && !one.dir && one.name.endsWith(".zip", true) && l.kind == "local") opts += Triple("zip", "압축 풀기") { clearSel(); extractZip(File(l.root, one.path)) }
         if (l.kind == "local" && !(one != null && one.name.endsWith(".zip", true))) opts += Triple("zip", "압축 (ZIP)") { zipSel(its) }
         if (l.kind == "zip") opts += Triple("copy", "고른 것 풀기") { startClip(false) }
-        if (one != null && !one.dir && (l.kind == "local" || l.kind == "nas")) {
+        if (l.kind == "local" && its.all { it.dir }) {
+            val hidden = its.all { File(File(l.root, it.path), ".nomedia").exists() }
+            opts += Triple("eye", if (hidden) "갤러리에 다시 보이기" else "갤러리에서 숨기기") { noMedia(l, its, !hidden) }
+        }
+        if (one != null && !one.dir && (l.kind == "local" || l.kind == "nas" || l.kind == "cloud")) {
             opts += Triple("openwith", "연결 프로그램") { withFile(l, one) { f -> openFile(f) } }
             opts += Triple("openas", "다른 형식으로 열기") { openAs(l, one) }
         }
@@ -831,6 +888,31 @@ class MainActivity : Activity(), Transfers.Listener {
             setPadding(ui.dp(18), ui.dp(13), ui.dp(14), ui.dp(13)); background = ui.press(null); setOnClickListener { pw.dismiss(); f() } })
         box.measure(View.MeasureSpec.makeMeasureSpec(ui.dp(236), View.MeasureSpec.EXACTLY), View.MeasureSpec.UNSPECIFIED)
         pw.showAsDropDown(anchor, anchor.width - ui.dp(236), -anchor.height - box.measuredHeight)
+    }
+
+    /** 갤러리에서 숨기기: 폴더에 빈 .nomedia 파일을 두거나 지움 → 휴대폰 파일 목록(MediaStore)을 다시 읽게 함 */
+    private fun noMedia(l: Loc, its: List<Item>, hide: Boolean) {
+        clearSel()
+        bg({
+            var n = 0; val refused = mutableListOf<String>()
+            val dirs = its.map { File(l.root, it.path) }
+            for (d in dirs) {
+                val f = File(d, ".nomedia")
+                try { if (hide) { if (!f.exists()) f.createNewFile() } else f.delete() } catch (e: Exception) { }
+                // 안드로이드는 DCIM/Camera 같은 기본 사진 폴더에는 .nomedia 를 못 만들게 막음 → 만든 뒤 정말 있는지 확인
+                if (f.exists() == hide) n++ else refused += d.name
+            }
+            android.media.MediaScannerConnection.scanFile(this, dirs.map { it.path }.toTypedArray(), null, null)
+            n to refused
+        }) { (n, refused) ->
+            listCache.clear(); statsAt = 0; load()
+            toast(when {
+                refused.isNotEmpty() && hide -> (if (n > 0) "폴더 ${n}개는 숨겼지만, " else "") + "‘${refused.joinToString(", ")}’ 은 안드로이드가 숨기기를 막습니다 (카메라 기본 폴더 등)"
+                refused.isNotEmpty() -> "‘${refused.joinToString(", ")}’ 의 .nomedia 를 지우지 못했습니다"
+                hide -> "폴더 ${n}개를 갤러리에서 숨겼습니다 (.nomedia)"
+                else -> "폴더 ${n}개를 갤러리에 다시 보이게 했습니다"
+            })
+        }
     }
 
     /** 파일을 손에 넣고 다음 일 (NAS 는 받아서) */
@@ -897,7 +979,7 @@ class MainActivity : Activity(), Transfers.Listener {
     // ---------- 새로 만들기 (+) ----------
     private fun createMenu() {
         val l = tab.loc
-        AlertDialog.Builder(this).setItems(arrayOf("새 폴더", if (l.kind == "nas") "휴대폰 파일 올리기" else "다른 앱의 파일 가져오기")) { _, w ->
+        AlertDialog.Builder(this).setItems(arrayOf("새 폴더", if (l.kind == "nas" || l.kind == "cloud") "휴대폰 파일 올리기" else "다른 앱의 파일 가져오기")) { _, w ->
             if (w == 0) ask("새 폴더", "새 폴더") { n -> bg({ fs.mkdir(l, n) }) { load() } }
             else startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT).apply { type = "*/*"; addCategory(Intent.CATEGORY_OPENABLE); putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true) }, PICK)
         }.show()
@@ -954,7 +1036,7 @@ class MainActivity : Activity(), Transfers.Listener {
             val s = describe(u)
             val name = Fmt.uniqueName(s.name) { taken.contains(it.lowercase()) }
             taken += name.lowercase()
-            Transfers.add(this, Transfers.Job(if (l.kind == "nas") Transfers.Kind.UP else Transfers.Kind.COPY, l.root, name) { job ->
+            Transfers.add(this, Transfers.Job(if (l.kind == "nas" || l.kind == "cloud") Transfers.Kind.UP else Transfers.Kind.COPY, l.root, name) { job ->
                 try {
                     if (l.kind == "local") {
                         val dir = fs.file(l); val out = File(dir, Fmt.uniqueName(name) { File(dir, it).exists() })
@@ -976,6 +1058,7 @@ class MainActivity : Activity(), Transfers.Listener {
                         tmp = f; size = f.length(); open = { f.inputStream() }
                     }
                     try {
+                        if (l.kind == "cloud") { fs.cloud(l).upload(l.path, name, size, open, { d, t -> Transfers.progress(job, d, t) }) { job.cancel }; return@Job if (name != s.name) "‘$name’ 이름으로 올렸습니다" else null }
                         var n = name
                         for (attempt in 0 until 20) {
                             val rel = l.child(n).path
@@ -1422,13 +1505,16 @@ class MainActivity : Activity(), Transfers.Listener {
     private val showThumbs by lazy { pf.bool("thumbs", true) }
 
     /** 사진·동영상 미리보기. want = 보일 크기(px). 바둑판은 크게, 목록은 작게 — 크기마다 따로 기억 */
-    private fun thumb(iv: ImageView, it: Item, want: Int = ui.dp(68), square: Boolean = true, onSet: (() -> Unit)? = null) {
+    private fun thumb(iv: ImageView, it0: Item, want: Int = ui.dp(68), square: Boolean = true, onSet: (() -> Unit)? = null) {
         val l = tab.loc
-        val base = baseOf(l).takeIf { b -> (b.kind == "local" || b.kind == "nas") && showThumbs } ?: run { iv.tag = null; return }
+        // 모아 보기의 폴더 줄: 그 폴더의 가장 새 사진·동영상을 미리보기로
+        val src = it0.extra.removePrefix("!")
+        val it = if (it0.dir && l.kind == "lib" && src.isNotEmpty()) Item(src.substringAfterLast('/'), false, 0, it0.mtimeMs, src) else it0
+        val base = baseOf(l).takeIf { b -> (b.kind == "local" || b.kind == "nas" || b.kind == "cloud") && showThumbs } ?: run { iv.tag = null; return }
         val k = FileIcon.kindOf(it.name)
         val ext = it.name.substringAfterLast('.', "").lowercase()
         // NAS: 서버가 만든 작은 그림 (JPEG·PNG·GIF). 휴대폰: 사진·동영상
-        if (it.dir || (base.kind == "nas" && ext !in setOf("jpg", "jpeg", "png", "gif")) || (k != "image" && k != "video")) { iv.tag = null; return }
+        if (it.dir || (base.kind == "nas" && ext !in setOf("jpg", "jpeg", "png", "gif")) || (base.kind == "cloud" && !it.extra.startsWith("https://")) || (base.kind != "cloud" && k != "image" && k != "video")) { iv.tag = null; return }
         val px = when { want <= ui.dp(80) -> ui.dp(68); want <= 360 -> 360; else -> 560 }   // 크기 단계 (같은 그림을 여러 번 만들지 않게)
         val key = base.kind + ":" + base.root + ":" + it.path + ":" + it.mtimeMs + ":" + px
         iv.tag = key
@@ -1437,7 +1523,8 @@ class MainActivity : Activity(), Transfers.Listener {
         thumbPool.execute {
             val still = iv.tag == key                 // 이미 화면 밖으로 지나갔으면 받지 않음
             val b = if (!still) null else try {
-                if (base.kind == "nas") api.thumb(base.root, it.path, minOf(640, maxOf(160, px * 2 / 3 * 2)))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                if (base.kind == "cloud") fs.cloud(base).thumb(it.extra.replace(Regex("=s\\d+$"), "=s" + minOf(640, px)))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                else if (base.kind == "nas") api.thumb(base.root, it.path, minOf(640, maxOf(160, px * 2 / 3 * 2)))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
                 else { val f = File(base.root, it.path); val sz = android.util.Size(px, px)
                     if (k == "image") android.media.ThumbnailUtils.createImageThumbnail(f, sz, null) else android.media.ThumbnailUtils.createVideoThumbnail(f, sz, null) }
             } catch (e: Exception) { null }
@@ -1464,7 +1551,7 @@ class MainActivity : Activity(), Transfers.Listener {
         override fun getItemId(p: Int) = p.toLong()
         override fun getViewTypeCount() = 6
         override fun getItemViewType(p: Int) = rows[p].type
-        override fun isEnabled(p: Int) = rows[p].type == 1 || rows[p].type == 2
+        override fun isEnabled(p: Int) = rows[p].type == 1 || rows[p].type == 2 || (rows[p].type == 0 && rows[p].long != null)
 
         override fun getView(p: Int, convert: View?, parent: ViewGroup?): View {
             val r = rows[p]
@@ -1509,7 +1596,7 @@ class MainActivity : Activity(), Transfers.Listener {
                 check.visibility = if (sel.isNotEmpty()) View.VISIBLE else View.GONE
                 check.setImageDrawable(if (on) g("check", ui.onAccent) else null)
                 check.background = if (on) GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ui.accent) } else GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x55000000); setStroke(ui.dp(2), Color.WHITE) }
-                (cell.getChildAt(1) as TextView).text = t.name
+                (cell.getChildAt(1) as TextView).text = if (t.dir && tab.loc.kind == "lib") "${t.name} (${t.count})" else t.name
                 cell.setOnClickListener { tapItem(t) }
                 cell.setOnLongClickListener { toggle(t); true }
             }
@@ -1595,6 +1682,7 @@ class MainActivity : Activity(), Transfers.Listener {
             (box.getChildAt(1) as TextView).text = when {
                 l.kind == "trash" -> prettyAbs(it.extra.substringBeforeLast('/')) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000)
                 l.kind == "search" -> "/" + it.path.substringBeforeLast('/', "") + "  ·  " + (if (it.dir) "폴더" else Fmt.size(it.size))
+                l.kind == "lib" && it.dir -> (if (it.extra.startsWith("!")) "갤러리 숨김  ·  " else "") + "${it.count}개  ·  " + Fmt.size(it.size) + "  ·  /" + it.path
                 l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000).take(10) + "  ·  /" + it.path.substringBeforeLast('/', "")
                 it.dir -> Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
                 else -> Fmt.time(it.mtimeMs * 1_000_000) + "  ·  " + Fmt.size(it.size)
