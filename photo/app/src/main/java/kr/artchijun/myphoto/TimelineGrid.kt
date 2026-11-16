@@ -34,6 +34,8 @@ import java.util.concurrent.Executor
 class TimelineGrid(
     private val a: Activity, private val ui: Ui, private val net: Executor, private val ns: String,
     private val onOpen: (List<Item>, Int) -> Unit, private val onSelect: (Int) -> Unit, private val onUnit: (String) -> Unit,
+    /** 인물·장소·폴더처럼 일부만: 그 사진을 모두 받아 날짜별로 나눔 (전체 사진은 비워 둠 — 날짜별 장수를 먼저 받음) */
+    private val filter: Map<String, Any> = emptyMap(),
 ) : FrameLayout(a), PhotoView {
     companion object {
         private const val PAGE = 200
@@ -61,6 +63,7 @@ class TimelineGrid(
     private var rows: List<Row> = emptyList()
     private var seq = 0
     override val selected = LinkedHashSet<Long>()
+    override var onPull: (() -> Unit)? = null
     override val selecting get() = selected.isNotEmpty()
     override var unit: String = pf.str("unit", "day").let { if (it in UNITS) it else "day" }
         set(v) { if (field != v) { val anchor = firstVisibleIndex(); field = v; pf.putStr("unit", v); rebuild(); scrollToIndex(anchor); onUnit(v) } }
@@ -81,7 +84,19 @@ class TimelineGrid(
         val my = ++seq
         spin.visibility = View.VISIBLE; empty.visibility = View.GONE
         net.execute {
-            val r = try { Result.success(Photos(a).timelineDays(ns)) } catch (e: Exception) { Result.failure(e) }
+            var all: List<Item>? = null
+            val r = try {
+                if (filter.isEmpty()) Result.success(Photos(a).timelineDays(ns))
+                else {
+                    // 일부만: 5000장씩 모두 받아 (찍은 때 새것부터) 이어지는 같은 날끼리 묶음
+                    val got = ArrayList<Item>(); var off = 0
+                    while (true) { val page = Photos(a).list(ns, off, 5000, filter); got += page; off += page.size; if (page.size < 5000) break }
+                    all = got
+                    val out = ArrayList<IntArray>()
+                    for (it in got) { val k = dayKeyOf(it.time); if (out.isNotEmpty() && out.last()[0] == k) out.last()[1]++ else out += intArrayOf(k, 1) }
+                    Result.success(out)
+                }
+            } catch (e: Exception) { Result.failure(e) }
             a.runOnUiThread {
                 if (my != seq) return@runOnUiThread
                 spin.visibility = View.GONE
@@ -89,6 +104,7 @@ class TimelineGrid(
                 r.onSuccess { tl ->
                     val anchor = firstVisibleIndex()
                     loaded.clear(); pagesBusy.clear(); pagesDone.clear()
+                    all?.let { l -> l.forEachIndexed { i, it -> loaded[i] = it }; for (p in 0..l.size / PAGE) pagesDone += p }
                     var start = 0
                     days = ArrayList(tl.map { (k, n) -> Day(k, start, n).also { start += n } })
                     mergeLocals(); rebuild()
@@ -131,6 +147,13 @@ class TimelineGrid(
         var lo = 0; var hi = days.size - 1
         while (lo <= hi) { val m = (lo + hi) ushr 1; val d = days[m]; if (v < d.vStart) hi = m - 1 else if (v >= d.vStart + d.count) lo = m + 1 else return d }
         return null
+    }
+    /** 보이는 곳 앞뒤 한 쪽씩 미리 받아 둠 (넘길 때 빈 칸이 덜 보이게) */
+    private fun prefetch() {
+        if (days.isEmpty() || visTo == Int.MAX_VALUE) return
+        fun srv(v: Int): Int { val d = dayOf(v.coerceIn(0, maxOf(0, total - 1))) ?: return 0; return d.srvStart + minOf(v - d.vStart, maxOf(0, d.srvCount - 1)) }
+        val a = srv(visFrom) - PAGE; val b = srv(visTo - 1) + PAGE
+        for (p in maxOf(0, a) / PAGE..maxOf(0, b) / PAGE) if (p * PAGE < total) want(p)
     }
     private var notifyPosted = false
     @Volatile private var visFrom = 0
@@ -423,13 +446,14 @@ class TimelineGrid(
             override fun onScroll(v: AbsListView, first: Int, visible: Int, totalCount: Int) {
                 track.sync()
                 visFrom = rows.getOrNull(first)?.vFrom ?: 0; visTo = rows.getOrNull(first + visible)?.vTo ?: Int.MAX_VALUE
+                if (!track.dragging) prefetch()
                 val r0 = rows.getOrNull(first)
                 if (r0 == null || (r0.title != null && (v.getChildAt(0)?.top ?: 0) >= 0)) sticky.visibility = View.GONE
                 else titleAbove(first)?.let { (t, n) -> sticky.text = "$t   ${"%,d".format(n)}장"; sticky.visibility = View.VISIBLE }
                 if (!track.dragging && scrolling) rows.getOrNull(first)?.let { r -> dayOf(r.vFrom)?.let { d -> track.bubbleAt("${d.key / 10000}년 ${d.key / 100 % 100}월") } }
             }
         })
-        addView(list, LayoutParams(-1, -1))
+        addView(PullRefresh(a, ui, list, { !list.canScrollVertically(-1) }) { onPull?.invoke() ?: reload() }, LayoutParams(-1, -1))
         addView(empty, LayoutParams(-1, -1))
         addView(spin, LayoutParams(ui.dp(40), ui.dp(40), Gravity.CENTER))
         addView(track, LayoutParams(ui.dp(140), -1, Gravity.END).apply { })

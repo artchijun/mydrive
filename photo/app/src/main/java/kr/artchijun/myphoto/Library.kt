@@ -76,33 +76,68 @@ object Library {
             val paths = HashMap<Long, String>()
             if (scope == ALL) {
                 val total = try { ph.syno.call("$ns.Browse.Item", "count", 7).optInt("count") } catch (e: Exception) { 0 }
-                var off = 0
-                while (true) {
+                if (total > 0) {
+                    // 장수를 알면 5000장씩 4쪽을 함께 받음 (멀리서·터널로 읽을 때 기다림이 겹쳐 훨씬 빠름)
+                    val pages = (total + 4999) / 5000 + 1   // 그사이 늘었을 수 있어 한 쪽 더
+                    val got = arrayOfNulls<List<Item>>(pages)
+                    val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+                    val done = java.util.concurrent.atomic.AtomicInteger()
+                    val err = java.util.concurrent.atomic.AtomicReference<Exception?>(null)
+                    for (i in 0 until pages) pool.execute {
+                        if (stop() || err.get() != null) return@execute
+                        try { got[i] = ph.list(ns, i * 5000, 5000); progress(done.addAndGet(got[i]!!.size), maxOf(total, done.get())) }
+                        catch (e: Exception) { err.compareAndSet(null, e) }
+                    }
+                    pool.shutdown(); while (!pool.awaitTermination(200, java.util.concurrent.TimeUnit.MILLISECONDS)) { if (stop()) { pool.shutdownNow(); return false } }
+                    err.get()?.let { throw it }
                     if (stop()) return false
-                    val page = ph.list(ns, off, 5000)
-                    all += page; off += page.size
-                    progress(all.size, maxOf(total, all.size))
-                    if (page.size < 5000) break
+                    got.forEach { it?.let { l -> all += l } }
+                    // 마지막 쪽까지 꽉 찼으면 더 있음 → 이어서
+                    var off = pages * 5000
+                    if (got.last()?.size == 5000) while (true) { val page = ph.list(ns, off, 5000); all += page; off += page.size; if (page.size < 5000) break }
+                } else {
+                    var off = 0
+                    while (true) {
+                        if (stop()) return false
+                        val page = ph.list(ns, off, 5000)
+                        all += page; off += page.size
+                        progress(all.size, maxOf(total, all.size))
+                        if (page.size < 5000) break
+                    }
                 }
             } else {
                 val root = backupRoot(ctx)
                 if (root.isEmpty()) throw IllegalStateException("백업 화면에서 '올릴 곳'(기기 폴더)을 먼저 정해 주세요")
                 val rid = ph.folderByPath(ns, root, false) ?: throw IllegalStateException("서버에 $root 폴더가 아직 없습니다")
-                val queue = ArrayDeque<Pair<Long, String>>(); queue += rid to root
-                var nf = 0
-                while (queue.isNotEmpty()) {
-                    if (stop()) return false
-                    val (fid, fpath) = queue.removeFirst()
-                    paths[fid] = fpath
-                    var off = 0
-                    while (true) {
-                        val page = ph.list(ns, off, 5000, mapOf("folder_id" to fid))
-                        all += page; off += page.size
-                        if (page.size < 5000) break
+                // 폴더마다 (사진 목록 + 하위 폴더 목록) 을 6개씩 함께 읽음
+                val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+                val pendingN = java.util.concurrent.atomic.AtomicInteger(0)
+                val nf = java.util.concurrent.atomic.AtomicInteger(0)
+                val err = java.util.concurrent.atomic.AtomicReference<Exception?>(null)
+                val lock = Any()
+                fun visit(fid: Long, fpath: String) {
+                    pendingN.incrementAndGet()
+                    pool.execute {
+                        try {
+                            if (stop() || err.get() != null) return@execute
+                            val mine = ArrayList<Item>()
+                            var off = 0
+                            while (true) {
+                                val page = ph.list(ns, off, 5000, mapOf("folder_id" to fid))
+                                mine += page; off += page.size
+                                if (page.size < 5000) break
+                            }
+                            val subs = ph.folders(ns, fid)
+                            synchronized(lock) { all += mine; paths[fid] = fpath; progress(all.size, -nf.incrementAndGet()) }
+                            for (f in subs) visit(f.id, f.path)
+                        } catch (e: Exception) { err.compareAndSet(null, e) }
+                        finally { pendingN.decrementAndGet() }
                     }
-                    for (f in ph.folders(ns, fid)) queue += f.id to f.path
-                    nf++; progress(all.size, -nf)
                 }
+                visit(rid, root)
+                while (pendingN.get() > 0) { if (stop()) { pool.shutdownNow(); return false }; Thread.sleep(50) }
+                pool.shutdown()
+                err.get()?.let { throw it }
             }
             val d = db(ctx)
             d.beginTransaction()

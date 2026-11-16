@@ -29,7 +29,7 @@ class MainActivity : Activity() {
     override fun attachBaseContext(base: android.content.Context) { super.attachBaseContext(Ui.wrap(base)) }
     private lateinit var ui: Ui
     private lateinit var ph: Photos
-    private val net = Executors.newFixedThreadPool(3)
+    private val net = Executors.newFixedThreadPool(5)   // 사진 목록 쪽을 여럿 함께 받음
     private lateinit var content: FrameLayout
     private lateinit var title: TextView
     private lateinit var topBar: LinearLayout
@@ -154,7 +154,38 @@ class MainActivity : Activity() {
     }
 
     private fun photoGrid(grouped: Boolean, filter: Map<String, Any>): PhotoGrid =
-        PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) })
+        PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }).apply { onPull = { refresh() } }
+
+    /** 인물·장소·폴더의 사진: 전체 사진과 같은 격자 (오른쪽 막대로 어느 해든 바로 · 연도/월/일) */
+    private fun timelineFor(filter: Map<String, Any>): View {
+        lateinit var page: GridPage
+        val units = listOf("year" to "연도", "month" to "월", "day" to "일")
+        val on = if (ui.dark) 0xFF4A4A4A.toInt() else 0xFFDDE3EC.toInt()
+        val pill = ui.row().apply {
+            background = ui.round(if (ui.dark) 0xF2303030.toInt() else 0xF7FFFFFF.toInt(), 26, stroke = if (ui.dark) 0 else ui.line)
+            elevation = ui.dpf(8f); val q = ui.dp(5); setPadding(q, q, q, q)
+        }
+        fun paint() {
+            for (k in 0 until pill.childCount) {
+                val sel = units[k].first == page.grid.unit
+                (pill.getChildAt(k) as TextView).apply {
+                    setTextColor(if (sel) ui.text else ui.sub); typeface = if (sel) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
+                    background = if (sel) ui.round(on, 21) else ui.press(null, 21)
+                }
+            }
+        }
+        val tg = TimelineGrid(this, ui, net, ns, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }, { paint() }, filter)
+        tg.setBottomSpace(ui.dp(76)); tg.onPull = { refresh() }
+        units.forEach { (u, name) ->
+            pill.addView(ui.label(name, 15f, ui.sub).apply {
+                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(ui.dp(76), ui.dp(42))
+                setOnClickListener { if (page.grid.unit != u) { page.grid.unit = u; paint() } }
+            })
+        }
+        page = GridPage(this, tg, tg, pill)
+        paint()
+        return page
+    }
 
     // ---------- 사진 (전체) ----------
     /** 전체 사진: 시놀로지 사진 앱처럼 날짜별 장수를 먼저 받아 전체 자리를 잡아 둔 격자(오른쪽 막대로 어느 해든 바로) +
@@ -178,6 +209,7 @@ class MainActivity : Activity() {
         }
         val tg = TimelineGrid(this, ui, net, ns, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }, { paint() })
         tg.setBottomSpace(ui.dp(76))
+        tg.onPull = { refresh() }   // 위로 당겼다 놓으면: 사진 목록과 백업 상태를 다시
         var filtered: PhotoGrid? = null   // 백업 상태로 거른 격자 (칩을 고를 때 만듦)
         val holder = FrameLayout(this).apply { addView(tg, FrameLayout.LayoutParams(-1, -1)) }
         units.forEach { (u, name) ->
@@ -258,7 +290,7 @@ class MainActivity : Activity() {
                 r.onFailure { e -> wrap.addView(ui.label(e.message ?: "읽지 못했습니다", 14f, ui.sub).apply { gravity = Gravity.CENTER }, FrameLayout.LayoutParams(-1, -1)) }
                 r.onSuccess { subs ->
                     if (subs.isEmpty() && id != 1L) {   // 하위 폴더가 없으면 바로 사진
-                        stacks[tab].removeAt(stacks[tab].size - 1); push(name to photoGrid(false, mapOf("folder_id" to id))); return@onSuccess
+                        stacks[tab].removeAt(stacks[tab].size - 1); push(name to timelineFor(mapOf("folder_id" to id))); return@onSuccess
                     }
                     val rows = ArrayList<Folder?>(); if (id != 1L) rows += null; rows.addAll(subs)
                     val ad = object : BaseAdapter() {
@@ -267,19 +299,26 @@ class MainActivity : Activity() {
                         override fun getItemId(p: Int) = p.toLong()
                         override fun getView(p: Int, cv: View?, parent: ViewGroup): View {
                             val f = rows[p]
-                            val iv = ImageView(this@MainActivity).apply { scaleType = ImageView.ScaleType.CENTER_CROP; background = ui.round(ui.panel2, 10); clipToOutline = true; layoutParams = LinearLayout.LayoutParams(ui.dp(52), ui.dp(52)) }
-                            if (f == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph("image", ui.accent)) }
-                            else if (f.cover != null) Thumbs.load(iv, ns, f.cover.first, f.cover.second, "sm") else { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph("folder", ui.sub)) }
-                            return ui.row(iv, ui.label(f?.name ?: "이 폴더의 사진", 15.5f, if (f == null) ui.accent else ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE; layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(14) } },
+                            // 줄을 재활용 (스크롤할 때마다 새로 만들지 않음 → 부드럽게)
+                            val row = (cv as? LinearLayout) ?: ui.row(
+                                ImageView(this@MainActivity).apply { background = ui.round(ui.panel2, 10); clipToOutline = true; layoutParams = LinearLayout.LayoutParams(ui.dp(52), ui.dp(52)) },
+                                ui.label("", 15.5f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE; layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(14) } },
                                 ImageView(this@MainActivity).apply { setImageDrawable(Glyph("chev", ui.sub)); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)) })
                                 .apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(12), ui.dp(6)); background = ui.press(null) }
+                            val iv = row.getChildAt(0) as ImageView
+                            iv.scaleType = ImageView.ScaleType.CENTER_CROP
+                            if (f == null) { iv.tag = null; iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph("image", ui.accent)) }
+                            else if (f.cover != null) Thumbs.load(iv, ns, f.cover.first, f.cover.second, "sm") else { iv.tag = null; iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph("folder", ui.sub)) }
+                            (row.getChildAt(1) as TextView).apply { text = f?.name ?: "이 폴더의 사진"; setTextColor(if (f == null) ui.accent else ui.text) }
+                            return row
                         }
                     }
                     list.adapter = ad
+                    list.isFastScrollEnabled = rows.size > 40   // 폴더가 많으면 오른쪽 손잡이로 빨리
                     list.setOnItemClickListener { _, _, p, _ ->
                         if (p >= rows.size) return@setOnItemClickListener   // 아래 안내 줄
                         val f = rows[p]
-                        if (f == null) push(name to photoGrid(false, mapOf("folder_id" to id)))
+                        if (f == null) push(name to timelineFor(mapOf("folder_id" to id)))
                         else push(f.name to folderPage(f.id, f.name))
                     }
                     // 길게 누르면: 폴더째 지우기
@@ -343,25 +382,67 @@ class MainActivity : Activity() {
                         override fun getView(p: Int, cv: View?, parent: ViewGroup): View {
                             val g = gs[p]
                             val w = (parent.width - ui.dp(24) - ui.dp(10) * (gv.numColumns - 1)) / gv.numColumns
-                            val iv = ImageView(this@MainActivity).apply {
+                            // 칸을 재활용 (스크롤할 때마다 새로 만들지 않음 → 부드럽게)
+                            val cell = (cv as? LinearLayout) ?: ui.col(ImageView(this@MainActivity).apply {
                                 scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true
                                 background = if (round) GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ui.panel2) } else ui.round(ui.panel2, 12)
-                                layoutParams = LinearLayout.LayoutParams(w, if (round) w else w * 3 / 4)
-                            }
-                            if (g.coverKey.isNotEmpty()) Thumbs.load(iv, ns, g.coverUnit, g.coverKey, "sm", g.thumbType)
-                            return ui.col(iv, ui.label(g.name.ifEmpty { "이름 없음" }, 14f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp(top = 6); if (round) gravity = Gravity.CENTER },
-                                ui.label("${g.count}장" + (if (g.sub.isNotEmpty() && g.sub != g.name) " · ${g.sub}" else ""), 12f, ui.sub).apply { setSingleLine(); if (round) gravity = Gravity.CENTER })
+                            }, ui.label("", 14f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp(top = 6); if (round) gravity = Gravity.CENTER },
+                                ui.label("", 12f, ui.sub).apply { setSingleLine(); if (round) gravity = Gravity.CENTER })
+                            val iv = cell.getChildAt(0) as ImageView
+                            iv.layoutParams = LinearLayout.LayoutParams(w, if (round) w else w * 3 / 4)
+                            if (g.coverKey.isNotEmpty()) Thumbs.load(iv, ns, g.coverUnit, g.coverKey, "sm", g.thumbType) else { iv.tag = null; iv.setImageDrawable(null) }
+                            (cell.getChildAt(1) as TextView).text = g.name.ifEmpty { "이름 없음" }
+                            (cell.getChildAt(2) as TextView).text = "${g.count}장" + (if (g.sub.isNotEmpty() && g.sub != g.name) " · ${g.sub}" else "")
+                            return cell
                         }
                     }
                     gv.setOnItemClickListener { _, _, p, _ -> open(gs[p]) }
+                    gv.isFastScrollEnabled = gs.size > 30   // 많으면 오른쪽 손잡이로 빨리
                 }
             }
         }
         return wrap
     }
 
-    private fun personPage(): View = groupPage({ ph.persons(ns) }, true) { g -> push(g.name.ifEmpty { "이름 없음" } to photoGrid(true, mapOf("person_id" to g.id))) }
-    private fun placePage(): View = groupPage({ ph.places(ns) }, false) { g -> push(g.name to photoGrid(true, mapOf("geocoding_id" to g.id))) }
+    private fun personPage(): View = groupPage({ ph.persons(ns) }, true) { g -> push(g.name.ifEmpty { "이름 없음" } to timelineFor(mapOf("person_id" to g.id))) }
+    /** 장소: 위에 [목록 | 지도] — 지도에서는 장소마다 동그라미, 눌러서 사진 보기 */
+    private fun placePage(): View {
+        val openPlace: (Group) -> Unit = { g -> push(g.name to timelineFor(mapOf("geocoding_id" to g.id))) }
+        val holder = FrameLayout(this)
+        var places: List<Group>? = null
+        val seg = ui.row().apply { setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8)); setBackgroundColor(ui.bg) }
+        val modes = listOf("목록", "지도")
+        val pf = Prefs(this)
+        var mode = pf.int("place_mode", 0)
+        fun show() {
+            for (i in 0 until seg.childCount) (seg.getChildAt(i) as TextView).apply {
+                val on = i == mode; setTextColor(if (on) ui.onAccent else ui.text); background = ui.press(ui.round(if (on) ui.accent else ui.panel2, 17), 17)
+            }
+            holder.removeAllViews()
+            if (mode == 0) holder.addView(groupPage({ places ?: ph.places(ns).also { places = it } }, false, openPlace), FrameLayout.LayoutParams(-1, -1))
+            else {
+                val wait = ProgressBar(this)
+                holder.addView(wait, FrameLayout.LayoutParams(ui.dp(40), ui.dp(40), Gravity.CENTER))
+                net.execute {
+                    val r = try { Result.success(places ?: ph.places(ns).also { places = it }) } catch (e: Exception) { Result.failure(e) }
+                    runOnUiThread {
+                        if (mode != 1) return@runOnUiThread
+                        holder.removeAllViews()
+                        r.onSuccess { holder.addView(PlaceMap(this, ui, ns, it, openPlace), FrameLayout.LayoutParams(-1, -1)) }
+                        r.onFailure { e -> holder.addView(ui.label(e.message ?: "읽지 못했습니다", 14f, ui.sub).apply { gravity = Gravity.CENTER }, FrameLayout.LayoutParams(-1, -1)) }
+                    }
+                }
+            }
+        }
+        modes.forEachIndexed { i, n ->
+            seg.addView(ui.label(n, 14f, ui.text).apply {
+                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(0, ui.dp(34), 1f).apply { if (i == 0) rightMargin = ui.dp(6) }
+                setOnClickListener { if (mode != i) { mode = i; pf.putInt("place_mode", i); show() } }
+            })
+        }
+        show()
+        return ui.col(seg, holder.apply { layoutParams = ui.lp(h = 0, weight = 1f) })
+    }
 
     // ---------- 고른 사진 ----------
     private fun favSelected() {

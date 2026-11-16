@@ -97,7 +97,9 @@ class Photos(ctx: Context) {
         var cur = ""
         for (part in path.split('/').filter { it.isNotEmpty() }) {
             cur += "/$part"
-            val hit = folders(ns, id).firstOrNull { it.path == cur }
+            // 한글 자모가 나뉘어 저장된 이름(NFD)도 같은 이름으로 봄
+            val want = java.text.Normalizer.normalize(cur, java.text.Normalizer.Form.NFC)
+            val hit = folders(ns, id).firstOrNull { java.text.Normalizer.normalize(it.path, java.text.Normalizer.Form.NFC) == want }
             id = when {
                 hit != null -> hit.id
                 make -> createFolder(ns, id, part)
@@ -161,6 +163,20 @@ class Photos(ctx: Context) {
             out += g; if (g.size < 500 || off > 20000) break; off += 500
         }
         return out.distinctBy { it.id }
+    }
+
+    /** 이 장소의 자리: 그곳 사진 몇 장 중 GPS 가 있는 첫 장의 (위도, 경도) */
+    fun placeGps(ns: String, geocodingId: Long): Pair<Double, Double>? {
+        val d = syno.call("$ns.Browse.Item", "list", 4, mapOf("offset" to 0, "limit" to 10, "geocoding_id" to geocodingId, "additional" to listOf("gps", "exif")))
+        val a = d.optJSONArray("list") ?: return null
+        for (i in 0 until a.length()) {
+            val ad = a.getJSONObject(i).optJSONObject("additional") ?: continue
+            val g = ad.optJSONObject("gps") ?: ad.optJSONObject("exif")?.optJSONObject("gps")
+            val la = g?.optDouble("latitude", Double.NaN) ?: Double.NaN
+            val lo = g?.optDouble("longitude", Double.NaN) ?: Double.NaN
+            if (!la.isNaN() && !lo.isNaN() && !(la == 0.0 && lo == 0.0)) return la to lo
+        }
+        return null
     }
 
     fun setFavorite(ns: String, ids: List<Long>, on: Boolean) {

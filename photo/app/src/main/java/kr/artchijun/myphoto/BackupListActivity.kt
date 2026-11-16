@@ -42,7 +42,7 @@ class BackupListActivity : Activity() {
     private lateinit var selBar: LinearLayout
     private lateinit var selCount: TextView
     private var pending: List<Backup.Local> = emptyList()
-    private val canDelete get() = tab == 1 || tab == 2
+    private val canDelete get() = true   // 어느 목록에서든 길게 눌러 고른 뒤 [작업]
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,7 +56,7 @@ class BackupListActivity : Activity() {
         selBar = ui.row(ui.iconBtn(Glyph("close", ui.text), "고르기 끝") { clearSel() },
             selCount.apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(8) } },
             ui.iconBtn(Glyph("selectall", ui.text), "모두 고르기") { if (sel.size == rows.size) sel.clear() else rows.forEach { sel += it.key }; onSel() },
-            ui.label("휴대폰에서 지우기", 14f, ui.red, bold = true).apply { setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10)); background = ui.press(null, 8); setOnClickListener { deleteSelected() } },
+            ui.label("작업", 15f, ui.accent, bold = true).apply { setPadding(ui.dp(14), ui.dp(10), ui.dp(12), ui.dp(10)); background = ui.press(null, 8); setOnClickListener { actions() } },
         ).apply { setBackgroundColor(ui.select); setPadding(ui.dp(4), ui.dp(4), ui.dp(8), ui.dp(4)); minimumHeight = ui.dp(56); visibility = View.GONE }
         seg = ui.row().apply { setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(4)) }
         info = ui.label("", 12.5f, ui.sub).apply { setPadding(ui.dp(18), ui.dp(6), ui.dp(18), ui.dp(6)) }
@@ -82,6 +82,41 @@ class BackupListActivity : Activity() {
         selCount.text = StatusBadge.kinds(picked.count { !it.video }, picked.count { it.video }).ifEmpty { "0개" } + " · ${Fmt.size(bytes)}"
         adapter.notifyDataSetChanged()
     }
+    /** 고른 것으로 할 일: 목록(기다림·올림·이미 있음·실패)에 따라 */
+    private fun actions() {
+        val picked = rows.filter { it.key in sel }
+        if (picked.isEmpty()) return
+        val backed = picked.filter { it.state == Backup.DONE }
+        val notBacked = picked.filter { it.state != Backup.DONE }
+        val excluded = picked.filter { it.state == Backup.EXCLUDED }
+        val failed = picked.filter { it.state == Backup.FAIL }
+        val opts = ArrayList<Pair<String, () -> Unit>>()
+        if (backed.isNotEmpty()) opts += "휴대폰에서 지우기 — 서버에 있는지 확인한 뒤 (${backed.size}개)" to { deleteSelected() }
+        if (failed.isNotEmpty()) opts += "다시 시도 (${failed.size}개)" to { Backup.requeue(this, failed.map { it.key }); done("${failed.size}개를 다시 올릴 차례에 넣었습니다"); BackupService.start(this) }
+        if (excluded.isNotEmpty()) opts += "다시 백업에 넣기 (${excluded.size}개)" to { Backup.requeue(this, excluded.map { it.key }); done("${excluded.size}개를 다시 백업에 넣었습니다") }
+        val canEx = notBacked.filter { it.state != Backup.EXCLUDED }
+        if (canEx.isNotEmpty()) opts += "백업에서 빼기 — 휴대폰에는 그대로, 올리지 않음 (${canEx.size}개)" to {
+            Backup.exclude(this, canEx.map { it.key }); Backup.log(this, "백업에서 뺌: ${canEx.size}개"); done("${canEx.size}개를 백업에서 뺐습니다 (올리던 것은 멈춤)") }
+        if (notBacked.isNotEmpty()) opts += "휴대폰에서 지우기 — 아직 서버에 없음, 휴대폰 휴지통으로 (${notBacked.size}개)" to { trashNotBacked(notBacked) }
+        android.app.AlertDialog.Builder(this).setTitle("고른 ${picked.size}개").setItems(opts.map { it.first }.toTypedArray()) { _, w -> opts[w].second() }.show()
+    }
+    private fun done(msg: String) { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show(); sel.clear(); onSel(); load() }
+
+    /** 서버에 없는 파일(기다림·실패·뺀 것) 지우기: 되살릴 수 있게 휴대폰 휴지통으로 (30일), 올리던 것은 멈춤 */
+    private fun trashNotBacked(list: List<Backup.Entry>) {
+        android.app.AlertDialog.Builder(this).setTitle("서버에 없는 ${list.size}개를 지울까요?")
+            .setMessage("아직 백업되지 않은 파일입니다 (${Fmt.size(list.sumOf { it.size })}). 휴대폰 휴지통으로 옮기며, 30일 안에는 갤러리 휴지통에서 되살릴 수 있습니다." +
+                (if (list.any { e -> Backup.active.any { it.key == e.key } }) "\n\n올리고 있던 파일은 올리기를 멈춥니다." else ""))
+            .setPositiveButton("휴지통으로") { _, _ ->
+                pending = list.map { it.toLocal() }
+                Backup.exclude(this, list.map { it.key })   // 확인 창을 띄우는 동안에도 올리지 않게
+                try {
+                    val req = android.provider.MediaStore.createTrashRequest(contentResolver, pending.map { it.uri }, true)
+                    startIntentSenderForResult(req.intentSender, 44, null, 0, 0, 0)
+                } catch (e: Exception) { Toast.makeText(this, "지우지 못했습니다: ${e.message}", Toast.LENGTH_LONG).show(); pending = emptyList() }
+            }.setNegativeButton("그만", null).show()
+    }
+
     private fun deleteSelected() {
         val pick = rows.filter { it.key in sel }.map { it.toLocal() }
         if (pick.isEmpty()) return
@@ -108,6 +143,13 @@ class BackupListActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(code: Int, result: Int, data: android.content.Intent?) {
         @Suppress("DEPRECATION") super.onActivityResult(code, result, data)
+        if (code == 44) {   // 서버에 없는 것을 휴지통으로
+            if (result != RESULT_OK) { Backup.requeue(this, pending.filter { k -> rows.any { it.key == k.key && it.state != Backup.EXCLUDED } }.map { it.key }); pending = emptyList(); Toast.makeText(this, "지우지 않았습니다", Toast.LENGTH_SHORT).show(); load(); return }
+            Backup.forget(this, pending.map { it.key })
+            Backup.log(this, "아직 백업 안 된 휴대폰 사진 ${pending.size}개를 휴대폰 휴지통으로 (${Fmt.size(pending.sumOf { it.size })})")
+            Toast.makeText(this, "${pending.size}개를 휴대폰 휴지통으로 옮겼습니다", Toast.LENGTH_LONG).show()
+            pending = emptyList(); sel.clear(); onSel(); load(); return
+        }
         if (code != 42) return
         if (result != RESULT_OK) { pending = emptyList(); Toast.makeText(this, "지우지 않았습니다", Toast.LENGTH_SHORT).show(); return }
         val bytes = pending.sumOf { it.size }
@@ -124,7 +166,7 @@ class BackupListActivity : Activity() {
             val c = try { Backup.counts(this) } catch (e: Exception) { null }
             val r = try {
                 when (tab) {
-                    0 -> Backup.entries(this, 0)
+                    0 -> Backup.entries(this, 0) + Backup.entries(this, Backup.EXCLUDED)
                     1 -> Backup.entries(this, 1).filter { it.how != 2 }
                     2 -> Backup.entries(this, 1).filter { it.how == 2 }
                     else -> Backup.entries(this, 2)
@@ -135,10 +177,10 @@ class BackupListActivity : Activity() {
                 rows = r
                 paintSeg(c)
                 info.text = when (tab) {
-                    0 -> if (r.isEmpty()) "기다리는 파일이 없습니다." else "올릴 차례대로 (새로 찍은 것부터). " + (if (Backup.running) "지금 올리는 파일은 맨 위." else "")
+                    0 -> if (r.isEmpty()) "기다리는 파일이 없습니다." else "올릴 차례대로 (새로 찍은 것부터). " + (if (Backup.running) "지금 올리는 파일은 맨 위. " else "") + "길게 눌러 고르면 백업에서 빼거나 지울 수 있음 · 뺀 것은 맨 아래"
                     1 -> if (r.isEmpty()) "아직 올린 파일이 없습니다." else "이 휴대폰에서 서버로 올린 파일 (최근 것부터) · 길게 눌러 고르면 휴대폰에서 지울 수 있음"
                     2 -> if (r.isEmpty()) "없습니다." else "서버의 같은 폴더에 이름·크기가 같은 것이 이미 있어 올리지 않고 백업된 것으로 친 파일 · 길게 눌러 고르면 휴대폰에서 지울 수 있음"
-                    else -> if (r.isEmpty()) "실패한 파일이 없습니다." else "다음 백업 때 다시 시도합니다 (6번까지). 백업 화면의 [실패한 것 다시 시도]로 바로 다시"
+                    else -> if (r.isEmpty()) "실패한 파일이 없습니다." else "다음 백업 때 다시 시도합니다 (6번까지) · 길게 눌러 고르면 다시 시도·백업에서 빼기·지우기"
                 } + (if (r.size >= 3000) "  — 최근 3,000개만 보입니다" else "")
                 adapter.notifyDataSetChanged()
             }
@@ -191,9 +233,10 @@ class BackupListActivity : Activity() {
             (col.getChildAt(1) as TextView).text = if (e.srvPath != null && e.state == 1) "$from  →  ${e.srvPath}" else from
             val third = col.getChildAt(2) as TextView
             val tag = v.getChildAt(2) as TextView
-            val now = Backup.current
+            val now = Backup.active.firstOrNull { it.key == e.key }
             when {
-                e.state == 0 && now != null && now.key == e.key -> { third.text = "올리는 중 ${Fmt.size(now.bytes)} / ${Fmt.size(e.size)}"; third.setTextColor(ui.accent); tag.text = "올리는 중"; tag.background = ui.round(ui.accent, 10); tag.setTextColor(ui.onAccent) }
+                e.state == Backup.EXCLUDED -> { third.text = "백업에서 뺌 · ${Fmt.size(e.size)}"; third.setTextColor(ui.sub); tag.text = "뺌"; tag.background = ui.round(ui.panel2, 10); tag.setTextColor(ui.sub) }
+                e.state == 0 && now != null -> { third.text = "올리는 중 ${Fmt.size(now.bytes)} / ${Fmt.size(e.size)}"; third.setTextColor(ui.accent); tag.text = "올리는 중"; tag.background = ui.round(ui.accent, 10); tag.setTextColor(ui.onAccent) }
                 e.state == 0 -> { third.text = "${Fmt.size(e.size)} · 찍은 때 ${df.format(Date(e.taken))}"; third.setTextColor(ui.sub); tag.text = "기다림"; tag.background = ui.round(ui.panel2, 10); tag.setTextColor(ui.sub) }
                 e.state == 1 -> { third.text = "${Fmt.size(e.size)} · ${if (e.at > 0) df.format(Date(e.at)) else ""}"; third.setTextColor(ui.sub)
                     tag.text = when (e.how) { 1 -> "올림"; 2 -> "이미 있음"; else -> "완료" }; tag.background = ui.round(if (e.how == 2) ui.panel2 else 0xFF1F8A4C.toInt(), 10); tag.setTextColor(if (e.how == 2) ui.sub else android.graphics.Color.WHITE) }

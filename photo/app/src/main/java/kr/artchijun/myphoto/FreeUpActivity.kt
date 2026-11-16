@@ -396,12 +396,15 @@ class FreeUpActivity : Activity() {
     /** 지우기 직전: 짝지은 서버 사진이 지금도 있고 크기가 같은 것만 */
     private fun verify(pick: List<Row>): List<Row> {
         val syno = Syno(this)
-        val alive = HashMap<Long, Long>()
-        for (chunk in pick.map { it.m!!.server.id }.distinct().chunked(100)) {
+        val alive = java.util.concurrent.ConcurrentHashMap<Long, Long>()
+        // 200개씩 묶어 4묶음을 함께 물어봄 (지우기 전에 서버에 지금도 있는지)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+        val futures = pick.map { it.m!!.server.id }.filter { it > 0 }.distinct().chunked(200).map { chunk -> pool.submit {
             val d = syno.call("${Photos.TEAM}.Browse.Item", "get", 7, mapOf("id" to JSONArray(chunk)))
-            val a = d.optJSONArray("list") ?: continue
+            val a = d.optJSONArray("list") ?: return@submit
             for (i in 0 until a.length()) { val o = a.getJSONObject(i); alive[o.optLong("id")] = o.optLong("filesize") }
-        }
+        } }
+        try { futures.forEach { it.get() } } catch (e: java.util.concurrent.ExecutionException) { throw (e.cause as? Exception) ?: e } finally { pool.shutdown() }
         return pick.filter { alive[it.m!!.server.id] == it.m.server.size }
     }
 

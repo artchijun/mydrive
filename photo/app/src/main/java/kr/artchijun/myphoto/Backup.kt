@@ -28,6 +28,20 @@ import java.util.TimeZone
  */
 object Backup {
     const val WAIT = 0; const val DONE = 1; const val FAIL = 2
+    /** 백업에서 뺌: 휴대폰에는 그대로 두고 올리지 않음 (다시 넣을 수 있음) */
+    const val EXCLUDED = 3
+
+    /** 올리던 중이라도 그만둘 파일 (백업에서 뺐거나 휴대폰에서 지움) — 일꾼이 보고 그 파일만 멈춤 */
+    private val cancelKeys: MutableSet<Long> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    fun exclude(ctx: Context, keys: Collection<Long>) {
+        cancelKeys += keys
+        val d = db(ctx); keys.forEach { d.execSQL("UPDATE media SET state=$EXCLUDED WHERE id=$it AND state<>$DONE") }
+    }
+    /** 다시 백업에 넣기 · 실패한 것 다시 시도 (고른 것만) */
+    fun requeue(ctx: Context, keys: Collection<Long>) {
+        cancelKeys -= keys.toSet()
+        val d = db(ctx); keys.forEach { d.execSQL("UPDATE media SET state=$WAIT, tries=0 WHERE id=$it AND state<>$DONE") }
+    }
     private const val MAX_TRIES = 6
 
     class Settings(ctx: Context) {
@@ -164,7 +178,9 @@ object Backup {
                                 put("size", size); put("mtime", mtime); put("taken", if (c.isNull(5)) mtime * 1000 else c.getLong(5))
                             }); added++
                         } else if (cur.first != size || cur.second != mtime) {
-                            d.update("media", ContentValues().apply { put("size", size); put("mtime", mtime); put("state", WAIT); put("tries", 0); put("srv_folder", 0); put("srv_at", 0) }, "id=?", arrayOf(key.toString()))
+                            // 바뀐 파일은 다시 올림 (백업에서 뺀 것은 뺀 채로)
+                            d.update("media", ContentValues().apply { put("size", size); put("mtime", mtime); put("tries", 0); put("srv_folder", 0); put("srv_at", 0) }, "id=?", arrayOf(key.toString()))
+                            d.execSQL("UPDATE media SET state=$WAIT WHERE id=$key AND state<>$EXCLUDED")
                             added++
                         }
                     }
@@ -274,6 +290,7 @@ object Backup {
                         val why = blocker(ctx); if (why != null) { abort.compareAndSet(null, why); break }
                         val i = next.getAndIncrement(); if (i >= rows.size) break
                         val r = rows[i]
+                        if (r.key in cancelKeys) continue   // 그사이 백업에서 뺐거나 지움
                         val t0 = System.currentTimeMillis()
                         val path = target(st, r.rel, r.taken)
                         fun prog(b: Long) { val p = Progress(finished.get() + actives.size, rows.size, r.name, b, r.size, r.key, r.rel, t0, path); actives[r.key] = p; current = p; onProgress(p) }
@@ -304,13 +321,14 @@ object Backup {
                             ph.syno.upload(ns, fid, upName, mt, r.size, { openOriginal(ctx, uri) },
                                 duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
                                 progress = { b -> prog(b) },
-                                canceled = { halt() || quit() || st.rules != rules0 })
+                                canceled = { halt() || quit() || st.rules != rules0 || r.key in cancelKeys })
                             synchronized(names) { names[r.name.lowercase()] = r.size }
                             Library.addServer(ctx, ph1, fid)
                             done(d, r.key, fid, 1, path); upN.incrementAndGet()
                             st.lastOk = System.currentTimeMillis()
                         } catch (e: InterruptedException) {
-                            if (!halt() && st.rules != rules0) changed.set(true) else abort.compareAndSet(null, "멈춤")
+                            if (r.key in cancelKeys) { /* 이 파일만 그만둠 (백업에서 뺐거나 지움) */ }
+                            else if (!halt() && st.rules != rules0) changed.set(true) else abort.compareAndSet(null, "멈춤")
                         } catch (e: SynoError) {
                             // 서버가 거절: 이 파일만 실패로 두고 다음 파일 (세션 문제면 전체를 멈춤)
                             if (e.code in setOf(105, 106, 107, 119)) abort.compareAndSet(null, "로그인이 끊겼습니다 — 앱에서 다시 로그인해 주세요")
@@ -382,11 +400,11 @@ object Backup {
         val m = HashMap<String, Long>()
         var off = 0
         while (true) {
-            val d = ph.syno.call("$ns.Browse.Item", "list", 4, mapOf("offset" to off, "limit" to 1000, "folder_id" to folderId))
+            val d = ph.syno.call("$ns.Browse.Item", "list", 4, mapOf("offset" to off, "limit" to 5000, "folder_id" to folderId))
             val a = d.optJSONArray("list") ?: break
             for (i in 0 until a.length()) { val o = a.getJSONObject(i); m[o.optString("filename").lowercase()] = o.optLong("filesize") }
-            if (a.length() < 1000) break
-            off += 1000
+            if (a.length() < 5000) break
+            off += 5000
         }
         return m
     }
@@ -405,16 +423,19 @@ object Backup {
     fun verifyOnServer(ctx: Context, list: List<Local>, progress: (Int) -> Unit = {}): List<Local> {
         val ph = Photos(ctx)
         val byFolder = list.groupBy { it.folder }
-        val ok = ArrayList<Local>()
-        var n = 0
-        for ((fid, items) in byFolder) {
+        val ok = java.util.Collections.synchronizedList(ArrayList<Local>())
+        val n = java.util.concurrent.atomic.AtomicInteger()
+        // 폴더마다 서버 목록을 4개씩 함께 읽어 대조 (지우기 전에 지금도 서버에 있는지)
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(minOf(4, maxOf(1, byFolder.size)))
+        val futures = byFolder.map { (fid, items) -> pool.submit {
             val names = listNames(ph, Photos.TEAM, fid)
             for (it in items) if (names[it.name.lowercase()] == it.size) ok += it
-            n += items.size; progress(n)
-        }
-        return ok
+            progress(n.addAndGet(items.size))
+        } }
+        try { futures.forEach { it.get() } } catch (e: java.util.concurrent.ExecutionException) { throw (e.cause as? Exception) ?: e } finally { pool.shutdown() }
+        return ArrayList(ok)
     }
-    fun forget(ctx: Context, keys: Collection<Long>) { val d = db(ctx); keys.forEach { d.delete("media", "id=?", arrayOf(it.toString())) } }
+    fun forget(ctx: Context, keys: Collection<Long>) { cancelKeys += keys; val d = db(ctx); keys.forEach { d.delete("media", "id=?", arrayOf(it.toString())) } }
 
     /** 원본 그대로 열기 (위치 정보 포함). 권한이 없으면 그냥 열기 */
     private fun openOriginal(ctx: Context, uri: Uri): InputStream = try {

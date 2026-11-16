@@ -39,6 +39,8 @@ interface PhotoView {
     fun update(it: Item)
     fun reload()
     fun phoneChanged(list: List<Item>?)
+    /** 위로 당겼다 놓으면 (없으면 그 격자만 다시 읽음) */
+    var onPull: (() -> Unit)?
 }
 
 class PhotoGrid(
@@ -95,6 +97,7 @@ class PhotoGrid(
         if (add) all.sortWith(compareByDescending<Item> { it.time }.thenByDescending { it.id })
     }
     override val selected = LinkedHashSet<Long>()
+    override var onPull: (() -> Unit)? = null
     override val selecting get() = selected.isNotEmpty()
     private class Row(val header: String?, val count: Int, val start: Int, val end: Int)
     private var rows = ArrayList<Row>()
@@ -128,7 +131,7 @@ class PhotoGrid(
                 if (scrolling && grouped && !thumbDrag) showBubble(first, visible, total)
             }
         })
-        addView(list, LayoutParams(-1, -1))
+        addView(PullRefresh(a, ui, list, { !list.canScrollVertically(-1) }) { onPull?.invoke() ?: reload() }, LayoutParams(-1, -1))
         addView(empty, LayoutParams(-1, -1))
         addView(spin, LayoutParams(ui.dp(40), ui.dp(40), Gravity.CENTER))
         reload()

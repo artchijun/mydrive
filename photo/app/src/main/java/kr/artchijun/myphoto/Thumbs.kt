@@ -21,10 +21,16 @@ object Thumbs {
     private val mem = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 6).toInt()) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
-    private val queue = LinkedBlockingDeque<Runnable>()
-    private val pool = ThreadPoolExecutor(5, 5, 30, TimeUnit.SECONDS, object : LinkedBlockingDeque<Runnable>() {
-        override fun offer(e: Runnable) = offerFirst(e)   // 나중 부탁이 먼저
-    }.also { }).apply { allowCoreThreadTimeOut(true) }
+    /** 나중 부탁이 먼저 (LIFO) 인 일꾼 묶음 */
+    private fun lifo(n: Int) = ThreadPoolExecutor(n, n, 30, TimeUnit.SECONDS, object : LinkedBlockingDeque<Runnable>() {
+        override fun offer(e: Runnable) = offerFirst(e)
+    }).apply { allowCoreThreadTimeOut(true) }
+    // 휴대폰 안(캐시·안드로이드 썸네일)은 빠른 일꾼, NAS 에서 받는 것은 따로 많이 — 받는 것을 기다리느라 캐시에 있는 것까지 늦어지지 않게
+    private val pool = lifo(3)
+    private val net = lifo(10)
+    /** 작은 썸네일은 RGB_565 로 (메모리 절반 → 더 많이 기억) */
+    private val small = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+    private fun decode(path: String, size: String) = if (size == "sm") BitmapFactory.decodeFile(path, small) else BitmapFactory.decodeFile(path)
     private val main = Handler(Looper.getMainLooper())
     private var dir: File? = null
     private const val DISK_MAX = 400L * 1024 * 1024
@@ -43,9 +49,21 @@ object Thumbs {
         val ctx = iv.context.applicationContext
         pool.execute {
             if (iv.tag != key) return@execute   // 이미 다른 사진 칸이 됨
-            val bmp = try { get(ctx, ns, unitId, cacheKey, size, type) } catch (e: Exception) { null }
-            main.post { if (iv.tag == key) { if (bmp != null) iv.setImageBitmap(bmp); onDone?.invoke(bmp) } }
+            // ① 휴대폰 캐시에 있으면 바로
+            val hit = try { fromDisk(ctx, key, cacheKey, size, type) } catch (e: Exception) { null }
+            if (hit != null) { main.post { if (iv.tag == key) { iv.setImageBitmap(hit); onDone?.invoke(hit) } }; return@execute }
+            // ② NAS 에서 (많이 함께)
+            net.execute {
+                if (iv.tag != key) return@execute
+                val bmp = try { get(ctx, ns, unitId, cacheKey, size, type) } catch (e: Exception) { null }
+                main.post { if (iv.tag == key) { if (bmp != null) iv.setImageBitmap(bmp); onDone?.invoke(bmp) } }
+            }
         }
+    }
+    private fun fromDisk(ctx: Context, key: String, cacheKey: String, size: String, type: String): Bitmap? {
+        val f = File(disk(ctx), "${type}_${cacheKey}_$size.jpg".replace('/', '_'))
+        if (f.length() <= 0) return null
+        return decode(f.path, size)?.also { mem.put(key, it) }
     }
 
     /** 일하는 스레드에서: 썸네일 비트맵 (캐시 → NAS) */
@@ -53,12 +71,12 @@ object Thumbs {
         val key = "$ns|$type|$cacheKey|$size"
         mem.get(key)?.let { return it }
         val f = File(disk(ctx), "${type}_${cacheKey}_$size.jpg".replace('/', '_'))
-        if (f.length() > 0) BitmapFactory.decodeFile(f.path)?.let { f.setLastModified(System.currentTimeMillis()); mem.put(key, it); return it }
+        if (f.length() > 0) decode(f.path, size)?.let { f.setLastModified(System.currentTimeMillis()); mem.put(key, it); return it }
         val tmp = File(f.path + ".part")
         Syno(ctx).thumbStream(ns, unitId, cacheKey, size, type).use { inp -> tmp.outputStream().use { inp.copyTo(it, 64 * 1024) } }
         if (!tmp.renameTo(f)) { tmp.delete(); return null }
         trim(f.length())
-        val b = BitmapFactory.decodeFile(f.path) ?: return null
+        val b = decode(f.path, size) ?: return null
         mem.put(key, b)
         return b
     }
@@ -85,7 +103,7 @@ object Thumbs {
         mem.get(key)?.let { b -> iv.setImageBitmap(b); onDone(b); return }
         if (it.video || it.size <= 0 || it.size > 8L * 1024 * 1024) { onDone(null); return }
         val ctx = iv.context.applicationContext
-        pool.execute {
+        net.execute {
             if (iv.tag != key) return@execute
             val bmp = try { smallFromOriginal(ctx, ns, it) } catch (e: Exception) { null }
             if (bmp != null) mem.put(key, bmp)
