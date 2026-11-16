@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.19"
+const version = "0.6.20"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
@@ -140,7 +140,8 @@ func main() {
 	mux.HandleFunc("/v1/admin/whoami", adminAuth(hAdminWhoami))
 	mux.HandleFunc("/v1/admin/login", hConsoleLogin) // DSM 계정으로 관리 콘솔 (토큰 없이)
 	mux.HandleFunc("/v1/admin/logout", hConsoleLogout)
-	mux.HandleFunc("/v1/pair", hPair) // DSM 계정으로 PC 연결 (토큰 없이)
+	mux.HandleFunc("/v1/pair", hPair)       // DSM 계정으로 PC 연결 (토큰 없이)
+	mux.HandleFunc("/webapi/", hPhotoProxy) // 휴대폰 사진 앱(Myphoto)이 밖에서 시놀로지 포토를 쓰게 (photoproxy.go)
 	// 다시 켜기: 프로세스를 끝내면 Docker 가 다시 띄우면서 최신 실행 파일을 복사해 씀
 	restart := func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, r, map[string]any{"ok": true})

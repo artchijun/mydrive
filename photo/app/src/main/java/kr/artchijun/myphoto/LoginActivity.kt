@@ -19,7 +19,7 @@ class LoginActivity : Activity() {
         window.statusBarColor = ui.bg; window.navigationBarColor = ui.bg
 
         val home = ui.input("집 안 주소 (예: http://192.168.0.6:5000)", pf.home)
-        val outside = ui.input("밖에서 쓸 주소 (예: https://photo.도메인)", pf.outside)
+        val outside = ui.input("밖에서 쓸 주소 (Mydrive 서버, 예: https://drive.cdluos.com)", pf.outside)
         val acct = ui.input("계정", pf.account)
         val pw = ui.input("비밀번호", password = true)
         val otp = ui.input("2단계 인증 코드 (6자리)").apply { visibility = View.GONE; inputType = android.text.InputType.TYPE_CLASS_NUMBER }
@@ -48,7 +48,7 @@ class LoginActivity : Activity() {
             ui.label("시놀로지 포토 계정으로 로그인", 15f, ui.sub).apply { layoutParams = ui.lp(top = 4) },
             ui.label("시놀로지 주소", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 28) },
             home.apply { layoutParams = ui.lp(top = 8) }, hint("집 와이파이에서 쓰는 주소. 닿으면 이 주소를 먼저 씀"),
-            outside.apply { layoutParams = ui.lp(top = 12) }, hint("밖에서 쓰는 주소 (비워 두면 집에서만 씀)"),
+            outside.apply { layoutParams = ui.lp(top = 12) }, hint("밖에서는 Mydrive 서버(터널)를 거쳐 시놀로지 포토에 닿음 — 집 주소가 안 닿으면 자동으로 이 주소. 큰 파일은 나눠 올림"),
             ui.label("계정", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 24) },
             acct.apply { layoutParams = ui.lp(top = 8) }, pw.apply { layoutParams = ui.lp(top = 10) }, otp.apply { layoutParams = ui.lp(top = 10) },
             hint("비밀번호는 이 휴대폰의 열쇠 보관소로 잠가 저장합니다 — 세션이 끝나도 백업이 멈추지 않게 앱이 다시 로그인함"),

@@ -123,10 +123,10 @@ class MainActivity : Activity() {
         topBar.findViewWithTag<View>("back").visibility = if (stacks[tab].size > 1) View.VISIBLE else View.GONE
         onSel(grid()?.selected?.size ?: 0)
     }
-    private fun grid(): PhotoGrid? = if (tab < 4) stacks[tab].lastOrNull()?.second as? PhotoGrid else null
+    private fun grid(): PhotoGrid? = if (tab < 4) stacks[tab].lastOrNull()?.second.let { (it as? PhotoGrid) ?: (it as? GridPage)?.grid } else null
     private fun refresh() {
         val top = stacks[tab].lastOrNull() ?: return
-        (top.second as? PhotoGrid)?.reload() ?: run {
+        grid()?.reload() ?: run {
             stacks[tab].removeAt(stacks[tab].size - 1)
             select(tab)   // 맨 위 화면이면 다시 만들기
         }
@@ -141,7 +141,29 @@ class MainActivity : Activity() {
         PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) })
 
     // ---------- 사진 (전체) ----------
-    private fun timelinePage(): View = photoGrid(true, emptyMap())
+    /** 전체 사진: 위에 [일 | 월 | 년] 고르기 */
+    private fun timelinePage(): View {
+        val g = photoGrid(true, emptyMap())
+        val seg = ui.row().apply { setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(4)); setBackgroundColor(ui.bg) }
+        val units = listOf("day" to "일", "month" to "월", "year" to "년")
+        fun paint() {
+            for (k in 0 until seg.childCount) {
+                val on = units[k].first == g.unit
+                (seg.getChildAt(k) as TextView).apply {
+                    setTextColor(if (on) ui.onAccent else ui.text)
+                    background = ui.press(ui.round(if (on) ui.accent else ui.panel2, 16), 16)
+                }
+            }
+        }
+        units.forEach { (u, name) ->
+            seg.addView(ui.label(name, 14f, ui.text, bold = true).apply {
+                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(ui.dp(64), ui.dp(34)).apply { rightMargin = ui.dp(8) }
+                setOnClickListener { g.unit = u; paint() }
+            })
+        }
+        paint()
+        return GridPage(this, ui.col(seg, g.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), g)
+    }
 
     // ---------- 폴더 ----------
     private fun folderPage(id: Long, name: String): View {
@@ -205,7 +227,7 @@ class MainActivity : Activity() {
                                 background = if (round) GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ui.panel2) } else ui.round(ui.panel2, 12)
                                 layoutParams = LinearLayout.LayoutParams(w, if (round) w else w * 3 / 4)
                             }
-                            if (g.coverKey.isNotEmpty()) Thumbs.load(iv, ns, g.coverUnit, g.coverKey, "sm")
+                            if (g.coverKey.isNotEmpty()) Thumbs.load(iv, ns, g.coverUnit, g.coverKey, "sm", g.thumbType)
                             return ui.col(iv, ui.label(g.name.ifEmpty { "이름 없음" }, 14f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp(top = 6); if (round) gravity = Gravity.CENTER },
                                 ui.label("${g.count}장" + (if (g.sub.isNotEmpty() && g.sub != g.name) " · ${g.sub}" else ""), 12f, ui.sub).apply { setSingleLine(); if (round) gravity = Gravity.CENTER })
                         }
@@ -250,4 +272,9 @@ class MainActivity : Activity() {
                 }
             }.setNegativeButton("그만", null).show()
     }
+}
+
+/** 격자를 다른 것(일·월·년 단추 등)과 함께 담은 화면 — 격자를 찾을 수 있게 */
+class GridPage(ctx: android.content.Context, content: View, val grid: PhotoGrid) : FrameLayout(ctx) {
+    init { addView(content, LayoutParams(-1, -1)) }
 }

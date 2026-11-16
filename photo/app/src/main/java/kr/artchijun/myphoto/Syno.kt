@@ -45,6 +45,8 @@ class Syno(ctx: Context) {
         @Volatile private var base: String? = null
         @Volatile private var baseAt = 0L
         private val loginLock = Any()
+        /** 밖에서 이보다 큰 파일은 나눠 올림 (Cloudflare 터널은 요청 하나에 100MB 까지) */
+        const val SPLIT_OVER = 90L * 1024 * 1024
 
         fun authMessage(code: Int): String = when (code) {
             400 -> "계정이나 비밀번호가 맞지 않습니다"
@@ -206,6 +208,8 @@ class Syno(ctx: Context) {
      */
     fun upload(ns: String, folderId: Long, name: String, mtimeSec: Long, size: Long, open: () -> InputStream,
                duplicate: String = "ignore", progress: (Long) -> Unit = {}, canceled: () -> Boolean = { false }): JSONObject {
+        // 밖(Mydrive 서버를 거치는 터널)으로 큰 파일: 요청 하나 100MB 제한 → 나눠 올림
+        if (size > SPLIT_OVER && server() != pf.home) return uploadInParts(ns, folderId, name, mtimeSec, size, open, duplicate, progress, canceled)
         for (attempt in 0..1) {
             val s = server()
             val boundary = "----Myphoto" + System.nanoTime()
@@ -249,5 +253,68 @@ class Syno(ctx: Context) {
             throw SynoError(code, message(code))
         }
         throw IOException("올리지 못했습니다")
+    }
+
+    /**
+     * 나눠 올리기 (밖에서 큰 파일): 32MB 조각을 차례로 Mydrive 서버에 보내고, 서버가 NAS 안에서 시놀로지에 한 번에 올림.
+     * 조각 하나가 실패하면 서버가 받은 곳부터 다시 보냄 (처음부터가 아님)
+     */
+    private fun uploadInParts(ns: String, folderId: Long, name: String, mtimeSec: Long, size: Long, open: () -> InputStream,
+                              duplicate: String, progress: (Long) -> Unit, canceled: () -> Boolean): JSONObject {
+        val id = java.util.UUID.randomUUID().toString().replace("-", "")
+        val auth = "_sid=" + enc(pf.sid) + (if (pf.synoToken.isNotEmpty()) "&SynoToken=" + enc(pf.synoToken) else "")
+        val chunk = 32 * 1024 * 1024
+        val buf = ByteArray(chunk)
+        open().use { inp ->
+            var off = 0L
+            var fails = 0
+            while (off < size) {
+                if (canceled()) throw InterruptedException("멈춤")
+                // 조각 하나 채우기
+                var n = 0
+                while (n < chunk) { val k = inp.read(buf, n, chunk - n); if (k < 0) break; n += k }
+                if (n == 0) throw IOException("파일이 올리는 중에 바뀌었습니다")
+                var sent = false
+                while (!sent) {
+                    try {
+                        val c = URL(server() + "/webapi/myphoto/part?id=$id&off=$off&$auth").openConnection() as HttpURLConnection
+                        val j = try {
+                            c.connectTimeout = 15_000; c.readTimeout = 5 * 60_000; c.requestMethod = "POST"; c.doOutput = true
+                            c.setRequestProperty("Content-Type", "application/octet-stream")
+                            c.setFixedLengthStreamingMode(n)
+                            c.outputStream.use { o -> var w = 0; while (w < n) { val k = minOf(256 * 1024, n - w); o.write(buf, w, k); w += k; progress(off + w) } }
+                            val code = c.responseCode
+                            val body = (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
+                            if (code == 401) { if (fails++ < 1 && relogin()) continue; throw SynoError(119, message(119)) }
+                            if (code != 200) throw IOException("조각을 보내지 못함 (HTTP $code)")
+                            JSONObject(body)
+                        } finally { c.disconnect() }
+                        if (!j.optBoolean("ok")) throw IOException("서버가 받은 크기가 맞지 않음 (${j.optLong("have")})")
+                        sent = true
+                    } catch (e: IOException) {
+                        if (e is SynoError || ++fails > 4 || canceled()) throw e
+                        base = null; Thread.sleep(3000L * fails)   // 잠깐 끊김: 같은 조각을 다시
+                    }
+                }
+                off += n
+            }
+            if (off != size) throw IOException("파일이 올리는 중에 바뀌었습니다")
+        }
+        // 마무리: 서버가 시놀로지에 한 번에
+        val form = form(linkedMapOf("duplicate" to JSONObject.quote(duplicate), "name" to JSONObject.quote(name), "mtime" to mtimeSec.toString(),
+            "target_folder_id" to folderId.toString(), "size" to size.toString()))
+        val c = URL(server() + "/webapi/myphoto/finish?id=$id&api=" + enc("$ns.Upload.Item") + "&method=upload_to_folder&version=8&$auth").openConnection() as HttpURLConnection
+        val j = try {
+            c.connectTimeout = 15_000; c.readTimeout = 30 * 60_000; c.requestMethod = "POST"; c.doOutput = true
+            c.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+            c.outputStream.use { it.write(form.toByteArray()) }
+            val code = c.responseCode
+            val body = (if (code >= 400) c.errorStream else c.inputStream)?.bufferedReader()?.use { it.readText() } ?: ""
+            if (code != 200) throw IOException("마무리하지 못함 (HTTP $code) " + body.take(120))
+            JSONObject(body)
+        } finally { c.disconnect() }
+        if (j.optBoolean("success")) return j.optJSONObject("data") ?: JSONObject()
+        val code = j.optJSONObject("error")?.optInt("code") ?: 0
+        throw SynoError(code, message(code))
     }
 }

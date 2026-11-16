@@ -35,8 +35,10 @@ class PhotoGrid(
     companion object {
         private const val PAGE = 300
         private val utc = TimeZone.getTimeZone("UTC")
-        fun dayKey(t: Long): String = SimpleDateFormat("yyyyMMdd", Locale.KOREA).apply { timeZone = utc }.format(Date(t * 1000))
-        fun dayTitle(t: Long): String = SimpleDateFormat("yyyy년 M월 d일 (E)", Locale.KOREA).apply { timeZone = utc }.format(Date(t * 1000))
+        private fun fmt(p: String, t: Long) = SimpleDateFormat(p, Locale.KOREA).apply { timeZone = utc }.format(Date(t * 1000))
+        /** 묶음 단위: day · month · year */
+        fun groupKey(unit: String, t: Long): String = fmt(when (unit) { "year" -> "yyyy"; "month" -> "yyyyMM"; else -> "yyyyMMdd" }, t)
+        fun groupTitle(unit: String, t: Long): String = fmt(when (unit) { "year" -> "yyyy년"; "month" -> "yyyy년 M월"; else -> "yyyy년 M월 d일 (E)" }, t)
         fun stamp(t: Long): String = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA).apply { timeZone = utc }.format(Date(t * 1000))
     }
 
@@ -47,6 +49,9 @@ class PhotoGrid(
     private var rows = ArrayList<Row>()
     private val pf = Prefs(a)
     private var cols = pf.int("cols", 4)
+    /** 묶음 단위 (일·월·년). 바꾸면 칸 수도 그 단위에 맞게 (일 4 · 월 5 · 년 7 기본, 오므리기로 바꾼 값은 단위별로 기억) */
+    var unit: String = pf.str("unit", "day")
+        set(v) { field = v; pf.putStr("unit", v); cols = pf.int("cols_$v", when (v) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) }); rebuild(); list.setSelection(0) }
     private var loading = false
     private var done = false
     private var seq = 0
@@ -56,6 +61,7 @@ class PhotoGrid(
 
     /** 처음 만들기 (모든 속성이 준비된 뒤 — 맨 아래 init 에서) */
     private fun setup() {
+        if (grouped) cols = pf.int("cols_$unit", when (unit) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) })
         list.divider = null; list.dividerHeight = 0; list.selector = android.graphics.drawable.ColorDrawable(0)
         list.isFastScrollEnabled = true; list.setBackgroundColor(ui.bg)
         list.adapter = adapter
@@ -97,9 +103,9 @@ class PhotoGrid(
         while (i < items.size) {
             var j = i
             if (grouped) {
-                val k = dayKey(items[i].time)
-                while (j < items.size && dayKey(items[j].time) == k) j++
-                out += Row(dayTitle(items[i].time), j - i, i, j)
+                val k = groupKey(unit, items[i].time)
+                while (j < items.size && groupKey(unit, items[j].time) == k) j++
+                out += Row(groupTitle(unit, items[i].time), j - i, i, j)
             } else j = items.size
             var s = i
             while (s < j) { out += Row(null, 0, s, minOf(s + cols, j)); s += cols }
@@ -123,7 +129,7 @@ class PhotoGrid(
     fun setCols(n: Int) {
         val first = list.firstVisiblePosition.coerceAtMost(rows.size - 1)
         val anchor = if (first >= 0) rows[first].start else 0
-        cols = n; pf.putInt("cols", n); rebuild()
+        cols = n; pf.putInt("cols_$unit", n); if (unit == "day") pf.putInt("cols", n); rebuild()
         val idx = rows.indexOfFirst { it.header == null && anchor >= it.start && anchor < it.end }
         if (idx >= 0) list.setSelection(maxOf(0, idx - 1))
     }

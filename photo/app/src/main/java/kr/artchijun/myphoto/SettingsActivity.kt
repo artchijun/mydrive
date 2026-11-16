@@ -56,7 +56,7 @@ class SettingsActivity : Activity() {
                     .setNegativeButton("그만", null).show()
             },
             item("집 안 주소", pf.home.ifEmpty { "(없음)" } + " — 집 와이파이에서 먼저 씀") { edit("집 안 주소", "http://192.168.0.6:5000", pf.home) { pf.home = it } },
-            item("밖 주소", pf.outside.ifEmpty { "(없음 — 집에서만 씀)" } + " — 집 주소가 안 닿을 때") { edit("밖 주소", "https://photo.도메인", pf.outside) { pf.outside = it } },
+            item("밖 주소", pf.outside.ifEmpty { "(없음 — 집에서만 씀)" } + " — 집 주소가 안 닿을 때 (Mydrive 서버가 터널로 이어 줌, 큰 파일은 나눠 올림)") { edit("밖 주소", "https://drive.cdluos.com", pf.outside) { pf.outside = it } },
             item("연결 확인", "지금 어느 주소로 닿는지 봄") {
                 bg.execute { val r = try { Syno(this).server(true) } catch (e: Exception) { "닿지 않음: ${e.message}" }; runOnUiThread { Toast.makeText(this, r, Toast.LENGTH_LONG).show() } }
             },

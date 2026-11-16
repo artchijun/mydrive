@@ -9,7 +9,7 @@ data class Folder(val id: Long, val path: String, val parent: Long, val cover: P
     val name get() = path.substringAfterLast('/').ifEmpty { "사진" }
 }
 /** 인물 · 장소 · 앨범처럼 사진 묶음 */
-data class Group(val id: Long, val name: String, val count: Int, val coverUnit: Long, val coverKey: String, val sub: String = "")
+data class Group(val id: Long, val name: String, val count: Int, val coverUnit: Long, val coverKey: String, val sub: String = "", val thumbType: String = "unit")
 
 /**
  * 시놀로지 포토에서 무엇을 읽고 바꿀지 (화면과 백업이 같이 씀). 모두 일하는 스레드에서 부름.
@@ -93,31 +93,33 @@ class Photos(ctx: Context) {
         return d.optJSONObject("folder")?.optLong("id") ?: d.optLong("id")
     }
 
-    private fun groups(d: JSONObject, sub: (JSONObject) -> String = { "" }): List<Group> {
+    /** person = true: 얼굴만 잘린 썸네일 (type=person, id=인물 번호) */
+    private fun groups(d: JSONObject, person: Boolean = false, sub: (JSONObject) -> String = { "" }): List<Group> {
         val a = d.optJSONArray("list") ?: return emptyList()
         return List(a.length()) {
             val o = a.getJSONObject(it)
             val th = o.optJSONObject("additional")?.optJSONObject("thumbnail")
-            Group(o.optLong("id"), o.optString("name"), o.optInt("item_count"), th?.optLong("unit_id", o.optLong("cover")) ?: o.optLong("cover"), th?.optString("cache_key") ?: "", sub(o))
+            val unit = if (person) o.optLong("id") else th?.optLong("unit_id", o.optLong("cover")) ?: o.optLong("cover")
+            Group(o.optLong("id"), o.optString("name"), o.optInt("item_count"), unit, th?.optString("cache_key") ?: "", sub(o), if (person) "person" else "unit")
         }
     }
 
     fun persons(ns: String): List<Group> {
         val out = ArrayList<Group>(); var off = 0
         while (true) {
-            val g = groups(syno.call("$ns.Browse.Person", "list", 1, mapOf("offset" to off, "limit" to 500, "show_more" to true, "show_hidden" to false, "additional" to listOf("thumbnail"))))
-            out += g; if (g.size < 500) break; off += 500
+            val g = groups(syno.call("$ns.Browse.Person", "list", 1, mapOf("offset" to off, "limit" to 500, "show_more" to true, "show_hidden" to false, "additional" to listOf("thumbnail"))), person = true)
+            out += g; if (g.size < 500 || off > 20000) break; off += 500
         }
-        return out
+        return out.distinctBy { it.id }
     }
 
     fun places(ns: String): List<Group> {
         val out = ArrayList<Group>(); var off = 0
         while (true) {
-            val g = groups(syno.call("$ns.Browse.Geocoding", "list", 1, mapOf("offset" to off, "limit" to 500, "additional" to listOf("thumbnail")))) { it.optString("country") }
-            out += g; if (g.size < 500) break; off += 500
+            val g = groups(syno.call("$ns.Browse.Geocoding", "list", 1, mapOf("offset" to off, "limit" to 500, "additional" to listOf("thumbnail")))) { o -> o.optString("country") }
+            out += g; if (g.size < 500 || off > 20000) break; off += 500
         }
-        return out
+        return out.distinctBy { it.id }
     }
 
     fun setFavorite(ns: String, ids: List<Long>, on: Boolean) {

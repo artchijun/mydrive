@@ -48,14 +48,21 @@ object Backup {
     }
 
     // ---------- DB ----------
-    class Db(ctx: Context) : SQLiteOpenHelper(ctx, "backup.db", null, 1) {
+    class Db(ctx: Context) : SQLiteOpenHelper(ctx, "backup.db", null, 2) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE media(id INTEGER PRIMARY KEY, video INTEGER, rel TEXT, name TEXT, size INTEGER, mtime INTEGER, taken INTEGER,
                 state INTEGER DEFAULT 0, tries INTEGER DEFAULT 0, err TEXT, at INTEGER DEFAULT 0)""")
             db.execSQL("CREATE INDEX media_state ON media(state, taken)")
             db.execSQL("CREATE TABLE log(t INTEGER, msg TEXT)")
+            onUpgrade(db, 1, 2)
         }
-        override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {}
+        // 2: 서버에서 확인한 자리 (공간 확보가 씀) — srv_folder: 공유 공간 폴더 번호, srv_at: 서버에 있음을 확인한 때
+        override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
+            if (o < 2) {
+                db.execSQL("ALTER TABLE media ADD COLUMN srv_folder INTEGER DEFAULT 0"); db.execSQL("ALTER TABLE media ADD COLUMN srv_at INTEGER DEFAULT 0")
+                db.execSQL("UPDATE media SET state=0 WHERE state=1")   // 예전 완료는 다음 백업 때 서버 자리를 다시 확인 (이미 있으면 올리지 않고 바로 완료)
+            }
+        }
     }
     @Volatile private var db: Db? = null
     fun db(ctx: Context): SQLiteDatabase = (db ?: synchronized(this) { db ?: Db(ctx.applicationContext).also { db = it } }).writableDatabase
@@ -119,7 +126,7 @@ object Backup {
                                 put("size", size); put("mtime", mtime); put("taken", if (c.isNull(5)) mtime * 1000 else c.getLong(5))
                             }); added++
                         } else if (cur.first != size || cur.second != mtime) {
-                            d.update("media", ContentValues().apply { put("size", size); put("mtime", mtime); put("state", WAIT); put("tries", 0) }, "id=?", arrayOf(key.toString()))
+                            d.update("media", ContentValues().apply { put("size", size); put("mtime", mtime); put("state", WAIT); put("tries", 0); put("srv_folder", 0); put("srv_at", 0) }, "id=?", arrayOf(key.toString()))
                             added++
                         }
                     }
@@ -194,7 +201,7 @@ object Backup {
             if (rows.isEmpty()) { st.lastMsg = "모두 백업됨"; st.lastOk = System.currentTimeMillis(); return true }
             val folderIds = HashMap<String, Long>()
             val existing = HashMap<Long, HashMap<String, Long>>()   // 폴더 → (이름 → 크기)
-            var n = 0; var uploaded = 0; var skipped = 0; var failed = 0; var bigLater = 0
+            var n = 0; var uploaded = 0; var skipped = 0; var failed = 0
             log(ctx, "백업 시작 — ${rows.size}개 남음")
             for (r in rows) {
                 if (stop()) { st.lastMsg = "멈춤 — ${rows.size - n}개 남음"; return false }
@@ -206,16 +213,14 @@ object Backup {
                     val fid = folderIds[path] ?: ph.folderByPath(ns, path, true)!!.also { folderIds[path] = it }
                     val names = existing.getOrPut(fid) { listNames(ph, ns, fid) }
                     val have = names[r.name.lowercase()]
-                    if (have == r.size) { mark(d, r.key, DONE, null); skipped++; continue }   // 이미 있음 (같은 이름·크기)
-                    // Cloudflare 터널은 요청 하나에 100MB 까지 → 밖 주소로는 큰 파일을 미루고 집 와이파이에서 올림
-                    val viaOutside = ph.syno.serverOrNull?.let { it != Prefs(ctx).home } ?: false
-                    if (viaOutside && r.size > 95L * 1024 * 1024) { bigLater++; continue }
+                    if (have == r.size) { done(d, r.key, fid); skipped++; continue }   // 이미 있음 (같은 이름·크기) — 서버 자리도 적어 둠
+                    // 밖(터널)에서 큰 파일은 Syno.upload 가 알아서 나눠 올림
                     val uri = ContentUris.withAppendedId(if (r.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, r.key / 2)
                     ph.syno.upload(ns, fid, r.name, r.mtime, r.size, { openOriginal(ctx, uri) },
                         duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
                         progress = { b -> current = Progress(n, rows.size, r.name, b, r.size); onProgress(current) }, canceled = stop)
                     names[r.name.lowercase()] = r.size
-                    mark(d, r.key, DONE, null); uploaded++
+                    done(d, r.key, fid); uploaded++
                     st.lastOk = System.currentTimeMillis()
                 } catch (e: InterruptedException) {
                     st.lastMsg = "멈춤"; return false
@@ -236,10 +241,9 @@ object Backup {
                     fail(d, r, "읽기 권한 없음"); failed++
                 }
             }
-            st.lastMsg = "끝 — 올림 $uploaded · 이미 있음 $skipped" + (if (failed > 0) " · 실패 $failed" else "") +
-                (if (bigLater > 0) " · 100MB 넘는 ${bigLater}개는 집 와이파이에서" else "")
+            st.lastMsg = "끝 — 올림 $uploaded · 이미 있음 $skipped" + (if (failed > 0) " · 실패 $failed" else "")
             log(ctx, st.lastMsg)
-            return failed == 0   // 큰 파일을 미룬 것은 다음 정기 백업(6시간)·새 사진 때 다시 봄
+            return failed == 0
         } catch (e: Exception) {
             st.lastMsg = "멈춤: ${e.message}"; log(ctx, st.lastMsg); return false
         } finally {
@@ -263,13 +267,39 @@ object Backup {
         return m
     }
 
+    // ---------- 공간 확보 ----------
+    class Local(val key: Long, val video: Boolean, val rel: String, val name: String, val size: Long, val taken: Long, val folder: Long) {
+        val uri: Uri get() = ContentUris.withAppendedId(if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, key / 2)
+    }
+    /** 백업이 끝난(서버에 있다고 적힌) 휴대폰 파일들. 공간 확보 화면이 거름 */
+    fun backedUp(ctx: Context): List<Local> {
+        scan(ctx)
+        return db(ctx).rawQuery("SELECT id, video, rel, name, size, taken, srv_folder FROM media WHERE state=1 AND srv_folder>0 ORDER BY taken DESC", null).use { c ->
+            List(c.count) { c.moveToNext(); Local(c.getLong(0), c.getInt(1) == 1, c.getString(2), c.getString(3), c.getLong(4), c.getLong(5), c.getLong(6)) } }
+    }
+    /** 지우기 직전 확인: 서버 폴더에 같은 이름·크기가 지금도 있는 것만 돌려줌 */
+    fun verifyOnServer(ctx: Context, list: List<Local>, progress: (Int) -> Unit = {}): List<Local> {
+        val ph = Photos(ctx)
+        val byFolder = list.groupBy { it.folder }
+        val ok = ArrayList<Local>()
+        var n = 0
+        for ((fid, items) in byFolder) {
+            val names = listNames(ph, Photos.TEAM, fid)
+            for (it in items) if (names[it.name.lowercase()] == it.size) ok += it
+            n += items.size; progress(n)
+        }
+        return ok
+    }
+    fun forget(ctx: Context, keys: Collection<Long>) { val d = db(ctx); keys.forEach { d.delete("media", "id=?", arrayOf(it.toString())) } }
+
     /** 원본 그대로 열기 (위치 정보 포함). 권한이 없으면 그냥 열기 */
     private fun openOriginal(ctx: Context, uri: Uri): InputStream = try {
         ctx.contentResolver.openInputStream(MediaStore.setRequireOriginal(uri))!!
     } catch (e: SecurityException) { ctx.contentResolver.openInputStream(uri)!! } catch (e: UnsupportedOperationException) { ctx.contentResolver.openInputStream(uri)!! }
 
-    private fun mark(d: SQLiteDatabase, key: Long, state: Int, err: String?) {
-        d.update("media", ContentValues().apply { put("state", state); put("err", err); put("at", System.currentTimeMillis()) }, "id=?", arrayOf(key.toString()))
+    private fun done(d: SQLiteDatabase, key: Long, folder: Long) {
+        val now = System.currentTimeMillis()
+        d.update("media", ContentValues().apply { put("state", DONE); put("err", null as String?); put("at", now); put("srv_folder", folder); put("srv_at", now) }, "id=?", arrayOf(key.toString()))
     }
     private fun fail(d: SQLiteDatabase, r: Row, err: String) {
         d.update("media", ContentValues().apply { put("state", FAIL); put("err", err); put("tries", r.tries + 1); put("at", System.currentTimeMillis()) }, "id=?", arrayOf(r.key.toString()))

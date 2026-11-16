@@ -10,7 +10,7 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-// 설정: 시놀로지 주소(집 안 · 밖), 계정, 세션. 비밀번호는 휴대폰의 열쇠 보관소(안드로이드 키스토어)로 잠가서 저장
+// 설정: 시놀로지 주소(집 안 · 밖 = Mydrive 서버가 터널로 이어 줌), 계정, 세션. 비밀번호는 휴대폰의 열쇠 보관소(안드로이드 키스토어)로 잠가서 저장
 //   — 세션이 끝나면 앱이 스스로 다시 로그인해야 백업이 멈추지 않음
 class Prefs(ctx: Context) {
     private val p = ctx.getSharedPreferences("myphoto", Context.MODE_PRIVATE)
@@ -19,7 +19,7 @@ class Prefs(ctx: Context) {
         get() = p.getString("home", "http://192.168.0.6:5000") ?: ""
         set(v) = p.edit().putString("home", v.trim().trimEnd('/')).apply()
     var outside: String
-        get() = p.getString("outside", "") ?: ""
+        get() = p.getString("outside", null)?.takeIf { it.isNotEmpty() } ?: "https://drive.cdluos.com"   // 비워 두면 기본 (Mydrive 서버)
         set(v) = p.edit().putString("outside", v.trim().trimEnd('/')).apply()
     var account: String
         get() = p.getString("account", "") ?: ""
