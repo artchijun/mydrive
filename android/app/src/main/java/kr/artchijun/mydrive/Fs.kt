@@ -53,7 +53,15 @@ class Fs(private val ctx: Context, private val api: Api) {
     }
 
     // ---------- 휴대폰 저장소 ----------
+    private var volCache: List<Vol>? = null
+    private var volAt = 0L
+    /** 저장소 목록 (자주 불려서 5초 동안 기억) */
     fun volumes(): List<Vol> {
+        val now = System.currentTimeMillis()
+        volCache?.let { if (now - volAt < 5000) return it }
+        return scanVolumes().also { volCache = it; volAt = now }
+    }
+    private fun scanVolumes(): List<Vol> {
         val out = mutableListOf<Vol>()
         val primary = Environment.getExternalStorageDirectory()
         out += Vol("내장 저장소", primary, false)
@@ -77,12 +85,22 @@ class Fs(private val ctx: Context, private val api: Api) {
     // ---------- 목록 ----------
     fun list(loc: Loc, showHidden: Boolean): List<Item> = when (loc.kind) {
         "local" -> {
+            // 항목마다 정보는 한 번만 묻기 (휴대폰 저장소는 묻는 횟수가 많으면 느림). 안 항목 수는 따로 (countLater)
             val d = file(loc)
-            val fs = d.listFiles() ?: if (!d.exists()) throw IOException("폴더가 없습니다") else throw IOException("이 폴더를 읽을 권한이 없습니다")
-            fs.filter { (showHidden || !it.name.startsWith(".")) && it.name !in skipLocal }.map { f ->
-                Item(f.name, f.isDirectory, if (f.isDirectory) 0 else f.length(), f.lastModified(), loc.child(f.name).path,
-                    if (f.isDirectory) (f.list()?.count { showHidden || !it.startsWith(".") } ?: -1) else -1)
-            }
+            if (!d.isDirectory) throw IOException(if (!d.exists()) "폴더가 없습니다" else "폴더가 아닙니다")
+            val out = ArrayList<Item>()
+            try {
+                java.nio.file.Files.newDirectoryStream(d.toPath()).use { ds ->
+                    for (p in ds) {
+                        val n = p.fileName.toString()
+                        if ((!showHidden && n.startsWith(".")) || n in skipLocal) continue
+                        val a = try { java.nio.file.Files.readAttributes(p, java.nio.file.attribute.BasicFileAttributes::class.java) } catch (e: Exception) { null }
+                        val dir = a?.isDirectory ?: false
+                        out += Item(n, dir, if (dir || a == null) 0 else a.size(), a?.lastModifiedTime()?.toMillis() ?: 0, loc.child(n).path)
+                    }
+                }
+            } catch (e: java.nio.file.AccessDeniedException) { throw IOException("이 폴더를 읽을 권한이 없습니다") }
+            out
         }
         "nas" -> api.list(loc.root, loc.path).filter { showHidden || !it.name.startsWith(".") }.map { e ->
             Item(e.name, e.dir, e.size, e.mtimeNs / 1_000_000, e.path)
@@ -91,6 +109,8 @@ class Fs(private val ctx: Context, private val api: Api) {
         "trash" -> trashList()
         else -> emptyList()
     }
+
+    fun childCount(d: File, showHidden: Boolean): Int = d.list()?.count { showHidden || !it.startsWith(".") } ?: -1
 
     // ---------- 만들기·이름 바꾸기·지우기 ----------
     fun mkdir(loc: Loc, name: String) {

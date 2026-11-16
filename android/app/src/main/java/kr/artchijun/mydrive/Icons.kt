@@ -73,6 +73,7 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "globe" -> { cv.drawCircle(12f, 12f, 8.5f, p); cv.drawOval(RectF(8.2f, 3.5f, 15.8f, 20.5f), p); ln(3.5f, 12f, 20.5f, 12f); ln(5f, 7.5f, 19f, 7.5f); ln(5f, 16.5f, 19f, 16.5f) }
             "range" -> { rr(3.5f, 3.5f, 9.5f, 9.5f, 1.5f); rr(14.5f, 14.5f, 20.5f, 20.5f, 1.5f); for (t in floatArrayOf(11.5f, 13.5f)) cv.drawCircle(t, t, 0.9f, f); ln(6.5f, 12.5f, 6.5f, 17.5f); ln(6.5f, 17.5f, 11.5f, 17.5f) }
             "openas" -> { poly(14f, 4f, 20f, 4f, 20f, 10f); ln(20f, 4f, 11f, 13f); poly(17f, 14f, 17f, 20f, 4f, 20f, 4f, 7f, 10f, 7f); cv.drawCircle(8f, 16f, 1f, f) }
+            "listview" -> { for (y in floatArrayOf(6f, 12f, 18f)) { rr(3.5f, y - 1.6f, 6.7f, y + 1.6f, 0.8f); ln(9.5f, y, 20.5f, y) } }
             "grid" -> { rr(4f, 4f, 10.5f, 10.5f, 1.5f); rr(13.5f, 4f, 20f, 10.5f, 1.5f); rr(4f, 13.5f, 10.5f, 20f, 1.5f); rr(13.5f, 13.5f, 20f, 20f, 1.5f) }
         }
         cv.restore()

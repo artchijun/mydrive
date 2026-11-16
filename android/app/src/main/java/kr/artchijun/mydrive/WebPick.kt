@@ -27,7 +27,7 @@ object WebPick {
                             if (!top && w == 0) show(a, ui, api, cur.substringBeforeLast('/', "").ifEmpty { "/" }, done)
                             else show(a, ui, api, (if (top) "" else cur) + "/" + dirs[if (top) w else w - 1], done)
                         }
-                        .apply { if (!top) setPositiveButton("이 폴더 추가") { _, _ -> name(a, ui, api, cur, done) } }
+                        .apply { if (!top) setPositiveButton("이 폴더 추가") { _, _ -> name(a, ui, api, cur, done) } else setPositiveButton("NAS 전체 추가") { _, _ -> name(a, ui, api, "/", done) } }
                         .setNegativeButton("닫기", null).show()
                 }
             }
@@ -35,10 +35,10 @@ object WebPick {
     }
 
     private fun name(a: Activity, ui: Ui, api: Api, dir: String, done: () -> Unit) {
-        val def = dir.substringAfterLast('/').replace(Regex("[^\\p{L}\\p{N}_-]"), "_").take(40)
+        val def = dir.substringAfterLast('/').replace(Regex("[^\\p{L}\\p{N}_-]"), "_").take(40).ifEmpty { "NAS전체" }
         val e = ui.input("이름 (글자·숫자·_·-)", def)
         val box = FrameLayout(a).apply { setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0); addView(e) }
-        AlertDialog.Builder(a).setTitle("웹 폴더 이름").setMessage("NAS $dir\n동기화하지 않고, 열 때마다 NAS 에서 바로 읽습니다.").setView(box)
+        AlertDialog.Builder(a).setTitle("웹 폴더 이름").setMessage((if (dir == "/") "NAS 전체 (모든 공유 폴더)" else "NAS $dir") + "\n동기화하지 않고, 열 때마다 NAS 에서 바로 읽습니다.").setView(box)
             .setPositiveButton("추가") { _, _ ->
                 val n = e.text.toString().trim()
                 thread {

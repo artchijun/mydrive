@@ -24,14 +24,14 @@ object Lib {
         val uri = MediaStore.Files.getContentUri("external")
         @Suppress("DEPRECATION") val data = MediaStore.Files.FileColumns.DATA
         val cols = arrayOf(data, MediaStore.Files.FileColumns.SIZE, MediaStore.Files.FileColumns.DATE_MODIFIED, MediaStore.Files.FileColumns.MEDIA_TYPE)
-        val cur = try { ctx.contentResolver.query(uri, cols, "$data LIKE ?", arrayOf("$root/%"), null) } catch (e: Exception) { null }
+        // 폴더는 MIME 이 없음 → 빼고 받음 (파일마다 디스크에 묻지 않게)
+        val cur = try { ctx.contentResolver.query(uri, cols, "$data LIKE ? AND ${MediaStore.Files.FileColumns.MIME_TYPE} IS NOT NULL", arrayOf("$root/%"), null) } catch (e: Exception) { null }
         if (cur == null) { walk(root, each); return }   // 휴대폰 파일 목록을 못 쓰면 폴더를 직접 훑음
         cur.use { c ->
             while (c.moveToNext()) {
                 val p = c.getString(0) ?: continue
                 if (p.contains("/.") ) continue                       // 숨김·앱 휴지통(.Mydrive-trash)
-                val sz = c.getLong(1); if (sz <= 0 && File(p).isDirectory) continue
-                each(p, sz, c.getLong(2) * 1000, c.getInt(3))
+                each(p, c.getLong(1), c.getLong(2) * 1000, c.getInt(3))
             }
         }
     }
@@ -63,7 +63,7 @@ object Lib {
         val cut = System.currentTimeMillis() - NEW_DAYS * 86_400_000L
         query(ctx, root) { p, sz, m, t ->
             keyOf(p, t)?.let { out[it]!!.apply { size += sz; count++ } }
-            if (m >= cut && !File(p).isDirectory) out["new"]!!.apply { size += sz; count++ }
+            if (m >= cut) out["new"]!!.apply { size += sz; count++ }
         }
         return out
     }
@@ -73,8 +73,8 @@ object Lib {
         val out = ArrayList<Item>()
         val cut = System.currentTimeMillis() - NEW_DAYS * 86_400_000L
         query(ctx, root) { p, sz, m, t ->
-            val hit = if (key == "new") m >= cut && !File(p).isDirectory else keyOf(p, t) == key
-            if (hit && File(p).exists()) out += Item(p.substringAfterLast('/'), false, sz, m, p.substring(root.length + 1))
+            val hit = if (key == "new") m >= cut else keyOf(p, t) == key
+            if (hit) out += Item(p.substringAfterLast('/'), false, sz, m, p.substring(root.length + 1))
         }
         return out.sortedByDescending { it.mtimeMs }.take(limit)
     }

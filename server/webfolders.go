@@ -104,9 +104,10 @@ func addWeb(name, dir string) error {
 		return errors.New("이름은 글자·숫자·_·- 로 40자까지")
 	}
 	d, ok := insideBase(filepath.Join(nasBase, dir))
-	if !ok || d == filepath.Clean(nasBase) {
+	if !ok {
 		return errors.New("NAS 공유 폴더 안의 폴더만 고를 수 있음")
 	}
+	// d == nasBase 이면 NAS 전체 (모든 공유 폴더) — 서버 자신의 폴더는 webBlocked 로 막음
 	rt, err := openWeb(name, d)
 	if err != nil {
 		return err
@@ -184,7 +185,10 @@ func (r *Root) webList(dir string) ([]Entry, bool) {
 	out := make([]Entry, 0, len(ents))
 	for _, e := range ents {
 		n := e.Name()
-		if skipName(n) || strings.HasPrefix(n, "@") {
+		if skipName(n) || strings.HasPrefix(n, "@") || strings.HasPrefix(n, "#") {
+			continue
+		}
+		if webBlocked(r, filepath.Join(dir, n)) {
 			continue
 		}
 		fi, err := e.Info()
@@ -276,12 +280,29 @@ func (r *Root) webSearch(under, q string, exts []string, limit int) ([]Entry, bo
 // 웹 폴더 휴지통: 그 공유 폴더 맨 위의 #recycle (시놀로지 휴지통과 같은 자리)
 func webRecycleBase(rt *Root, rel string) string {
 	abs := rt.webAbs(rel)
-	if s := shareOf(rt.Dir); s != "" {
+	if s := shareOf(abs); s != "" {
 		top := strings.SplitN(strings.Trim(s, "/"), "/", 2)[0]
 		shareRoot := filepath.Join(nasBase, top)
-		if r, err := filepath.Rel(shareRoot, abs); err == nil {
+		if r, err := filepath.Rel(shareRoot, abs); err == nil && r != "." {
 			return filepath.Join(shareRoot, "#recycle", r)
 		}
 	}
 	return filepath.Join(rt.Dir, "#recycle", filepath.FromSlash(rel))
+}
+
+// 웹 폴더로 건드리면 안 되는 곳: 서버 자신의 폴더 (실행 파일·설정·토큰) — NAS 전체를 웹 폴더로 붙였을 때
+func webBlocked(rt *Root, rel string) bool {
+	abs := filepath.Clean(rt.webAbs(rel))
+	for _, p := range []string{filepath.Dir(selfPath), filepath.Dir(filepath.Dir(selfPath))} {
+		if p == "/" || p == "." || len(p) < 6 {
+			continue
+		}
+		if p == filepath.Join(nasBase, "docker") { // docker 공유 폴더 전체가 아니라 mydrive 폴더만
+			continue
+		}
+		if abs == p || strings.HasPrefix(abs, p+"/") {
+			return true
+		}
+	}
+	return false
 }

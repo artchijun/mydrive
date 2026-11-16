@@ -127,7 +127,7 @@ class Api(servers: List<String>, var token: String) {
     fun thumb(root: String, path: String, size: Int): ByteArray? = try {
         val c = open("GET", "/v1/thumb", mapOf("root" to root, "path" to path, "s" to size.toString()), 30000)
         if (c.responseCode == 200) c.inputStream.use { it.readBytes() } else { c.errorStream?.close(); null }
-    } catch (e: IOException) { active = null; null }
+    } catch (e: IOException) { null }   // 미리보기 하나 실패로 서버를 다시 고르지 않음 (다시 고르면 목록이 느려짐)
 
     /** 웹 폴더 (서버 0.6.12+): 동기화하지 않는 NAS 폴더. 요청할 때 root 는 "~이름" */
     fun webs(): List<RootInfo> = retry { parseRoots(readBody(open("GET", "/v1/webs", emptyMap()))) }

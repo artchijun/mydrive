@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.14"
+const version = "0.6.15"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
@@ -224,6 +224,15 @@ func getRoot(w http.ResponseWriter, r *http.Request) *Root {
 			if rt != nil {
 				httpErr(w, 400, "web_folder", "웹 폴더에서는 쓸 수 없는 기능")
 				return nil
+			}
+		}
+		if rt != nil {
+			q := r.URL.Query()
+			for _, k := range []string{"path", "from", "to"} {
+				if v := strings.Trim(q.Get(k), "/"); v != "" && webBlocked(rt, v) {
+					httpErr(w, 403, "blocked", "서버 자신의 폴더는 열 수 없음")
+					return nil
+				}
 			}
 		}
 	}

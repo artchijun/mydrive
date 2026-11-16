@@ -89,6 +89,11 @@ class SettingsActivity : Activity() {
         item("image", "목록 아이콘 크기", "파일 목록 왼쪽 아이콘과 사진 미리보기 크기", sizes[ri]) { choose("목록 아이콘 크기", sizes, ri) { pf.putInt("rowIcon", it); changed() } }
         val hi = pf.int("tileSize", 1)
         item("home", "홈 아이콘 크기", "홈 바둑판 아이콘 크기. 작게 하면 한 줄에 더 많이 놓입니다", sizes[hi]) { choose("홈 아이콘 크기", sizes, hi) { pf.putInt("tileSize", it); changed() } }
+        val colsNames = arrayOf("자동 (아이콘 크기에 맞춤)", "3개", "4개", "5개")
+        val hc = pf.int("homeCols", 4).let { if (it in 3..5) it - 2 else 0 }
+        item("grid", "홈 한 줄 아이콘 수", "홈 바둑판 한 줄에 놓을 아이콘 수. 많이 놓으면 아이콘이 칸에 맞게 작아집니다", colsNames[hc]) {
+            choose("홈 한 줄 아이콘 수", colsNames, hc) { pf.putInt("homeCols", if (it == 0) 0 else it + 2); changed() }
+        }
         val thumbs = pf.bool("thumbs", true)
         item("image", "사진·동영상 미리보기", "목록에서 사진·동영상을 작은 그림으로 보여 줍니다 (휴대폰 파일)", sw = thumbs) { pf.putBool("thumbs", !thumbs); changed() }
         val hidden = pf.bool("hidden", false)

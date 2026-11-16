@@ -58,7 +58,12 @@ class MainActivity : Activity(), Transfers.Listener {
     private lateinit var pf: Prefs
     private lateinit var api: Api
     private lateinit var fs: Fs
-    private val net = Executors.newSingleThreadExecutor()
+    // 화면에 보일 목록은 여러 줄로 (하나가 오래 걸려도 다른 탭·폴더가 기다리지 않게), 홈 통계는 따로 한 줄로
+    private val net = Executors.newFixedThreadPool(3)
+    private val stats = Executors.newSingleThreadExecutor()
+    /** 최근에 본 폴더 목록 (탭을 바꾸거나 돌아올 때 바로 보여 줌) */
+    private val listCache = object : LinkedHashMap<String, List<Item>>(64, 0.75f, true) { override fun removeEldestEntry(e: MutableMap.MutableEntry<String, List<Item>>) = size > 40 }
+    private var statsAt = 0L          // 홈 통계(종류별 용량·휴지통)를 마지막으로 센 때 — 30초 안에는 다시 세지 않음 (파일을 바꾸면 0으로)
     private val coll = Collator.getInstance(Locale.KOREAN)
 
     private val tabs = mutableListOf<Tab>()
@@ -96,6 +101,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private lateinit var statusText: TextView
     private lateinit var selBar: LinearLayout
     private lateinit var selText: TextView
+    private lateinit var viewBtn: ImageView
     private lateinit var topBar: LinearLayout
     private lateinit var selTop: LinearLayout
     private lateinit var pasteBar: LinearLayout
@@ -214,7 +220,10 @@ class MainActivity : Activity(), Transfers.Listener {
         // 아래: 상태 줄 / 선택했을 때 작업 줄 / 붙여넣기 줄 / 옮기는 중
         statusText = ui.label("", 12.5f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END }
         val sortBtn = ui.iconBtn(g("sort", ui.sub), "정렬", 36) { sortMenu() }
-        status = ui.row(statusText.apply { layoutParams = ui.lp(0, weight = 1f) }, sortBtn).apply { setBackgroundColor(ui.panel); setPadding(ui.dp(14), 0, ui.dp(6), 0) }
+        // 보기 방식: 누르면 목록 ↔ 바둑판, 길게 누르면 고르기
+        viewBtn = ui.iconBtn(g(if (viewMode == 0) "grid" else "listview", ui.sub), "보기 방식", 36) { viewMode = if (viewMode == 0) 1 else 0; applyView() }
+        viewBtn.setOnLongClickListener { viewMenu(); true }
+        status = ui.row(statusText.apply { layoutParams = ui.lp(0, weight = 1f) }, viewBtn, sortBtn).apply { setBackgroundColor(ui.panel); setPadding(ui.dp(14), 0, ui.dp(6), 0) }
 
         lateinit var moreAct: View
         moreAct = action("more", "더 보기") { selMore(moreAct) }
@@ -389,12 +398,15 @@ class MainActivity : Activity(), Transfers.Listener {
         refreshChrome()
         if (l.kind == "home") {
             rows = homeRows(); items = emptyList(); showList()
-            if (fs.canReadAll()) { loadLibSums(); net.execute { val t = try { fs.trashSize() } catch (e: Exception) { null }; runOnUiThread { trashInfo = t; refreshHome() } } }
+            if (fs.canReadAll() && System.currentTimeMillis() - statsAt > 30_000) { statsAt = System.currentTimeMillis(); loadLibSums() }
             return
         }
         if (l.kind == "usage") { loadUsage(l, seq); return }
-        empty.visibility = View.GONE
-        statusText.text = "불러오는 중…"
+        // 전에 본 적 있는 곳이면 그 목록을 먼저 바로 보여 주고 뒤에서 새로 고침. 처음이면 빈 화면에 '불러오는 중'
+        //   (다른 탭·폴더의 목록이 남아 보이지 않게)
+        val cached = listCache[l.key()]
+        if (cached != null) { items = cached; rows = fileRows(cached); showList(); statusText.text = "새로 고치는 중…" }
+        else { items = emptyList(); rows = emptyList(); adapter.notifyDataSetChanged(); empty.visibility = View.VISIBLE; empty.text = "불러오는 중…"; statusText.text = "불러오는 중…" }
         net.execute {
             var err: String? = null; var out: List<Item> = emptyList(); var more = false
             try {
@@ -407,11 +419,48 @@ class MainActivity : Activity(), Transfers.Listener {
             val sorted = if (l.kind == "lib") out else sortItems(out)
             runOnUiThread {
                 if (seq != loadSeq || isFinishing) return@runOnUiThread
+                if (err == null) listCache[l.key()] = sorted else listCache.remove(l.key())
+                if (cached != null) rememberScroll()   // 먼저 보여 준 목록에서 내려 본 자리 그대로
                 items = sorted
-                rows = sorted.map { Row(2, item = it) }
+                rows = fileRows(sorted)
                 showList(err, more)
+                if (l.kind == "local" && sorted.any { it.dir }) countLater(l, seq, sorted.filter { it.dir }.take(300).map { it.path })
             }
         }
+    }
+
+    /** 휴대폰 폴더 안 항목 수는 목록을 먼저 보여 준 뒤 뒤에서 셈 (폴더가 많으면 하나씩 여는 데 오래 걸림) */
+    private fun countLater(l: Loc, seq: Int, dirs: List<String>) {
+        val hid = showHidden
+        stats.execute {
+            val counts = HashMap<String, Int>()
+            for (p in dirs) {
+                if (seq != loadSeq) return@execute
+                counts[p] = fs.childCount(File(l.root, p), hid)
+            }
+            runOnUiThread {
+                if (seq != loadSeq) return@runOnUiThread
+                items = items.map { x -> counts[x.path]?.let { c -> x.copy(count = c) } ?: x }
+                rows = fileRows(items)
+                adapter.notifyDataSetChanged()
+            }
+        }
+    }
+
+    // ---------- 보기 방식: 0 목록 · 1 바둑판(작은 그림) · 2 큰 그림 ----------
+    private var viewMode get() = pf.int("viewMode", 0); set(v) = pf.putInt("viewMode", v)
+    private fun gridCols() = maxOf(2, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / (if (viewMode == 2) 170 else 112)).toInt())
+    private fun fileRows(l: List<Item>): List<Row> =
+        if (viewMode == 0 || tab.loc.kind == "trash") l.map { Row(2, item = it) }
+        else l.chunked(gridCols()).map { ch -> Row(5, tiles = ch.map { Row(2, item = it) }) }
+
+    private fun viewMenu() {
+        val names = arrayOf("목록 (자세히)", "바둑판 (작은 그림)", "큰 그림")
+        AlertDialog.Builder(this).setTitle("보기 방식").setSingleChoiceItems(names, viewMode) { d, w -> d.dismiss(); if (w != viewMode) { viewMode = w; applyView() } }.show()
+    }
+    private fun applyView() {
+        viewBtn.setImageDrawable(g(if (viewMode == 0) "grid" else "listview", ui.sub))
+        if (items.isNotEmpty() && rows.none { it.type == 1 || it.type == 0 }) { rows = fileRows(items); adapter.notifyDataSetChanged() } else load()
     }
 
     private fun sortItems(l: List<Item>): List<Item> {
@@ -443,10 +492,16 @@ class MainActivity : Activity(), Transfers.Listener {
     private var libSums: Map<String, Lib.Sum>? = null
     private fun loadLibSums() {
         val prim = fs.volumes().first().root.path
-        net.execute { val m = try { Lib.sums(this, prim) } catch (e: Exception) { null }; runOnUiThread { if (m != null) { libSums = m; refreshHome() } } }
+        stats.execute {
+            val m = try { Lib.sums(this, prim) } catch (e: Exception) { null }
+            val t = try { fs.trashSize() } catch (e: Exception) { null }
+            runOnUiThread { if (m != null) libSums = m; trashInfo = t; refreshHome() }
+        }
     }
-    private val tileBox by lazy { intArrayOf(58, 72, 88)[pf.int("tileSize", 1).coerceIn(0, 2)] }
-    private fun homeCols() = maxOf(3, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / (tileBox + 46)).toInt())
+    // 홈 한 줄 아이콘 수 (설정: 0 = 아이콘 크기에 맞춰 자동, 3·4·5) — 칸이 좁으면 아이콘을 칸에 맞게 줄임
+    private fun homeCols(): Int { val n = pf.int("homeCols", 4); return if (n in 3..6) n else maxOf(3, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / (tileWant + 46)).toInt()) }
+    private val tileWant by lazy { intArrayOf(58, 72, 88)[pf.int("tileSize", 1).coerceIn(0, 2)] }
+    private val tileBox get() = minOf(tileWant, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / homeCols()).toInt() - 18)
 
     private fun homeRows(): List<Row> {
         val out = mutableListOf<Row>()
@@ -459,7 +514,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val prim = fs.volumes().first().root.path
         phone += Row(1, "다운로드", File(prim, "Download").list()?.let { "${it.size}개" } ?: "", icon = FileIcon(true, "", "download"), go = Loc("local", prim, "Download"))
         val sums = libSums
-        for (c in Lib.cats) phone += Row(1, c.title, sums?.get(c.key)?.let { "${sz(it.size)} (${it.count})" } ?: "…", icon = Glyph(c.glyph, c.color), go = Loc("lib", prim, c.key))
+        for (c in Lib.cats.filter { it.key != "apk" }) phone += Row(1, c.title, sums?.get(c.key)?.let { "${sz(it.size)} (${it.count})" } ?: "…", icon = Glyph(c.glyph, c.color), go = Loc("lib", prim, c.key))
         grid("", phone)
         val nas = mutableListOf<Row>()
         when {
@@ -503,6 +558,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun refreshChrome() {
         val l = tab.loc
         title.text = tabTitle(l)
+        pathBar.visibility = if (l.kind == "home") View.GONE else View.VISIBLE   // 홈에서는 주소 줄 없음
         // 경로 조각
         crumbs.removeAllViews()
         val parts = mutableListOf<Pair<String, Loc>>()
@@ -558,7 +614,10 @@ class MainActivity : Activity(), Transfers.Listener {
         val r = rows.getOrNull(pos) ?: return
         if (r.type == 0) return
         if (r.type == 1) { cardTap(r); return }
-        val it = r.item!!
+        tapItem(r.item!!)
+    }
+
+    private fun tapItem(it: Item) {
         if (sel.isNotEmpty()) { toggle(it); return }
         val l = tab.loc
         when {
@@ -967,6 +1026,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (tab.loc.kind == "local") opts += "이 폴더 용량 분석" to { analyze(tab.loc) }
         if (tab.loc.kind == "home" && pf.paired) opts += "홈에 보일 NAS 폴더 고르기" to { pickNasShown() }
         if (tab.loc.kind == "usage") usageMenu(opts)
+        opts += "보기 방식 (목록·바둑판·큰 그림)" to { viewMenu() }
         opts += "정렬" to { sortMenu() }
         opts += (if (showHidden) "숨김 파일 감추기" else "숨김 파일 보기 (점으로 시작)") to { showHidden = !showHidden; load() }
         if (tab.loc.kind == "trash") opts += "휴지통 비우기" to { emptyTrash() }
@@ -1064,6 +1124,7 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     override fun onFinished(job: Transfers.Job, error: String?, result: String?) {
+        statsAt = 0
         if (error != null) { if (error != "취소함") AlertDialog.Builder(this).setTitle(job.title).setMessage(error).setPositiveButton("닫기", null).show(); if (Transfers.waiting == 0) load(); return }
         when (job.kind) {
             Transfers.Kind.OPEN -> if (job.root == "paste") { result?.let { toast(it) }; load() } else result?.let { p ->
@@ -1341,7 +1402,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun <T> bg(work: () -> T, then: (T) -> Unit) {
         net.execute {
             val r = try { Result.success(work()) } catch (e: Exception) { Result.failure(e) }
-            runOnUiThread { r.onSuccess(then).onFailure { e -> AlertDialog.Builder(this).setMessage(if (e is ApiException && e.status == 409) "같은 이름이 있습니다" else e.message ?: e.javaClass.simpleName).setPositiveButton("닫기", null).show() } }
+            runOnUiThread { statsAt = 0; r.onSuccess(then).onFailure { e -> AlertDialog.Builder(this).setMessage(if (e is ApiException && e.status == 409) "같은 이름이 있습니다" else e.message ?: e.javaClass.simpleName).setPositiveButton("닫기", null).show() } }
         }
     }
 
@@ -1355,32 +1416,33 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     // ---------- 사진·동영상 미리보기 (휴대폰 파일) ----------
-    private val thumbs = object : android.util.LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) { override fun sizeOf(k: String, b: android.graphics.Bitmap) = b.byteCount }
+    private val thumbs = object : android.util.LruCache<String, android.graphics.Bitmap>((Runtime.getRuntime().maxMemory() / 6).toInt().coerceIn(8 shl 20, 64 shl 20)) { override fun sizeOf(k: String, b: android.graphics.Bitmap) = b.byteCount }
     private val thumbPool = Executors.newFixedThreadPool(3)
     private val thumbMiss = HashSet<String>()
     private val showThumbs by lazy { pf.bool("thumbs", true) }
 
-    private fun thumb(iv: ImageView, it: Item) {
+    /** 사진·동영상 미리보기. want = 보일 크기(px). 바둑판은 크게, 목록은 작게 — 크기마다 따로 기억 */
+    private fun thumb(iv: ImageView, it: Item, want: Int = ui.dp(68), square: Boolean = true, onSet: (() -> Unit)? = null) {
         val l = tab.loc
         val base = baseOf(l).takeIf { b -> (b.kind == "local" || b.kind == "nas") && showThumbs } ?: run { iv.tag = null; return }
         val k = FileIcon.kindOf(it.name)
         val ext = it.name.substringAfterLast('.', "").lowercase()
         // NAS: 서버가 만든 작은 그림 (JPEG·PNG·GIF). 휴대폰: 사진·동영상
         if (it.dir || (base.kind == "nas" && ext !in setOf("jpg", "jpeg", "png", "gif")) || (k != "image" && k != "video")) { iv.tag = null; return }
-        val key = base.kind + ":" + base.root + ":" + it.path + ":" + it.mtimeMs
+        val px = when { want <= ui.dp(80) -> ui.dp(68); want <= 360 -> 360; else -> 560 }   // 크기 단계 (같은 그림을 여러 번 만들지 않게)
+        val key = base.kind + ":" + base.root + ":" + it.path + ":" + it.mtimeMs + ":" + px
         iv.tag = key
-        thumbs.get(key)?.let { b -> iv.setImageBitmap(b); return }
+        thumbs.get(key)?.let { b -> iv.setImageBitmap(b); onSet?.invoke(); return }
         if (key in thumbMiss) return
-        val px = ui.dp(68)
         thumbPool.execute {
             val still = iv.tag == key                 // 이미 화면 밖으로 지나갔으면 받지 않음
             val b = if (!still) null else try {
-                if (base.kind == "nas") api.thumb(base.root, it.path, maxOf(160, px * 2))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                if (base.kind == "nas") api.thumb(base.root, it.path, minOf(640, maxOf(160, px * 2 / 3 * 2)))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
                 else { val f = File(base.root, it.path); val sz = android.util.Size(px, px)
                     if (k == "image") android.media.ThumbnailUtils.createImageThumbnail(f, sz, null) else android.media.ThumbnailUtils.createVideoThumbnail(f, sz, null) }
             } catch (e: Exception) { null }
-            val r = b?.let { cropRound(it) }
-            runOnUiThread { if (r == null) { if (still) thumbMiss += key } else { thumbs.put(key, r); if (iv.tag == key) iv.setImageBitmap(r) } }
+            val r = b?.let { if (square) cropRound(it) else it }
+            runOnUiThread { if (r == null) { if (still) thumbMiss += key } else { thumbs.put(key, r); if (iv.tag == key) { iv.setImageBitmap(r); onSet?.invoke() } } }
         }
     }
 
@@ -1400,26 +1462,65 @@ class MainActivity : Activity(), Transfers.Listener {
         override fun getCount() = rows.size
         override fun getItem(p: Int): Any = rows[p]
         override fun getItemId(p: Int) = p.toLong()
-        override fun getViewTypeCount() = 5
+        override fun getViewTypeCount() = 6
         override fun getItemViewType(p: Int) = rows[p].type
         override fun isEnabled(p: Int) = rows[p].type == 1 || rows[p].type == 2
 
         override fun getView(p: Int, convert: View?, parent: ViewGroup?): View {
             val r = rows[p]
             return when (r.type) {
-                0 -> ((convert as? TextView) ?: ui.label("", 12.5f, ui.sub, bold = true).apply { setPadding(ui.dp(18), ui.dp(16), ui.dp(16), ui.dp(6)) }).apply { text = r.title }
+                0 -> ((convert as? TextView) ?: ui.label("", 12.5f, ui.sub, bold = true)).apply { text = r.title
+                    if (tab.loc.kind == "home") setPadding(ui.dp(18), ui.dp(8), ui.dp(16), ui.dp(2)) else setPadding(ui.dp(18), ui.dp(16), ui.dp(16), ui.dp(6)) }
                 1 -> card(convert, r)
                 3 -> segCard(convert, r)
                 4 -> tileRow(convert, r)
+                5 -> gridRow(convert, r)
                 else -> fileRow(convert, r.item!!)
             }
+        }
+
+        // 바둑판 보기 한 줄: 그림(사진은 미리보기, 나머지는 아이콘) + 이름. 고르면 테두리와 ✓
+        private fun gridRow(convert: View?, r: Row): View {
+            val cols = gridCols()
+            val big = viewMode == 2
+            val v = (convert as? LinearLayout)?.takeIf { it.childCount == cols && it.tag == big } ?: ui.row().apply {
+                tag = big; setPadding(ui.dp(6), ui.dp(3), ui.dp(6), ui.dp(3)); gravity = Gravity.TOP
+                val cell = (resources.displayMetrics.widthPixels - ui.dp(12)) / cols - ui.dp(6)
+                repeat(cols) {
+                    val img = ImageView(this@MainActivity).apply { scaleType = ImageView.ScaleType.FIT_CENTER; layoutParams = FrameLayout.LayoutParams(-1, -1) }
+                    val check = ImageView(this@MainActivity).apply { layoutParams = FrameLayout.LayoutParams(ui.dp(24), ui.dp(24), Gravity.TOP or Gravity.END).apply { setMargins(0, ui.dp(5), ui.dp(5), 0) } }
+                    val box = FrameLayout(this@MainActivity).apply { addView(img); addView(check); layoutParams = LinearLayout.LayoutParams(cell, cell); setPadding(ui.dp(4), ui.dp(4), ui.dp(4), ui.dp(4)) }
+                    val name = ui.label("", if (big) 13.5f else 12.5f, ui.text).apply { gravity = Gravity.CENTER_HORIZONTAL; setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE; layoutParams = ui.lp(cell).apply { topMargin = ui.dp(3) } }
+                    addView(ui.col(box, name).apply { layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { setMargins(ui.dp(3), 0, ui.dp(3), 0) }; setPadding(0, ui.dp(4), 0, ui.dp(6)); background = ui.press(null, 10) })
+                }
+            }
+            for (i in 0 until cols) {
+                val cell = v.getChildAt(i) as LinearLayout; val t = r.tiles.getOrNull(i)?.item
+                cell.visibility = if (t == null) View.INVISIBLE else View.VISIBLE
+                if (t == null) { cell.setOnClickListener(null); cell.setOnLongClickListener(null); continue }
+                val box = cell.getChildAt(0) as FrameLayout
+                val img = box.getChildAt(0) as ImageView; val check = box.getChildAt(1) as ImageView
+                val on = sel.contains(t.path)
+                box.background = if (on) ui.round(ui.select, 12, ui.accent) else ui.round(ui.panel2, 12)
+                img.setImageDrawable(FileIcon(t.dir, t.name, if (t.dir && t.name == "Download" && tab.loc.kind == "local" && tab.loc.path.isEmpty()) "download" else ""))
+                val icPad = box.layoutParams.width / 5
+                img.setPadding(icPad, icPad, icPad, icPad)
+                thumb(img, t, box.layoutParams.width, square = true) { img.setPadding(0, 0, 0, 0) }
+                check.visibility = if (sel.isNotEmpty()) View.VISIBLE else View.GONE
+                check.setImageDrawable(if (on) g("check", ui.onAccent) else null)
+                check.background = if (on) GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(ui.accent) } else GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(0x55000000); setStroke(ui.dp(2), Color.WHITE) }
+                (cell.getChildAt(1) as TextView).text = t.name
+                cell.setOnClickListener { tapItem(t) }
+                cell.setOnLongClickListener { toggle(t); true }
+            }
+            return v
         }
 
         // 처음 화면 바둑판 한 줄: 테두리 둥근 칸 안 큰 아이콘 + 이름 + 작은 글
         private fun tileRow(convert: View?, r: Row): View {
             val cols = homeCols()
             val v = (convert as? LinearLayout)?.takeIf { it.childCount == cols } ?: ui.row().apply {
-                setPadding(ui.dp(6), ui.dp(4), ui.dp(6), ui.dp(4)); gravity = Gravity.TOP
+                setPadding(ui.dp(4), ui.dp(1), ui.dp(4), ui.dp(1)); gravity = Gravity.TOP
                 repeat(cols) {
                     val box = FrameLayout(this@MainActivity).apply {
                         background = GradientDrawable().apply { cornerRadius = ui.dpf(20f); setColor(ui.panel); setStroke(ui.dp(1), if (ui.dark) 0xFF4A4A4A.toInt() else ui.line) }
@@ -1427,7 +1528,7 @@ class MainActivity : Activity(), Transfers.Listener {
                         addView(ImageView(this@MainActivity), FrameLayout.LayoutParams(ui.dp(tileBox * 53 / 100), ui.dp(tileBox * 53 / 100), Gravity.CENTER)) }
                     val name = ui.label("", 14f, ui.text).apply { gravity = Gravity.CENTER; setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp().apply { topMargin = ui.dp(8) } }
                     val sub = ui.label("", 11.5f, ui.sub).apply { gravity = Gravity.CENTER; setSingleLine(); ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp().apply { topMargin = ui.dp(1) } }
-                    addView(ui.col(box, name, sub).apply { layoutParams = ui.lp(0, weight = 1f); setPadding(ui.dp(2), ui.dp(10), ui.dp(2), ui.dp(10)); background = ui.press(null, 14) })
+                    addView(ui.col(box, name, sub).apply { layoutParams = ui.lp(0, weight = 1f); setPadding(ui.dp(1), ui.dp(5), ui.dp(1), ui.dp(5)); background = ui.press(null, 14) })
                 }
             }
             for (i in 0 until cols) {
