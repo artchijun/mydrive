@@ -173,7 +173,7 @@ class MainActivity : Activity(), Transfers.Listener {
         // 고르는 중에는 위 줄이 바뀜: ✕  고른 수/전체  [전체 선택] [사이 모두 선택]
         selText = ui.label("", 18f, ui.text, bold = true)
         selTop = ui.row(ui.iconBtn(g("close"), "선택 끝") { clearSel() }, selText.apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(8) } },
-            ui.iconBtn(g("selectall"), "전체 선택") { if (sel.size == items.size) clearSel() else selectAll() },
+            ui.iconBtn(g("selectall"), "전체 선택 (폴더 빼고 파일만)") { val t = allTargets(); if (t.isNotEmpty() && t.all { sel.contains(it.path) }) clearSel() else selectAll() },
             ui.iconBtn(g("range"), "사이 모두 선택") { selectRange() }).apply {
             setBackgroundColor(if (ui.dark) Color.parseColor("#16303D") else Color.parseColor("#E3EEFC")); setPadding(ui.dp(4), ui.dp(2), ui.dp(4), ui.dp(2)); visibility = View.GONE
         }
@@ -763,7 +763,9 @@ class MainActivity : Activity(), Transfers.Listener {
         for (i in idx.first()..idx.last()) sel.add(items[i].path)
         adapter.notifyDataSetChanged(); refreshChrome()
     }
-    private fun selectAll() { items.forEach { sel.add(it.path) }; adapter.notifyDataSetChanged(); refreshChrome() }
+    /** 전체 선택이 고를 것: 파일만 (폴더는 빼고). 파일이 하나도 없는 곳이면 폴더를 모두 */
+    private fun allTargets(): List<Item> = items.filter { !it.dir }.ifEmpty { items.filter { !(it.dir && it.path.isEmpty()) } }
+    private fun selectAll() { allTargets().forEach { sel.add(it.path) }; adapter.notifyDataSetChanged(); refreshChrome() }
 
     // ---------- 열기 ----------
     private var builtinViewer get() = pf.bool("viewer", true); set(v) = pf.putBool("viewer", v)
