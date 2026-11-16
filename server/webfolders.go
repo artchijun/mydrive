@@ -229,7 +229,7 @@ func (r *Root) webSearch(under, q string, exts []string, limit int) ([]Entry, bo
 			return nil
 		}
 		n := d.Name()
-		if p != r.webAbs(under) && (skipName(n) || strings.HasPrefix(n, "@")) {
+		if p != r.webAbs(under) && (skipName(n) || strings.HasPrefix(n, "@") || secretName(n)) {
 			if d.IsDir() {
 				return filepath.SkipDir
 			}
@@ -293,6 +293,15 @@ func webRecycleBase(rt *Root, rel string) string {
 // 웹 폴더로 건드리면 안 되는 곳: 서버 자신의 폴더 (실행 파일·설정·토큰) — NAS 전체를 웹 폴더로 붙였을 때
 func webBlocked(rt *Root, rel string) bool {
 	abs := filepath.Clean(rt.webAbs(rel))
+	// 열쇠·인증서 파일과 NAS 맨 위(볼륨)에 놓인 파일은 웹 폴더로 내보내지 않음 (Tailscale 인증서 .key 등)
+	if secretName(filepath.Base(abs)) {
+		return true
+	}
+	if filepath.Dir(abs) == filepath.Clean(nasBase) {
+		if fi, err := os.Lstat(abs); err == nil && !fi.IsDir() {
+			return true
+		}
+	}
 	for _, p := range []string{filepath.Dir(selfPath), filepath.Dir(filepath.Dir(selfPath))} {
 		if p == "/" || p == "." || len(p) < 6 {
 			continue
@@ -303,6 +312,20 @@ func webBlocked(rt *Root, rel string) bool {
 		if abs == p || strings.HasPrefix(abs, p+"/") {
 			return true
 		}
+	}
+	return false
+}
+
+// 비밀이 들어 있을 수 있는 파일 이름 (열쇠·인증서·SSH)
+func secretName(n string) bool {
+	l := strings.ToLower(n)
+	switch filepath.Ext(l) {
+	case ".key", ".pem", ".crt", ".cer", ".p12", ".pfx", ".csr", ".jks", ".keystore", ".kdbx":
+		return true
+	}
+	switch l {
+	case ".ssh", "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys", "known_hosts", ".env", ".netrc", ".git-credentials":
+		return true
 	}
 	return false
 }

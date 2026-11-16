@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.17"
+const version = "0.6.18"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
