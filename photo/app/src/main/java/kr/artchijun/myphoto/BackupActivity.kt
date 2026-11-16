@@ -47,6 +47,11 @@ class BackupActivity : Activity() {
     private lateinit var nextBox: LinearLayout
     private lateinit var countRow: LinearLayout
     private var curKey = 0L
+    /** 지금 올리는 파일들 (한번에 여러 개): 휴대폰 번호 → 그 줄 */
+    private lateinit var actBox: LinearLayout
+    private lateinit var actHead: TextView
+    private class ActRow(val root: View, val thumb: android.widget.ImageView, val name: TextView, val where: TextView, val info: TextView, val bar: ProgressBar)
+    private val actRows = HashMap<Long, ActRow>()
     private lateinit var logBox: LinearLayout
     private val df = SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA)
 
@@ -98,12 +103,15 @@ class BackupActivity : Activity() {
         curBox = ui.row(curThumb, ui.col(ui.label("지금 올리는 중", 12f, ui.accent, bold = true), curName, curWhere, cur).apply { layoutParams = ui.lp(0, weight = 1f) })
             .apply { layoutParams = ui.lp(top = 14); gravity = Gravity.TOP; visibility = View.GONE }
         nextBox = ui.col().apply { layoutParams = ui.lp(top = 10); visibility = View.GONE }
+        actHead = ui.label("", 12f, ui.accent, bold = true)
+        actBox = ui.col(actHead).apply { layoutParams = ui.lp(top = 14); visibility = View.GONE }
+        actRows.clear()
         // 개수: 기다림 · 올림 · 이미 있음 · 실패 — 누르면 파일 목록
         countRow = ui.row().apply { layoutParams = ui.lp(top = 12) }
         val now = ui.button("지금 백업") { startNow() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f).apply { rightMargin = ui.dp(8) } }
         val stop = ui.button("멈추기", primary = false) { BackupService.stopAsked = true; Backup.requestStop(this); tick() }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(46), 1f) }
         val free = ui.button("공간 확보 — 백업된 사진을 휴대폰에서 지우기", primary = false) { startActivity(android.content.Intent(this, FreeUpActivity::class.java)) }.apply { layoutParams = ui.lp(h = ui.dp(46), top = 8) }
-        body.addView(card(stateBig, stateSub, countRow, curBox, bar, nextBox, ui.row(now, stop).apply { layoutParams = ui.lp(top = 14) }, free,
+        body.addView(card(stateBig, stateSub, countRow, actBox, curBox, bar, nextBox, ui.row(now, stop).apply { layoutParams = ui.lp(top = 14) }, free,
             ui.button("파일별 백업 기록 보기", primary = false) { startActivity(android.content.Intent(this, BackupListActivity::class.java)) }.apply { layoutParams = ui.lp(h = ui.dp(46), top = 8) }))
 
         // ---- 설정 ----
@@ -114,6 +122,7 @@ class BackupActivity : Activity() {
             item("백업할 휴대폰 폴더", BucketPickActivity.describe(st.buckets).ifEmpty { "(고르지 않음)" }) { pickBuckets() },
             toggle("와이파이에서만", "모바일 데이터를 쓰지 않음", st.wifiOnly) { b -> st.wifiOnly = b; BackupSchedule.schedule(this) },
             toggle("충전 중에만", "배터리를 아낌", st.chargingOnly) { b -> st.chargingOnly = b; BackupSchedule.schedule(this) },
+            item("한번에 올리기", "${st.parallel}개씩 함께 올림 — 많을수록 빠르지만 와이파이·NAS 가 느리면 1~2개가 나음") { askParallel() },
             toggle("동영상도", "끄면 사진만 올림", st.videos) { b -> st.videos = b; rulesChanged() },
             toggle("연/월 폴더로 나누기", "…/Camera/2026/11 처럼 찍은 달마다 폴더", st.byMonth) { b -> st.byMonth = b; rulesChanged() },
             item("배터리 최적화 빼기", if (ignoringBattery()) "빠져 있음 — 배경에서도 끊기지 않음" else "권장 — 휴대폰이 배경 백업을 멈추지 않게") { askBattery() },
@@ -158,21 +167,36 @@ class BackupActivity : Activity() {
                     (if (c != null && c.waitBytes > 0) "  ·  남은 양 ${Fmt.size(c.waitBytes)}" else "") +
                     (if (st.lastMsg.isNotEmpty()) "\n" + st.lastMsg else "")
                 if (c != null) paintCounts(c)
-                if (p != null) {
-                    bar.visibility = View.VISIBLE; cur.visibility = View.VISIBLE; curBox.visibility = View.VISIBLE
-                    bar.progress = if (p.size > 0) (p.bytes * 1000 / p.size).toInt() else 0
-                    val sec = (System.currentTimeMillis() - p.started) / 1000.0
-                    val speed = if (sec > 0.5 && p.bytes > 0) p.bytes / sec else 0.0
-                    val left = if (speed > 0) ((p.size - p.bytes) / speed).toLong() else -1
-                    curName.text = if (p.total == 0) p.name else (if (p.key % 2 == 1L) "동영상 · " else "") + "${p.name}  (${p.done}/${p.total})"
-                    curWhere.text = "휴대폰 ${p.rel.trimEnd('/').ifEmpty { "(맨 위)" }}  →  서버 ${p.target}"
-                    cur.text = "${Fmt.size(p.bytes)} / ${Fmt.size(p.size)}" + (if (speed > 0) "  ·  ${Fmt.size(speed.toLong())}/s" else "") +
-                        (if (left >= 0) "  ·  " + (if (left < 60) "${left}초 남음" else "약 ${(left + 59) / 60}분 남음") else "")
-                    if (p.key != curKey) { curKey = p.key; loadThumb(p.key, curThumb) }
-                } else { bar.visibility = View.GONE; cur.visibility = View.GONE; curBox.visibility = View.GONE; curKey = 0 }
+                val acts = Backup.active
+                if (acts.isEmpty() && p != null && p.total == 0) {   // 올리기 전 준비 (서버 목록 읽기 등)
+                    actBox.visibility = View.VISIBLE; actHead.text = p.name
+                    actRows.values.forEach { actBox.removeView(it.root) }; actRows.clear()
+                } else if (acts.isNotEmpty()) {
+                    actBox.visibility = View.VISIBLE
+                    val now = System.currentTimeMillis()
+                    var total = 0.0
+                    val keys = acts.map { it.key }.toSet()
+                    actRows.keys.filter { it !in keys }.forEach { k -> actBox.removeView(actRows.remove(k)!!.root) }
+                    for (a in acts) {
+                        val row = actRows.getOrPut(a.key) { newActRow(a.key).also { actBox.addView(it.root) } }
+                        val sec = (now - a.started) / 1000.0
+                        val speed = if (sec > 0.5 && a.bytes > 0) a.bytes / sec else 0.0
+                        total += speed
+                        val left = if (speed > 0) ((a.size - a.bytes) / speed).toLong() else -1
+                        row.name.text = (if (a.key % 2 == 1L) "동영상 · " else "") + a.name
+                        row.where.text = "휴대폰 ${a.rel.trimEnd('/').ifEmpty { "(맨 위)" }}  →  서버 ${a.target}"
+                        row.info.text = "${Fmt.size(a.bytes)} / ${Fmt.size(a.size)}" + (if (speed > 0) "  ·  ${Fmt.size(speed.toLong())}/s" else "") +
+                            (if (left >= 0) "  ·  " + (if (left < 60) "${left}초 남음" else "약 ${(left + 59) / 60}분 남음") else "")
+                        row.bar.progress = if (a.size > 0) (a.bytes * 1000 / a.size).toInt() else 0
+                    }
+                    val all = acts.first().total
+                    actHead.text = "지금 올리는 중 — ${acts.size}개 함께" + (if (all > 0) "  ·  ${minOf(acts.maxOf { it.done }, all)}/$all 번째" else "") +
+                        (if (total > 0) "  ·  합계 ${Fmt.size(total.toLong())}/s" else "")
+                } else { actBox.visibility = View.GONE; actRows.values.forEach { actBox.removeView(it.root) }; actRows.clear() }
+                bar.visibility = View.GONE; cur.visibility = View.GONE; curBox.visibility = View.GONE
                 // 다음 차례
                 nextBox.removeAllViews()
-                val upcoming = next.filter { it.key != p?.key }.take(3)
+                val upcoming = next.filter { e -> acts.none { it.key == e.key } }.take(3)
                 if (upcoming.isNotEmpty() && (Backup.running || (c?.waiting ?: 0) > 0)) {
                     nextBox.visibility = View.VISIBLE
                     nextBox.addView(ui.label(if (Backup.running) "다음 차례" else "올릴 차례 (기다림)", 12f, ui.sub, bold = true))
@@ -199,10 +223,29 @@ class BackupActivity : Activity() {
             })
         }
     }
+    private fun newActRow(key: Long): ActRow {
+        val th = android.widget.ImageView(this).apply { scaleType = android.widget.ImageView.ScaleType.CENTER_CROP; background = ui.round(ui.panel, 8); clipToOutline = true
+            layoutParams = LinearLayout.LayoutParams(ui.dp(48), ui.dp(48)).apply { rightMargin = ui.dp(12) } }
+        val name = ui.label("", 14f, ui.text, bold = true).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
+        val where = ui.label("", 11.5f, ui.sub).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.MIDDLE }
+        val info = ui.label("", 12f, ui.sub).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END }
+        val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000; layoutParams = ui.lp(top = 2) }
+        val root = ui.row(th, ui.col(name, where, info, pb).apply { layoutParams = ui.lp(0, weight = 1f) }).apply { gravity = Gravity.TOP; layoutParams = ui.lp(top = 10) }
+        loadThumb(key, th)
+        return ActRow(root, th, name, where, info, pb)
+    }
+
     private fun loadThumb(key: Long, iv: android.widget.ImageView) {
         iv.setImageDrawable(null)
         val uri = android.content.ContentUris.withAppendedId(if (key % 2 == 1L) android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI else android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, key / 2)
         Thumbs.loadLocal(iv, uri.toString()) {}
+    }
+
+    private fun askParallel() {
+        val names = arrayOf("1개씩 (하나 끝나면 다음)", "2개씩", "3개씩 (기본)", "4개씩")
+        AlertDialog.Builder(this).setTitle("한번에 몇 개씩 올릴까요").setSingleChoiceItems(names, st.parallel - 1) { d, w ->
+            d.dismiss(); st.parallel = w + 1; build(); tick()   // 다음 백업부터 (도는 중이면 다음 묶음부터)
+        }.show()
     }
 
     /** 백업 규칙(폴더·올릴 곳·동영상·연/월)을 바꾸면 바로: 목록을 다시 세고, 돌고 있는 백업은 알아서 다시 셈, 안 돌고 있으면 곧 시작 */

@@ -45,6 +45,8 @@ object Backup {
         var lastRun: Long get() = pf.long("bk_last", 0); set(v) = pf.putLong("bk_last", v)
         var lastOk: Long get() = pf.long("bk_lastok", 0); set(v) = pf.putLong("bk_lastok", v)
         var lastMsg: String get() = pf.str("bk_msg", ""); set(v) = pf.putStr("bk_msg", v)
+        /** 한번에 몇 개씩 올릴지 (1~4) */
+        var parallel: Int get() = pf.int("bk_par", 3).coerceIn(1, 4); set(v) = pf.putInt("bk_par", v.coerceIn(1, 4))
         /** [멈추기] 를 누르면 이때까지 자동 백업을 쉼 ([지금 백업] 을 누르면 바로 풀림) */
         var pausedUntil: Long get() = pf.long("bk_pause", 0); set(v) = pf.putLong("bk_pause", v)
         /** 올릴 것을 정하는 규칙 — 이것이 바뀌면 돌고 있던 백업도 바로 다시 셈 */
@@ -206,6 +208,9 @@ object Backup {
     private val runLock = Any()
     @Volatile var running = false; private set
     @Volatile var current: Progress? = null; private set
+    /** 지금 올리고 있는 파일들 (한번에 여러 개) — 휴대폰 번호 → 진행 */
+    private val actives = java.util.concurrent.ConcurrentHashMap<Long, Progress>()
+    val active: List<Progress> get() = actives.values.sortedBy { it.started }
 
     private val ym = SimpleDateFormat("yyyy/MM", Locale.KOREA).apply { timeZone = TimeZone.getDefault() }
     private fun target(st: Settings, rel: String, taken: Long): String {
@@ -236,7 +241,7 @@ object Backup {
             val ph = Photos(ctx)
             val ns = Photos.TEAM
             val d = db(ctx)
-            var uploaded = 0; var skipped = 0; var failed = 0
+            val upN = java.util.concurrent.atomic.AtomicInteger(); val skN = java.util.concurrent.atomic.AtomicInteger(); val flN = java.util.concurrent.atomic.AtomicInteger()
             var rules = st.rules
             var first = true
             st.lastMsg = "백업 중"
@@ -246,76 +251,100 @@ object Backup {
                 val rows = d.rawQuery("SELECT id, video, rel, name, size, mtime, taken, tries FROM media WHERE state=0 OR (state=2 AND tries<$MAX_TRIES) ORDER BY taken DESC", null).use { c ->
                     List(c.count) { c.moveToNext(); Row(c.getLong(0), c.getInt(1) == 1, c.getString(2), c.getString(3), c.getLong(4), c.getLong(5), c.getLong(6), c.getInt(7)) } }
                 if (rows.isEmpty()) { st.lastMsg = "모두 백업됨"; st.lastOk = System.currentTimeMillis(); if (!first) log(ctx, st.lastMsg); return true }
-                log(ctx, "백업 시작 — ${rows.size}개 남음")
+                val workers = minOf(st.parallel, rows.size)
+                log(ctx, "백업 시작 — ${rows.size}개 남음" + (if (workers > 1) " (한번에 ${workers}개씩)" else ""))
                 first = false
                 // 올리기 전에 서버에 이미 있는지 대조할 목록: 백업 폴더(올릴 곳 아래 전부)는 새로 읽고, 서버 전체는 하루에 한 번
                 serverLists(ctx, halt)
                 if (halt()) { st.lastMsg = "멈춤 — ${rows.size}개 남음"; return false }
+                val rules0 = rules
                 val folderIds = HashMap<String, Long>()
                 val existing = HashMap<Long, HashMap<String, Long>>()   // 폴더 → (이름 → 크기)
-                var n = 0
-                for (r in rows) {
-                    if (halt()) { st.lastMsg = "멈춤 — ${rows.size - n}개 남음"; return false }
-                    if (st.rules != rules) { rules = st.rules; continue@outer }   // 올릴 폴더·올릴 곳 등이 바뀜 → 바로 다시 셈
-                    blocker(ctx)?.let { st.lastMsg = it; log(ctx, "멈춤: $it"); return false }
-                    n++
-                    val t0 = System.currentTimeMillis()
-                    val path = target(st, r.rel, r.taken)
-                    current = Progress(n, rows.size, r.name, 0, r.size, r.key, r.rel, t0, path); onProgress(current)
-                    try {
-                        // ① 서버 어디에든 이미 있으면 (이름·크기, 또는 크기·찍은 때) 올리지 않음
-                        val ph1 = Library.Phone(r.key, r.video, r.rel, r.name, r.size, r.taken)
-                        val m = Library.matchOnServer(ctx, ph1, Library.BACKUP) ?: Library.matchOnServer(ctx, ph1, Library.ALL)
-                        if (m != null) {
-                            val at = Library.folderPath(ctx, m.server.folderId)
-                            done(d, r.key, m.server.folderId, 2, at); skipped++
-                            if (skipped <= 30) log(ctx, "이미 있음: ${r.name} → $at/${m.server.name} (${m.how})" + (if (skipped == 30) " … 이후는 끝에 개수만" else ""))
-                            continue
+                val lock = Any()
+                val next = java.util.concurrent.atomic.AtomicInteger(0)
+                val finished = java.util.concurrent.atomic.AtomicInteger(0)
+                val abort = java.util.concurrent.atomic.AtomicReference<String?>(null)   // 모두 멈출 까닭 (망·로그인·멈추기)
+                val changed = java.util.concurrent.atomic.AtomicBoolean(false)           // 규칙이 바뀜 → 다시 셈
+                val quit = { abort.get() != null || changed.get() }
+                // 일꾼 하나: 차례대로 하나씩 가져가 올림. 일꾼 여럿이 함께 돌아 한번에 여러 개를 올림
+                val work = Runnable {
+                    while (!quit()) {
+                        if (halt()) { abort.compareAndSet(null, "멈춤"); break }
+                        if (st.rules != rules0) { changed.set(true); break }   // 올릴 폴더·올릴 곳 등이 바뀜 → 바로 다시 셈
+                        val why = blocker(ctx); if (why != null) { abort.compareAndSet(null, why); break }
+                        val i = next.getAndIncrement(); if (i >= rows.size) break
+                        val r = rows[i]
+                        val t0 = System.currentTimeMillis()
+                        val path = target(st, r.rel, r.taken)
+                        fun prog(b: Long) { val p = Progress(finished.get() + actives.size, rows.size, r.name, b, r.size, r.key, r.rel, t0, path); actives[r.key] = p; current = p; onProgress(p) }
+                        prog(0)
+                        try {
+                            // ① 서버 어디에든 이미 있으면 (이름·크기, 또는 크기·찍은 때) 올리지 않음
+                            val ph1 = Library.Phone(r.key, r.video, r.rel, r.name, r.size, r.taken)
+                            val m = Library.matchOnServer(ctx, ph1, Library.BACKUP) ?: Library.matchOnServer(ctx, ph1, Library.ALL)
+                            if (m != null) {
+                                val at = Library.folderPath(ctx, m.server.folderId)
+                                done(d, r.key, m.server.folderId, 2, at)
+                                val k = skN.incrementAndGet()
+                                if (k <= 30) log(ctx, "이미 있음: ${r.name} → $at/${m.server.name} (${m.how})" + (if (k == 30) " … 이후는 끝에 개수만" else ""))
+                                continue
+                            }
+                            // 폴더 만들기·폴더 안 이름 읽기는 한 일꾼씩 (같은 폴더를 둘이 만들지 않게)
+                            val (fid, names) = synchronized(lock) {
+                                val f = folderIds[path] ?: ph.folderByPath(ns, path, true)!!.also { folderIds[path] = it }
+                                f to existing.getOrPut(f) { listNames(ph, ns, f) }
+                            }
+                            val have = synchronized(names) { names[r.name.lowercase()] }
+                            if (have == r.size) { Library.addServer(ctx, ph1, fid); done(d, r.key, fid, 2, path); skN.incrementAndGet(); continue }   // ② 올릴 폴더에 같은 이름·크기
+                            // 밖(터널)에서 큰 파일은 Syno.upload 가 알아서 나눠 올림
+                            val uri = ContentUris.withAppendedId(if (r.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, r.key / 2)
+                            ph.syno.upload(ns, fid, r.name, r.mtime, r.size, { openOriginal(ctx, uri) },
+                                duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
+                                progress = { b -> prog(b) },
+                                canceled = { halt() || quit() || st.rules != rules0 })
+                            synchronized(names) { names[r.name.lowercase()] = r.size }
+                            Library.addServer(ctx, ph1, fid)
+                            done(d, r.key, fid, 1, path); upN.incrementAndGet()
+                            st.lastOk = System.currentTimeMillis()
+                        } catch (e: InterruptedException) {
+                            if (!halt() && st.rules != rules0) changed.set(true) else abort.compareAndSet(null, "멈춤")
+                        } catch (e: SynoError) {
+                            // 서버가 거절: 이 파일만 실패로 두고 다음 파일 (세션 문제면 전체를 멈춤)
+                            if (e.code in setOf(105, 106, 107, 119)) abort.compareAndSet(null, "로그인이 끊겼습니다 — 앱에서 다시 로그인해 주세요")
+                            else { fail(d, r, e.message ?: "오류 ${e.code}"); flN.incrementAndGet(); log(ctx, "실패: ${r.name} — ${e.message}") }
+                        } catch (e: IOException) {
+                            // 망이 끊김: 전체를 멈추고 나중에 이어서 (이 파일은 시도 횟수만 셈)
+                            if (quit()) { /* 다른 일꾼 때문에 멈춘 것 */ }
+                            else if (!netOk(ctx, st.wifiOnly) || e is java.net.SocketTimeoutException || e is java.net.ConnectException || e is java.net.UnknownHostException) {
+                                d.execSQL("UPDATE media SET tries=tries+1 WHERE id=${r.key}")
+                                if (abort.compareAndSet(null, "연결이 끊겨 멈춤 — 나중에 이어서")) log(ctx, "${r.name}: ${e.message} → 나중에 이어서")
+                            } else { fail(d, r, e.message ?: "읽거나 보내지 못함"); flN.incrementAndGet(); log(ctx, "실패: ${r.name} — ${e.message}") }
+                        } catch (e: SecurityException) {
+                            fail(d, r, "읽기 권한 없음"); flN.incrementAndGet()
+                        } catch (e: Exception) {
+                            fail(d, r, e.message ?: e.javaClass.simpleName); flN.incrementAndGet(); log(ctx, "실패: ${r.name} — ${e.message}")
+                        } finally {
+                            actives.remove(r.key); finished.incrementAndGet()
                         }
-                        val fid = folderIds[path] ?: ph.folderByPath(ns, path, true)!!.also { folderIds[path] = it }
-                        val names = existing.getOrPut(fid) { listNames(ph, ns, fid) }
-                        val have = names[r.name.lowercase()]
-                        if (have == r.size) { Library.addServer(ctx, ph1, fid); done(d, r.key, fid, 2, path); skipped++; continue }   // ② 올릴 폴더에 같은 이름·크기
-                        // 밖(터널)에서 큰 파일은 Syno.upload 가 알아서 나눠 올림
-                        val uri = ContentUris.withAppendedId(if (r.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, r.key / 2)
-                        ph.syno.upload(ns, fid, r.name, r.mtime, r.size, { openOriginal(ctx, uri) },
-                            duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
-                            progress = { b -> current = Progress(n, rows.size, r.name, b, r.size, r.key, r.rel, t0, path); onProgress(current) },
-                            canceled = { halt() || st.rules != rules })
-                        names[r.name.lowercase()] = r.size
-                        Library.addServer(ctx, ph1, fid)
-                        done(d, r.key, fid, 1, path); uploaded++
-                        st.lastOk = System.currentTimeMillis()
-                    } catch (e: InterruptedException) {
-                        if (!halt() && st.rules != rules) { rules = st.rules; continue@outer }
-                        st.lastMsg = "멈춤 — ${rows.size - n + 1}개 남음"; return false
-                    } catch (e: SynoError) {
-                        // 서버가 거절: 이 파일만 실패로 두고 다음 파일 (세션 문제면 전체를 멈춤)
-                        if (e.code in setOf(105, 106, 107, 119)) { st.lastMsg = "로그인이 끊겼습니다 — 앱에서 다시 로그인해 주세요"; log(ctx, st.lastMsg); return false }
-                        fail(d, r, e.message ?: "오류 ${e.code}"); failed++
-                        log(ctx, "실패: ${r.name} — ${e.message}")
-                    } catch (e: IOException) {
-                        // 망이 끊김: 전체를 멈추고 나중에 이어서 (이 파일은 시도 횟수만 셈)
-                        if (!netOk(ctx, st.wifiOnly) || e is java.net.SocketTimeoutException || e is java.net.ConnectException || e is java.net.UnknownHostException) {
-                            d.execSQL("UPDATE media SET tries=tries+1 WHERE id=${r.key}")
-                            st.lastMsg = "연결이 끊겨 멈춤 — 나중에 이어서"; log(ctx, "${r.name}: ${e.message} → 나중에 이어서"); return false
-                        }
-                        fail(d, r, e.message ?: "읽거나 보내지 못함"); failed++
-                        log(ctx, "실패: ${r.name} — ${e.message}")
-                    } catch (e: SecurityException) {
-                        fail(d, r, "읽기 권한 없음"); failed++
                     }
                 }
-                if (st.rules != rules) { rules = st.rules; continue@outer }
+                val threads = (1..workers).map { Thread(work, "backup-$it").apply { start() } }
+                threads.forEach { it.join() }
+                if (changed.get() && abort.get() == null) { rules = st.rules; continue@outer }
+                abort.get()?.let { why ->
+                    val left = rows.size - finished.get()
+                    st.lastMsg = (if (why == "멈춤") "멈춤" else why) + " — ${left}개 남음"; log(ctx, "멈춤: $why"); return false
+                }
                 break
             }
+            val uploaded = upN.get(); val skipped = skN.get(); val failed = flN.get()
             st.lastMsg = "끝 — 올림 $uploaded · 이미 있음 $skipped" + (if (failed > 0) " · 실패 $failed" else "")
             log(ctx, st.lastMsg)
             return failed == 0
         } catch (e: Exception) {
             st.lastMsg = "멈춤: ${e.message}"; log(ctx, st.lastMsg); return false
         } finally {
-            current = null; onProgress(null)
+            current = null; actives.clear(); onProgress(null)
             if (wifi.isHeld) wifi.release()
             if (wake.isHeld) wake.release()
             running = false
