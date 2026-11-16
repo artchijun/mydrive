@@ -249,6 +249,11 @@ class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Googl
         "application/vnd.google-apps.presentation" to (".pptx" to "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         "application/vnd.google-apps.drawing" to (".png" to "image/png"))
     private val kinds = HashMap<String, String>()          // 경로 → mimeType
+    private val selfIds = HashMap<String, String>()        // 바로가기: 경로 → 바로가기 자체의 id (ids 에는 가리키는 대상 id)
+    private val SHORTCUT = "application/vnd.google-apps.shortcut"
+    // '공유 문서함'(남이 나에게 공유한 것) 자리 — 지금은 맨 위에 보이지 않음 (구글 드라이브 '내 드라이브' 그대로)
+    private val SHARED = "\u0000shared"
+    private fun own(path: String) = selfIds[path] ?: idOf(path)   // 이름 바꾸기·옮기기·지우기는 바로가기 자체에
 
     override fun authUrl(redirect: String, challenge: String, st: String) = "https://accounts.google.com/o/oauth2/v2/auth?" +
         listOf("client_id" to cid, "redirect_uri" to redirect, "response_type" to "code", "scope" to "https://www.googleapis.com/auth/drive",
@@ -266,12 +271,12 @@ class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Googl
         ids[path]?.let { return it }
         val parent = idOf(path.substringBeforeLast('/', ""))
         val name = path.substringAfterLast('/')
-        val fs = json(http("GET", "$api/files?" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(name)}' and trashed = false", "fields" to "files(id,mimeType)", "pageSize" to "10"))))
+        val fs = json(http("GET", "$api/files" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(name)}' and trashed = false", "fields" to "files(id,mimeType)", "pageSize" to "10"))))
             .optJSONArray("files")
         val f = fs?.optJSONObject(0)
         if (f == null) {   // 구글 문서는 목록에서 확장자를 붙여 보여 줌 → 붙인 것 떼고 다시
             val strip = export.values.firstOrNull { name.endsWith(it.first) }?.let { name.removeSuffix(it.first) } ?: throw IOException("$name — 없습니다")
-            val g = json(http("GET", "$api/files?" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(strip)}' and trashed = false", "fields" to "files(id,mimeType)"))))
+            val g = json(http("GET", "$api/files" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(strip)}' and trashed = false", "fields" to "files(id,mimeType)"))))
                 .optJSONArray("files")?.optJSONObject(0) ?: throw IOException("$name — 없습니다")
             ids[path] = g.getString("id"); kinds[path] = g.getString("mimeType"); return ids[path]!!
         }
@@ -284,18 +289,22 @@ class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Googl
         val pid = idOf(path)
         val out = ArrayList<Item>(); var page = ""
         do {
-            val qs = mutableMapOf("q" to "'$pid' in parents and trashed = false", "pageSize" to "1000",
-                "fields" to "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink)")
+            // Api.query 가 앞에 '?' 를 붙임 (주소에 '?' 를 또 붙이면 q 가 무시돼 드라이브 전체가 나옴 — 0.6.0~0.6.3 의 잘못)
+            val q = if (pid == SHARED) "sharedWithMe = true and trashed = false" else "'$pid' in parents and trashed = false"
+            val qs = mutableMapOf("q" to q, "pageSize" to "1000",
+                "fields" to "nextPageToken,files(id,name,mimeType,size,modifiedTime,thumbnailLink,shortcutDetails(targetId,targetMimeType))")
             if (page.isNotEmpty()) qs["pageToken"] = page
-            val j = json(http("GET", "$api/files?" + Api.query(qs)))
+            val j = json(http("GET", "$api/files" + Api.query(qs)))
             val fs = j.optJSONArray("files")
             for (i in 0 until (fs?.length() ?: 0)) {
                 val f = fs!!.getJSONObject(i)
-                val mime = f.optString("mimeType"); val dir = mime == FOLDER
+                val sc = if (f.optString("mimeType") == SHORTCUT) f.optJSONObject("shortcutDetails") else null
+                val mime = sc?.optString("targetMimeType") ?: f.optString("mimeType"); val dir = mime == FOLDER
                 if (!dir && mime.startsWith("application/vnd.google-apps.") && mime !in export) continue   // 양식·지도 등은 내려받을 수 없음
                 val name = f.optString("name").replace('/', '_') + (export[mime]?.first ?: "")
                 val p = if (path.isEmpty()) name else "$path/$name"
-                ids[p] = f.getString("id"); kinds[p] = mime
+                if (sc != null) { ids[p] = sc.optString("targetId"); selfIds[p] = f.getString("id") } else { ids[p] = f.getString("id"); selfIds.remove(p) }
+                kinds[p] = mime
                 out += Item(name, dir, f.optString("size", "0").toLongOrNull() ?: 0, time(f.optString("modifiedTime")), p, extra = f.optString("thumbnailLink"))
             }
             page = j.optString("nextPageToken")
@@ -305,24 +314,27 @@ class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Googl
 
     override fun mkdir(path: String) {
         val parent = idOf(path.substringBeforeLast('/', "")); val name = path.substringAfterLast('/')
-        val have = json(http("GET", "$api/files?" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(name)}' and mimeType = '$FOLDER' and trashed = false", "fields" to "files(id)"))))
+        if (parent == SHARED) throw IOException("공유 문서함 맨 위에는 만들 수 없습니다")
+        val have = json(http("GET", "$api/files" + Api.query(mapOf("q" to "'$parent' in parents and name = '${q(name)}' and mimeType = '$FOLDER' and trashed = false", "fields" to "files(id)"))))
             .optJSONArray("files")?.optJSONObject(0)
         if (have != null) { ids[path] = have.getString("id"); return }
         val j = json(http("POST", "$api/files?fields=id", JSONObject().put("name", name).put("mimeType", FOLDER).put("parents", org.json.JSONArray().put(parent)).toString()))
         ids[path] = j.getString("id"); kinds[path] = FOLDER
     }
     override fun rename(path: String, newName: String) {
-        val id = idOf(path)
+        val id = own(path)
         val clean = export.values.firstOrNull { newName.endsWith(it.first) && kinds[path] in export }?.let { newName.removeSuffix(it.first) } ?: newName
         json(http("PATCH", "$api/files/$id?fields=id", JSONObject().put("name", clean).toString())); forget(path)
     }
     override fun move(path: String, toDir: String) {
-        val id = idOf(path)
+        if (idOf(toDir) == SHARED) throw IOException("공유 문서함으로·에서 옮길 수 없습니다 — 복사를 써 주세요")
+        val id = own(path)
         val old = json(http("GET", "$api/files/$id?fields=parents")).optJSONArray("parents")?.let { a -> (0 until a.length()).joinToString(",") { a.getString(it) } } ?: ""
-        json(http("PATCH", "$api/files/$id?" + Api.query(mapOf("addParents" to idOf(toDir), "removeParents" to old, "fields" to "id")), "{}")); forget(path)
+        json(http("PATCH", "$api/files/$id" + Api.query(mapOf("addParents" to idOf(toDir), "removeParents" to old, "fields" to "id")), "{}")); forget(path)
     }
-    override fun trash(path: String) { json(http("PATCH", "$api/files/${idOf(path)}?fields=id", JSONObject().put("trashed", true).toString())); forget(path) }
-    private fun forget(path: String) { ids.keys.removeAll { it == path || it.startsWith("$path/") } }
+    override fun trash(path: String) {
+        json(http("PATCH", "$api/files/${own(path)}?fields=id", JSONObject().put("trashed", true).toString())); forget(path) }
+    private fun forget(path: String) { ids.keys.removeAll { it == path || it.startsWith("$path/") }; selfIds.keys.removeAll { it == path || it.startsWith("$path/") } }
 
     override fun download(path: String, size: Long, out: File, prog: (Long, Long) -> Unit, cancel: () -> Boolean) {
         val id = idOf(path)
@@ -333,6 +345,7 @@ class GDrive(ctx: Context, id: String = "gd") : CloudDrive(ctx, id, "gd", "Googl
     }
 
     override fun upload(dir: String, name: String, size: Long, open: () -> InputStream, prog: (Long, Long) -> Unit, cancel: () -> Boolean) {
+        if (idOf(dir) == SHARED) throw IOException("공유 문서함 맨 위에는 올릴 수 없습니다 — 그 안의 폴더로 들어가세요")
         val meta = JSONObject().put("name", name).put("parents", org.json.JSONArray().put(idOf(dir))).toString()
         val s = http("POST", "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id", meta, "application/json; charset=UTF-8",
             headers = mapOf("X-Upload-Content-Length" to size.toString()))
