@@ -124,15 +124,6 @@ class ApiTest {
         assertEquals("c.txt", Fmt.uniqueName("c.txt") { it in taken })
     }
 
-    @Test fun snapshotAndHash() {
-        val api = Api(listOf(URL), "test")
-        val got = ArrayList<Entry>()
-        api.snapshot("rt", { false }) { got += it }
-        assertTrue(got.any { it.path == "a/x.txt" && it.size == 5L && !it.dir })
-        assertTrue(got.any { it.path == "a/b" && it.dir })
-        val want = MessageDigest.getInstance("SHA-256").digest("hello".toByteArray()).joinToString("") { "%02x".format(it) }
-        assertEquals(want, api.hash("rt", "a/x.txt"))
-    }
 }
 
 class UpdateTest {
@@ -141,18 +132,5 @@ class UpdateTest {
         assertTrue(!Update.newer("0.1.0", "0.1.0")); assertTrue(!Update.newer("0.1.0", "0.1.1"))
     }
 
-}
-
-class JsonStreamTest {
-    @Test fun parsesEntries() {
-        val txt = """{"epoch":"e1","seq":3,"x":{"y":[1,2,{"z":null}]},"entries":[{"p":"\ud55c\uae00/\"q\".txt","s":12,"m":1700000000000000000,"i":18446744073709551615},{"p":"d","d":true,"s":0,"m":0,"i":1}],"tail":true}"""
-        val out = ArrayList<Entry>()
-        JsonStream(java.io.StringReader(txt)).entries({ false }) { out += it }
-        assertEquals(2, out.size)
-        assertEquals("한글/\"q\".txt", out[0].path); assertEquals(12L, out[0].size); assertEquals(1700000000000000000L, out[0].mtimeNs)
-        assertTrue(out[1].dir)
-        val empty = ArrayList<Entry>(); JsonStream(java.io.StringReader("""{"entries":[]}""")).entries({ false }) { empty += it }
-        assertEquals(0, empty.size)
-    }
 }
 

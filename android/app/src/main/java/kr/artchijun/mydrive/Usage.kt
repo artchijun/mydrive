@@ -7,7 +7,7 @@ import java.security.MessageDigest
 
 /**
  * 저장소 분석: 어디에 용량이 들었는지 (종류별·폴더별·큰 파일·오래된 큰 파일·중복 파일).
- *   휴대폰 → 폴더를 직접 훑음.  NAS → 서버의 목록 전체(/v1/snapshot)를 한 번에 받아 셈 (폴더마다 묻지 않음).
+ *   휴대폰 저장소만 (NAS 는 PC·관리 화면에서). 폴더를 직접 훑음.
  *   결과는 앱이 켜져 있는 동안 기억 (지우면 그만큼 빼 줌). [다시 분석] 으로 새로.
  */
 object Usage {
@@ -15,7 +15,6 @@ object Usage {
     class D(var size: Long = 0, var files: Int = 0)
     class Result(val base: Loc, val files: MutableList<F>, val dirs: HashMap<String, D>, val at: Long, val blocked: Int) {
         @Volatile var dups: List<List<F>>? = null
-        @Volatile var dupMore = false
         val total get() = dirs[base.path]?.size ?: 0L
         val fileCount get() = dirs[base.path]?.files ?: 0
     }
@@ -48,7 +47,7 @@ object Usage {
         }
     }
 
-    fun scan(fs: Fs, api: Api, base: Loc, progress: (Int) -> Unit, canceled: () -> Boolean): Result {
+    fun scan(base: Loc, progress: (Int) -> Unit, canceled: () -> Boolean): Result {
         val files = ArrayList<F>(4096); val dirs = HashMap<String, D>(); var blocked = 0
         dirs[base.path] = D()
         when (base.kind) {
@@ -73,14 +72,6 @@ object Usage {
                     }
                     // Android 11 부터 Android/data·obb 는 다른 앱 것이라 목록이 비어 보임
                     if (list.isEmpty() && (rel(d, root) == "Android/data" || rel(d, root) == "Android/obb")) blocked++
-                }
-            }
-            "nas" -> {
-                val pre = if (base.path.isEmpty()) "" else base.path + "/"
-                api.snapshot(base.root, canceled) { e ->
-                    if (pre.isNotEmpty() && !e.path.startsWith(pre)) return@snapshot
-                    if (e.dir) dirs.getOrPut(e.path) { D() }
-                    else { val f = F(e.path, e.size, e.mtimeNs / 1_000_000); files += f; add(dirs, base.path, e.path, f.size); if (files.size % 2000 == 0) progress(files.size) }
                 }
             }
             else -> throw IOException("여기는 분석할 수 없습니다")
@@ -124,33 +115,22 @@ object Usage {
 
     // ---------- 중복 파일 (크기가 같은 것끼리만 내용 비교) ----------
     const val DUP_MIN_LOCAL = 100L * 1024
-    const val DUP_MIN_NAS = 1024L * 1024
-    private const val NAS_HASH_MAX = 800
 
-    fun findDups(api: Api, r: Result, progress: (String) -> Unit, canceled: () -> Boolean): List<List<F>> {
-        val local = r.base.kind == "local"
-        val min = if (local) DUP_MIN_LOCAL else DUP_MIN_NAS
-        val same = synchronized(this) { r.files.toList() }.filter { it.size >= min }.groupBy { it.size }.values.filter { it.size > 1 }.sortedByDescending { it[0].size * (it.size - 1) }
-        val out = ArrayList<List<F>>(); var asked = 0; var more = false
+    fun findDups(r: Result, progress: (String) -> Unit, canceled: () -> Boolean): List<List<F>> {
+        val same = synchronized(this) { r.files.toList() }.filter { it.size >= DUP_MIN_LOCAL }.groupBy { it.size }.values.filter { it.size > 1 }.sortedByDescending { it[0].size * (it.size - 1) }
+        val out = ArrayList<List<F>>(); val root = File(r.base.root)
         val total = same.sumOf { it.size }; var done = 0
         for (g in same) {
             if (canceled()) throw IOException("취소함")
-            val groups: Collection<List<F>> = if (local) {
-                val root = File(r.base.root)
-                // 앞뒤 64KB 로 먼저 가르고, 같은 것만 끝까지 읽어 확인
-                val quick = g.groupBy { try { quickHash(File(root, it.path)) } catch (e: Exception) { "x" + it.path } }.values.filter { it.size > 1 }
-                quick.flatMap { q -> q.groupBy { try { fullHash(File(root, it.path), canceled) } catch (e: IOException) { if (canceled()) throw e; "x" + it.path } }.values }
-            } else {
-                if (asked + g.size > NAS_HASH_MAX) { more = true; continue }
-                asked += g.size
-                g.groupBy { try { api.hash(r.base.root, it.path) } catch (e: Exception) { "x" + it.path } }.values
-            }
-            groups.filter { it.size > 1 }.forEach { out += it.sortedBy { f -> f.mtimeMs } }
+            // 앞뒤 64KB 로 먼저 가르고, 같은 것만 끝까지 읽어 확인
+            val quick = g.groupBy { try { quickHash(File(root, it.path)) } catch (e: Exception) { "x" + it.path } }.values.filter { it.size > 1 }
+            quick.flatMap { q -> q.groupBy { try { fullHash(File(root, it.path), canceled) } catch (e: IOException) { if (canceled()) throw e; "x" + it.path } }.values }
+                .filter { it.size > 1 }.forEach { out += it.sortedBy { f -> f.mtimeMs } }
             done += g.size
             progress("중복 파일 찾는 중… $done / $total")
         }
         out.sortByDescending { it[0].size * (it.size - 1) }
-        r.dups = out; r.dupMore = more
+        r.dups = out
         return out
     }
 
