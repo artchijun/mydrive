@@ -11,6 +11,14 @@ object Fmt {
         b < 1024L * 1024 * 1024 -> "%.1f MB".format(b / 1048576.0)
         else -> "%.2f GB".format(b / 1073741824.0)
     }
+    /** 걸린·남은 시간: 45초 · 3분 20초 · 1시간 5분 */
+    fun dur(sec: Long): String = when {
+        sec < 0 -> "알 수 없음"
+        sec < 60 -> "${sec}초"
+        sec < 3600 -> "${sec / 60}분" + (if (sec % 60 > 0 && sec < 600) " ${sec % 60}초" else "")
+        else -> "${sec / 3600}시간" + (if (sec / 60 % 60 > 0) " ${sec / 60 % 60}분" else "")
+    }
+    fun speed(bps: Long): String = if (bps <= 0) "—" else size(bps) + "/초"
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA)
     fun time(ns: Long): String = if (ns <= 0) "" else df.format(Date(ns / 1_000_000))
 

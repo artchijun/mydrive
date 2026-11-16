@@ -108,6 +108,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private lateinit var pasteText: TextView
     private lateinit var xfer: LinearLayout
     private lateinit var xferText: TextView
+    private lateinit var xferFile: TextView
     private lateinit var xferBar: ProgressBar
     private lateinit var drawer: FrameLayout
     private lateinit var drawerBody: LinearLayout
@@ -245,9 +246,13 @@ class MainActivity : Activity(), Transfers.Listener {
         xferText = ui.label("", 12.5f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE }
         xferBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(ui.accent) }
         val xCancel = ui.label("취소", 13f, ui.red).apply { setPadding(ui.dp(12), ui.dp(4), ui.dp(4), ui.dp(4)); setOnClickListener { Transfers.cancelAll() } }
-        xfer = ui.col(ui.row(xferText.apply { layoutParams = ui.lp(0, weight = 1f) }, xCancel), xferBar).apply {
+        xferFile = ui.label("", 11.5f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE }
+        val xMore = ui.label("자세히", 13f, ui.accent).apply { setPadding(ui.dp(12), ui.dp(4), ui.dp(4), ui.dp(4)) }
+        xfer = ui.col(ui.row(xferText.apply { layoutParams = ui.lp(0, weight = 1f) }, xMore, xCancel), xferFile, xferBar).apply {
             setBackgroundColor(ui.panel); setPadding(ui.dp(14), ui.dp(6), ui.dp(14), ui.dp(6)); visibility = View.GONE
+            background = ui.press(android.graphics.drawable.ColorDrawable(ui.panel)); setOnClickListener { showTransfers() }
         }
+        xMore.setOnClickListener { showTransfers() }
 
         val line = { View(this).apply { setBackgroundColor(ui.line); layoutParams = ui.lp(h = 1) } }
         val main = ui.col(top, tabs, line(), pathBar, banner, listBox.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, line(), pasteBar, xfer, selBar, status.apply { layoutParams = ui.lp(h = ui.dp(36)) }).apply { setBackgroundColor(ui.bg) }
@@ -807,11 +812,13 @@ class MainActivity : Activity(), Transfers.Listener {
         val f = Transfers.openFile(this, l.root, it.path)
         afterFetch[f.path] = then
         Transfers.add(this, Transfers.Job(Transfers.Kind.OPEN, l.root, it.name) { job ->
+            job.startFile(it.path, it.size, "열려고 받는 중"); job.files = 1
             f.parentFile?.mkdirs()
             if (l.kind == "cloud") fs.cloud(l).download(it.path, it.size, f, { d, t -> Transfers.progress(job, d, t) }) { job.cancel }
             else api.download(l.root, Entry(it.path, false, it.size, it.mtimeMs * 1_000_000), f, { d, t -> Transfers.progress(job, d, t) }, { job.cancel })
+            job.filesDone = 1
             f.path
-        })
+        }.apply { from = place(l); to = "휴대폰 (앱 안에 받아 둠)" })
     }
 
     private fun openFile(f: File) {
@@ -858,7 +865,8 @@ class MainActivity : Activity(), Transfers.Listener {
         clip = null; refreshChrome(); askNotify()
         val title = if (c.items.size == 1) c.items[0].name else "${c.items.size}개"
         val kind = when { c.move -> Transfers.Kind.MOVE; (dst.kind == "nas" || dst.kind == "cloud") && c.loc.kind != dst.kind -> Transfers.Kind.UP; dst.kind == "local" && (c.loc.kind == "nas" || c.loc.kind == "cloud") -> Transfers.Kind.OPEN; else -> Transfers.Kind.COPY }
-        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move, policy) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") })
+        Transfers.add(this, Transfers.Job(kind, "paste", title) { job -> fs.transfer(job, c.loc, c.items, dst, c.move, policy) ?: (if (c.move) "옮겼습니다" else "붙여 넣었습니다") }
+            .apply { from = place(c.loc); to = place(dst) })
     }
 
     private fun renameSel() {
@@ -1126,6 +1134,7 @@ class MainActivity : Activity(), Transfers.Listener {
             val name = Fmt.uniqueName(s.name) { taken.contains(it.lowercase()) }
             taken += name.lowercase()
             Transfers.add(this, Transfers.Job(if (l.kind == "nas" || l.kind == "cloud") Transfers.Kind.UP else Transfers.Kind.COPY, l.root, name) { job ->
+                job.startFile(name, s.size, if (l.kind == "local") "휴대폰 폴더에 저장하는 중" else "올리는 중"); job.files = 1
                 try {
                     if (l.kind == "local") {
                         val dir = fs.file(l); val out = File(dir, Fmt.uniqueName(name) { File(dir, it).exists() })
@@ -1163,7 +1172,7 @@ class MainActivity : Activity(), Transfers.Listener {
                         throw java.io.IOException("올릴 이름을 정하지 못함")
                     } finally { tmp?.delete() }
                 } catch (e: SecurityException) { throw java.io.IOException("이 파일을 읽을 권한이 없습니다 — 보낸 앱에서 다시 공유해 주세요") }
-            })
+            }.apply { from = "다른 앱에서 보낸 파일"; to = place(l) })
         }
     }
 
@@ -1288,14 +1297,109 @@ class MainActivity : Activity(), Transfers.Listener {
 
     // ================= 옮기기 진행 =================
     override fun onTransfers() {
+        xferDetail?.invoke()
         val j = Transfers.current
         if (j == null && Transfers.waiting == 0) { xfer.visibility = View.GONE; return }
         xfer.visibility = View.VISIBLE
         val what = if (j == null) "기다리는 중" else Transfers.verb(j.kind)
-        val more = Transfers.waiting.let { if (it > 0) "  (기다리는 것 ${it}개)" else "" }
-        xferText.text = if (j == null) what + more else "$what  ${j.title}  ${Fmt.size(j.done)}" + (if (j.total > 0) " / ${Fmt.size(j.total)}" else "") + more
+        val more = Transfers.waiting.let { if (it > 0) " · 기다리는 것 ${it}개" else "" }
+        xferText.text = if (j == null) what + more else buildString {
+            append("$what  ${j.title}")
+            if (j.files > 1) append(" · ${j.filesDone}/${j.files}개")
+            if (j.total > 0) append(" · ${j.done * 100 / j.total}%")
+            j.speed().let { if (it > 0) append(" · ${Fmt.speed(it)}") }
+            j.eta().let { if (it >= 0) append(" · ${Fmt.dur(it)} 남음") }
+            append(more)
+        }
+        xferFile.text = if (j == null) "" else listOf(j.stage, j.file.substringAfterLast('/')).filter { it.isNotEmpty() }.joinToString(" — ")
+        xferFile.visibility = if (xferFile.text.isEmpty()) View.GONE else View.VISIBLE
         xferBar.isIndeterminate = j == null || j.total <= 0
         if (j != null && j.total > 0) xferBar.progress = (j.done * 1000 / j.total).toInt()
+    }
+
+    /** 어디인지 사람이 읽을 이름: 'NAS 사진/2024', '내장 저장소/DCIM' */
+    private fun place(l: Loc): String = (when (l.kind) {
+        "nas" -> "NAS " + l.root.removePrefix("~")
+        "cloud" -> fs.cloud(l.copy(path = "")).title
+        "zip" -> File(l.root).name
+        "local" -> volTitle(l.root)
+        else -> tabTitle(l)
+    }) + (if (l.path.isNotEmpty() && l.kind != "home") "/" + l.path else "")
+
+    private var xferDetail: (() -> Unit)? = null
+
+    /** 진행 중인 파일 작업 자세히: 지금 파일·어디서→어디로·개수·빠르기·남은 시간, 기다리는 작업(뺄 수 있음), 최근에 끝난 작업 */
+    private fun showTransfers() {
+        val body = ui.col().apply { setPadding(ui.dp(20), ui.dp(8), ui.dp(20), ui.dp(8)) }
+        val sv = ScrollView(this).apply { addView(body) }
+        fun kv(k: String, v: String) = ui.row(ui.label(k, 13f, ui.sub).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(76), -2) },
+            ui.label(v, 13.5f, ui.text).apply { layoutParams = ui.lp(0, weight = 1f) }).apply { gravity = Gravity.TOP; setPadding(0, ui.dp(3), 0, ui.dp(3)) }
+        fun bar(p: Int) = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000; progress = p; progressTintList = android.content.res.ColorStateList.valueOf(ui.accent) }
+        fun head(t: String) = ui.label(t, 14.5f, ui.accent, bold = true).apply { setPadding(0, ui.dp(14), 0, ui.dp(4)) }
+        fun kindName(k: Transfers.Kind) = when (k) { Transfers.Kind.UP -> "올리기"; Transfers.Kind.COPY -> "복사"; Transfers.Kind.MOVE -> "옮기기"; Transfers.Kind.ZIP -> "압축"; Transfers.Kind.SHARE -> "공유하려고 받기"; Transfers.Kind.SAVE -> "저장"; Transfers.Kind.LOGIN -> "로그인"; else -> "받기" }
+        val clock = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.KOREA)
+        fun render() {
+            body.removeAllViews()
+            val j = Transfers.current
+            body.addView(head("지금 하는 작업"))
+            if (j == null) body.addView(ui.label(if (Transfers.waiting > 0) "곧 시작합니다" else "진행 중인 작업이 없습니다", 13.5f, ui.sub))
+            else {
+                body.addView(ui.label("${kindName(j.kind)} — ${j.title}", 15f, ui.text, bold = true).apply { setPadding(0, 0, 0, ui.dp(4)) })
+                if (j.from.isNotEmpty()) body.addView(kv("어디서", j.from))
+                if (j.to.isNotEmpty()) body.addView(kv("어디로", j.to))
+                if (j.stage.isNotEmpty()) body.addView(kv("하는 일", j.stage))
+                if (j.file.isNotEmpty()) {
+                    body.addView(kv("지금 파일", j.file))
+                    if (j.fileSize > 0) {
+                        val fd = (j.done - j.fileBase).coerceIn(0, j.fileSize)
+                        body.addView(kv("", "${Fmt.size(fd)} / ${Fmt.size(j.fileSize)}"))
+                        body.addView(bar((fd * 1000 / j.fileSize).toInt()))
+                    }
+                }
+                if (j.files > 0) body.addView(kv("파일", "${"%,d".format(j.filesDone)} / ${"%,d".format(j.files)}개 끝남" + (if (j.skipped > 0) " (건너뜀 ${j.skipped}개)" else "")))
+                if (j.total > 0) {
+                    body.addView(kv("전체", "${Fmt.size(j.done)} / ${Fmt.size(j.total)} (${j.done * 100 / j.total}%)"))
+                    body.addView(bar((j.done * 1000 / j.total).toInt()))
+                } else body.addView(kv("받은 양", Fmt.size(j.done)))
+                body.addView(kv("빠르기", Fmt.speed(j.speed())))
+                body.addView(kv("남은 시간", Fmt.dur(j.eta())))
+                body.addView(kv("걸린 시간", Fmt.dur((System.currentTimeMillis() - j.started) / 1000) + " (${clock.format(java.util.Date(j.started))} 시작)"))
+                body.addView(ui.label("이 작업 취소", 14f, ui.red, bold = true).apply {
+                    setPadding(0, ui.dp(10), 0, ui.dp(4)); setOnClickListener { j.cancel = true; toast("취소하는 중…") }
+                })
+            }
+            val q = Transfers.pending()
+            if (q.isNotEmpty()) {
+                body.addView(head("기다리는 작업 ${q.size}개 (차례대로)"))
+                q.forEachIndexed { i, w ->
+                    body.addView(ui.row(ui.col(ui.label("${i + 1}. ${kindName(w.kind)} — ${w.title}", 13.5f, ui.text),
+                        ui.label(listOf(w.from, w.to).filter { it.isNotEmpty() }.joinToString(" → "), 12f, ui.sub)).apply { layoutParams = ui.lp(0, weight = 1f) },
+                        ui.label("빼기", 13f, ui.red).apply { setPadding(ui.dp(12), ui.dp(6), 0, ui.dp(6)); setOnClickListener { Transfers.remove(w) } }).apply { setPadding(0, ui.dp(4), 0, ui.dp(4)) })
+                }
+            }
+            val h = synchronized(Transfers.history) { Transfers.history.toList() }
+            if (h.isNotEmpty()) {
+                body.addView(head("최근에 끝난 작업"))
+                h.take(15).forEach { d ->
+                    val ok = d.error == null
+                    val sub = listOfNotNull(
+                        clock.format(java.util.Date(d.ended)) + " 끝 · " + Fmt.dur((d.ended - d.started) / 1000),
+                        if (d.files > 0) "파일 ${d.filesDone}/${d.files}개" + (if (d.skipped > 0) " (건너뜀 ${d.skipped})" else "") else null,
+                        if (d.total > 0) Fmt.size(d.total) else null).joinToString(" · ")
+                    body.addView(ui.col(ui.label((if (ok) "✓ " else "✕ ") + "${kindName(d.kind)} — ${d.title}", 13.5f, if (ok) ui.text else ui.red),
+                        ui.label(listOf(d.from, d.to).filter { it.isNotEmpty() }.joinToString(" → "), 12f, ui.sub).apply { visibility = if (d.from.isEmpty() && d.to.isEmpty()) View.GONE else View.VISIBLE },
+                        ui.label(sub + ((d.error ?: d.result)?.let { if (it.contains('/') && it.length > 60) "" else "\n$it" } ?: ""), 12f, ui.sub)).apply { setPadding(0, ui.dp(4), 0, ui.dp(6)) })
+                }
+            }
+        }
+        render()
+        var last = 0L
+        val tick = object : Runnable { override fun run() { render(); sv.postDelayed(this, 1000) } }
+        xferDetail = { val now = System.currentTimeMillis(); if (now - last > 400) { last = now; render() } }
+        val d = AlertDialog.Builder(this).setTitle("파일 작업").setView(sv)
+            .setPositiveButton("닫기", null).setNegativeButton("모두 취소") { _, _ -> Transfers.cancelAll() }.create()
+        d.setOnDismissListener { xferDetail = null; sv.removeCallbacks(tick) }
+        d.show(); sv.postDelayed(tick, 1000)
     }
 
     override fun onFinished(job: Transfers.Job, error: String?, result: String?) {

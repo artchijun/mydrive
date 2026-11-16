@@ -312,16 +312,18 @@ class Fs(private val ctx: Context, private val api: Api) {
         val slow = ArrayList<Item>()
         // 같은 곳 안에서 옮기기는 이름만 바꿈 (빠름). 폴더 합치기는 아래 일반 방식으로
         if (move && src.kind == dst.kind && src.root == dst.root && (src.kind == "local" || src.kind == "nas" || src.kind == "cloud")) {
+            job.stage = "같은 저장소 안에서 옮기는 중 (이름만 바꿈)"; job.files = items.size
             for (it in items) {
                 if (job.cancel) throw Canceled()
+                job.file = it.path; job.filesDone++
                 if (it.path.substringBeforeLast('/', "") == dst.path) continue   // 제자리
                 val ex = here[it.name.lowercase()]
                 var n = it.name
                 if (ex != null) {
                     if (ex.dir && it.dir) { slow += it; continue }
-                    if (sameFile(ex, it)) { rep.same++; continue }
+                    if (sameFile(ex, it)) { rep.same++; job.skipped++; continue }
                     if (ex.dir != it.dir || policy == RENAME) { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                    else if (policy == SKIP) { rep.skipped++; continue }
+                    else if (policy == SKIP) { rep.skipped++; job.skipped++; continue }
                     else { delete(dst, listOf(ex)); rep.overwritten++ }
                 }
                 moveSame(src, it, dst, n)
@@ -329,7 +331,10 @@ class Fs(private val ctx: Context, private val api: Api) {
             }
         } else slow.addAll(items)
         if (slow.isNotEmpty()) {
-            job.total = slow.sumOf { t -> mutableListOf<Node>().also { l -> walk(src, t, l, "") }.filter { !it.dir }.sumOf { it.size } }
+            job.stage = "파일 세는 중"
+            val nodes = slow.map { t -> mutableListOf<Node>().also { l -> walk(src, t, l, "") }.filter { !it.dir } }
+            job.files = nodes.sumOf { it.size }; job.filesDone = 0
+            job.total = nodes.sumOf { l -> l.sumOf { it.size } }
             for (it in slow) {
                 if (job.cancel) throw Canceled()
                 val moved = ArrayList<Item>()
@@ -391,9 +396,9 @@ class Fs(private val ctx: Context, private val api: Api) {
         var n = it.name
         if (ex != null) {
             when {
-                sameFile(ex, it) -> { rep.same++; job.done += it.size; return false }
+                sameFile(ex, it) -> { rep.same++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
                 ex.dir || policy == RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                policy == SKIP -> { rep.skipped++; job.done += it.size; return false }
+                policy == SKIP -> { rep.skipped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
                 else -> {   // 덮어쓰기: NAS 는 덮는 판을 이전 버전으로 남김, 휴대폰·클라우드는 덮이는 파일을 휴지통으로
                     if (dst.kind != "nas") delete(dst, listOf(ex))
                     rep.overwritten++
@@ -419,6 +424,13 @@ class Fs(private val ctx: Context, private val api: Api) {
 
     private fun copyFile(job: Transfers.Job, src: Loc, sp: String, nd: Node, dst: Loc, to: Loc) {
         val base = job.done
+        val sn = where(src.kind); val dn = where(dst.kind)
+        job.startFile(sp, nd.size, when {
+            src.kind == "local" && dst.kind == "local" -> "휴대폰 안에서 복사하는 중"
+            dst.kind == "local" -> "${sn}에서 받는 중"
+            src.kind == "local" -> "${dn}(으)로 올리는 중"
+            else -> "${sn}에서 앱 안에 받아 두는 중 → ${dn}(으)로 올림"
+        })
         val prog: (Long, Long) -> Unit = { d, _ -> Transfers.progress(job, base + d, job.total) }
         when {
             dst.kind == "local" -> {
@@ -445,15 +457,16 @@ class Fs(private val ctx: Context, private val api: Api) {
                         ({ t.inputStream() })
                     }
                 }
-                tmp?.let { size = it.length() }   // 구글 문서는 받으면서 크기가 정해짐
+                tmp?.let { size = it.length(); job.stage = "${dn}(으)로 올리는 중 (받아 둔 것)" }   // 구글 문서는 받으면서 크기가 정해짐
                 try {
                     if (dst.kind == "nas") api.upload(dst.root, to.path, size, maxOf(nd.mtimeMs, 1) * 1_000_000, open, prog, { job.cancel })
                     else cloud(dst).upload(to.path.substringBeforeLast('/', ""), to.name, size, open, prog) { job.cancel }
                 } finally { tmp?.delete() }
             }
         }
-        job.done = base + nd.size; Transfers.progress(job, job.done, job.total)
+        job.done = base + nd.size; job.filesDone++; Transfers.progress(job, job.done, job.total)
     }
+    private fun where(kind: String) = when (kind) { "nas" -> "NAS"; "cloud" -> "클라우드"; "zip" -> "압축 파일"; else -> "휴대폰" }
 
     private fun pump(job: Transfers.Job, inp: InputStream, out: java.io.OutputStream) {
         val buf = ByteArray(256 * 1024)

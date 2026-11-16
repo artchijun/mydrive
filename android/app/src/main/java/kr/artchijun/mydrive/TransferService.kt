@@ -56,7 +56,10 @@ class TransferService : Service() {
         if (j == null) return b.setContentTitle("Mydrive").setContentText("준비 중").build()
         val what = Transfers.verb(j.kind)
         val more = Transfers.waiting.let { if (it > 0) " · 기다리는 것 ${it}개" else "" }
-        b.setContentTitle("$what: ${j.title}").setContentText(Fmt.size(j.done) + " / " + Fmt.size(j.total) + more)
+        val line = listOfNotNull(if (j.files > 1) "${j.filesDone}/${j.files}개" else null, Fmt.size(j.done) + " / " + Fmt.size(j.total),
+            j.speed().takeIf { it > 0 }?.let { Fmt.speed(it) }, j.eta().takeIf { it >= 0 }?.let { Fmt.dur(it) + " 남음" }).joinToString(" · ") + more
+        b.setContentTitle("$what: ${j.title}").setContentText(line)
+        if (j.file.isNotEmpty()) b.setStyle(Notification.BigTextStyle().bigText(line + "\n" + j.file.substringAfterLast('/')))
         if (j.total > 0) b.setProgress(1000, (j.done * 1000 / j.total).toInt(), false) else b.setProgress(0, 0, true)
         return b.build()
     }

@@ -19,6 +19,33 @@ object Transfers {
         @Volatile var done = 0L
         @Volatile var total = 0L
         @Volatile var cancel = false
+        // 자세히 보기용
+        @Volatile var from = ""          // 어디서 (예: NAS 사진/2024)
+        @Volatile var to = ""            // 어디로
+        @Volatile var stage = ""         // 지금 하는 일 (세는 중 · 받는 중 · 올리는 중 …)
+        @Volatile var file = ""          // 지금 다루는 파일 (경로)
+        @Volatile var fileSize = 0L
+        @Volatile var fileBase = 0L      // 이 파일을 시작할 때의 done → 파일 진행 = done - fileBase
+        @Volatile var files = 0          // 다룰 파일 수 (모르면 0)
+        @Volatile var filesDone = 0
+        @Volatile var skipped = 0        // 건너뛴 파일 (같은 파일·겹쳐서 건너뜀)
+        @Volatile var added = 0L         // 줄에 넣은 때
+        @Volatile var started = 0L
+        @Volatile var ended = 0L
+        @Volatile var error: String? = null
+        @Volatile var result: String? = null
+        internal val samples = ArrayDeque<LongArray>()   // (때, done) — 빠르기 계산
+
+        /** 파일 하나를 시작할 때 */
+        fun startFile(path: String, size: Long, what: String? = null) { file = path; fileSize = size; fileBase = done; if (what != null) stage = what }
+        /** 최근 5초 동안의 빠르기 (바이트/초) */
+        fun speed(): Long = synchronized(samples) {
+            if (samples.size < 2) return 0
+            val a = samples.first(); val b = samples.last(); val dt = b[0] - a[0]
+            if (dt < 300) 0 else (b[1] - a[1]) * 1000 / dt
+        }
+        /** 남은 시간 (초, 모르면 -1) */
+        fun eta(): Long { val v = speed(); return if (v <= 0 || total <= 0 || done >= total) -1 else (total - done) / v }
     }
 
     interface Listener { fun onTransfers() ; fun onFinished(job: Job, error: String?, result: String?) }
@@ -34,7 +61,15 @@ object Transfers {
     val waiting: Int get() = synchronized(queue) { queue.size }
     val busy: Boolean get() = current != null || waiting > 0
 
+    /** 끝난 작업 (최근 30개, 새것 먼저) */
+    val history = ArrayDeque<Job>()
+    /** 기다리는 작업들 (차례대로) */
+    fun pending(): List<Job> = synchronized(queue) { queue.toList() }
+    /** 기다리는 작업 하나를 줄에서 뺌 */
+    fun remove(job: Job) { synchronized(queue) { queue.remove(job) }; changed() }
+
     fun add(ctx: Context, job: Job) {
+        job.added = System.currentTimeMillis()
         synchronized(queue) { queue.addLast(job) }
         TransferService.start(ctx.applicationContext)
         pool.execute { runOne() }
@@ -52,18 +87,24 @@ object Transfers {
     fun progress(job: Job, done: Long, total: Long) {
         job.done = done; job.total = total
         val now = System.currentTimeMillis()
+        synchronized(job.samples) {
+            val l = job.samples.lastOrNull()
+            if (l == null || now - l[0] >= 250) { job.samples.addLast(longArrayOf(now, done)); while (job.samples.size > 2 && now - job.samples.first()[0] > 5000) job.samples.removeFirst() }
+        }
         if (now - lastNotify > 300) { lastNotify = now; changed() }
     }
 
     private fun runOne() {
         val job = synchronized(queue) { queue.removeFirstOrNull() } ?: return
-        current = job; changed()
+        current = job; job.started = System.currentTimeMillis(); changed()
         var err: String? = null
         var res: String? = null
         try { res = job.run(job) } catch (e: Canceled) { err = "취소함" } catch (e: Exception) {
             err = e.message ?: e.javaClass.simpleName
             android.util.Log.w("Mydrive", "${job.kind} ${job.title} 실패", e)
         }
+        job.ended = System.currentTimeMillis(); job.error = err; job.result = res
+        synchronized(history) { history.addFirst(job); while (history.size > 30) history.removeLast() }
         current = null
         main.post { listener?.onFinished(job, err, res) }
         changed()
