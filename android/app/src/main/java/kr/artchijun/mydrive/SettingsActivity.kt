@@ -87,6 +87,11 @@ class SettingsActivity : Activity() {
         val sizes = arrayOf("작게", "보통", "크게")
         val ri = pf.int("rowIcon", 1)
         item("image", "목록 아이콘 크기", "파일 목록 왼쪽 아이콘과 사진 미리보기 크기", sizes[ri]) { choose("목록 아이콘 크기", sizes, ri) { pf.putInt("rowIcon", it); changed() } }
+        val views = arrayOf("목록 (자세히)", "바둑판 (작은 그림)", "큰 그림"); val vm = pf.int("viewMode", 0).coerceIn(0, 2)
+        item("listview", "기본 보기 방식", "보기 방식을 따로 정하지 않은 폴더에 씁니다. 폴더마다 바꾼 보기는 그 폴더에 기억됩니다 (사진 폴더는 처음부터 바둑판)", views[vm]) {
+            choose("기본 보기 방식", views, vm) { pf.putInt("viewMode", it); changed() } }
+        item("refresh", "폴더별 보기 방식 지우기", "폴더마다 기억한 보기 방식을 모두 지우고 기본으로 돌아갑니다") {
+            pf.putStr("viewModes", "{}"); Toast.makeText(this, "폴더별 보기 방식을 지웠습니다", Toast.LENGTH_SHORT).show(); changed() }
         val gaps = arrayOf("조밀하게", "보통", "넓게"); val rg = pf.int("rowGap", 0).coerceIn(0, 2)
         item("listview", "목록 줄 간격", "파일 목록에서 줄과 줄 사이 여백. 조밀하게 하면 한 화면에 더 많이", gaps[rg]) { choose("목록 줄 간격", gaps, rg) { pf.putInt("rowGap", it); changed() } }
         val hi = pf.int("tileSize", 1)

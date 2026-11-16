@@ -19,6 +19,7 @@ struct WebDriveCfg {
     std::string token;
     std::wstring mount;        // "M:" 같은 드라이브 문자, 또는 PC 폴더 전체 경로 (없거나 빈 폴더)
     std::wstring cacheDir;     // 고치는 중인 파일을 잠시 두는 곳 (%LOCALAPPDATA%\Mydrive\webdrive)
+    std::wstring label;        // 탐색기에 보일 드라이브 이름 (비면 연결 이름)
 };
 
 class WebDrive {

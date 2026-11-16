@@ -35,6 +35,7 @@ struct Conn {
     std::vector<std::string> keep;    // 항상 이 PC에 둘 폴더 (나머지는 요청 시 받기)
     bool web = false;                 // 받는 방식 '웹드라이브처럼 사용': PC에 파일을 두지 않고 NAS 를 드라이브로 붙임 (webdrive.cpp)
     std::wstring mount;               // 웹드라이브를 붙일 드라이브 문자 ("M:"). 비어 있으면 local 폴더에 붙임
+    std::wstring label;               // 웹드라이브 이름 (탐색기 '내 PC'에 보일 이름). 비면 NAS 폴더 이름
     bool off = false;                 // 웹드라이브 연결을 끊어 둠 ([연결 끊기] / [연결])
     bool paused = false;              // 이 작업만 '다시 시작할 때까지' 멈춤 (앱을 다시 켜도 유지)
     int64_t pauseUntil = 0;           // 시간을 정한 멈춤이 끝나는 시각 (1970년부터 ms). 앱을 다시 켜거나 업데이트해도 남은 시간만큼 이어 감
@@ -118,6 +119,7 @@ static void LoadCfg() {
         x.keep = c.value("keepDirs", std::vector<std::string>());
         x.web = c.value("mode", std::string()) == "webdrive";
         x.mount = W(c.value("mount", std::string()));
+        x.label = W(c.value("label", std::string()));
         x.off = c.value("off", false);
         x.paused = c.value("paused", false);
         x.pauseUntil = c.value("pauseUntil", (int64_t)0);
@@ -135,7 +137,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"off", c.off}, {"paused", c.paused}, {"pauseUntil", c.pauseUntil}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"label", U(c.label)}, {"off", c.off}, {"paused", c.paused}, {"pauseUntil", c.pauseUntil}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -236,7 +238,7 @@ static void RemoveOldUserVerbs();   // tools.inc
 static void StartWebDrive(const Conn& c) {
     if (c.name.empty() || WebMount(c).empty()) return;
     WebDriveCfg wc; wc.name = c.name; wc.serverUrl = ActiveServer(); wc.token = g_cfg.token;
-    wc.mount = WebMount(c); wc.cacheDir = g_dataDir + L"\\webdrive";
+    wc.mount = WebMount(c); wc.cacheDir = g_dataDir + L"\\webdrive"; wc.label = c.label;
     auto w = std::make_shared<WebDrive>(wc);
     std::wstring cname = W(c.name);
     w->onEvent = [cname](const std::string& k, const std::string& p, const std::string& x) {
@@ -1663,10 +1665,11 @@ static void PickClick(int r, int x, bool dbl) {
     if (changed) { InvalidateRect(p_list, nullptr, FALSE); PickInfo(); }
 }
 enum { IDP_TAB0 = 720, IDP_TAB1, IDP_TAB2, IDP_OD, IDP_ALL, IDP_ROOT, IDP_LOCAL, IDP_BROWSE, IDP_LINE, IDP_DESC };
-enum { IDP_WEB = 740, IDP_MFOLDER, IDP_MDRIVE, IDP_LETTER, IDP_MLABEL, IDP_WFSP, IDP_WDESC };
+enum { IDP_WEB = 740, IDP_MFOLDER, IDP_MDRIVE, IDP_LETTER, IDP_MLABEL, IDP_WFSP, IDP_WDESC, IDP_DNAME, IDP_DNAMEL };
 static std::vector<HWND> p_pg[3];
 static HWND p_od, p_all, p_local, p_rootBox;
 static HWND p_web, p_mFolder, p_mDrive, p_letter, p_mLabel, p_wfsp, p_wdesc, p_mdesc, p_tip;   // 웹드라이브 고르기
+static HWND p_dname, p_dnameL;   // 웹드라이브 이름 (드라이브 문자로 붙일 때)
 static void PickTab(HWND h, int k);
 static std::wstring PickLetter() { std::wstring s = GetText(p_letter); return s.size() >= 2 ? s.substr(0, 2) : L""; }
 // 받는 방식 탭: 고른 것 표시 + 웹드라이브면 '연결할 곳' 보이기
@@ -1683,6 +1686,7 @@ static void PickModeUi() {
     MoveWindow(p_local, x, ly, CW - bw - S(6), eh, TRUE); MoveWindow(p_browse, x + CW - bw, ly, bw, eh, TRUE);
     for (HWND c : {p_local, p_browse}) ShowWindow(c, letter ? SW_HIDE : SW_SHOW);
     ChkSet(p_mFolder, !letter); ChkSet(p_mDrive, letter);
+    for (HWND c : {p_dname, p_dnameL}) ShowWindow(c, letter ? SW_SHOW : SW_HIDE);
     EnableWindow(p_letter, letter);
     ShowWindow(p_wfsp, web && !WinFspInstalled() ? SW_SHOW : SW_HIDE);
     for (HWND c : {p_od, p_all, p_web, p_mFolder, p_mDrive}) InvalidateRect(c, nullptr, TRUE);
@@ -1758,7 +1762,7 @@ static void PickTab(HWND h, int k) {
     for (int t = 0; t < 2; t++) for (HWND c : p_pg[t]) ShowWindow(c, t == k ? SW_SHOW : SW_HIDE);
     for (int t = 0; t < 2; t++) InvalidateRect(GetDlgItem(h, IDP_TAB0 + t), nullptr, TRUE);
     if (k == 0) { PickModeUi(); return; }
-    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc, p_local, p_browse, p_gd, p_mdesc}) ShowWindow(c, SW_HIDE);
+    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc, p_local, p_browse, p_gd, p_mdesc, p_dname, p_dnameL}) ShowWindow(c, SW_HIDE);
     if (t_conn.web) {
         ShowWindow(p_list, SW_HIDE);
         SetWindowTextW(p_info, L"웹드라이브는 NAS 폴더 전체를 드라이브로 보여 줍니다. 여기서 고를 폴더는 없습니다.");
@@ -1847,6 +1851,17 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         p_wdesc = Ctl(h, L"STATIC", L"목록은 NAS에서 그때그때 보여 주고, 프로그램이 읽는 조각만 잠시 받습니다. 오프라인이면 열리지 않고 탐색기 상태 아이콘도 없습니다.\n"
                                      L"WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos · github.com/winfsp/winfsp", SS_LEFT | SS_NOPREFIX, IDP_WDESC);
         SendMessageW(p_wdesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_wdesc, x, S(480), CW, S(42), TRUE);
+        // 드라이브 이름 (탐색기 '내 PC'에 보일 이름)
+        p_dnameL = Ctl(h, L"STATIC", L"드라이브 이름", SS_LEFT | SS_NOPREFIX, IDP_DNAMEL);
+        MoveWindow(p_dnameL, x, S(449), S(100), S(22), TRUE);
+        p_dname = Ctl(h, L"EDIT", t_conn.label.c_str(), WS_TABSTOP | ES_AUTOHSCROLL, IDP_DNAME);
+        MoveWindow(p_dname, x + S(104), S(444), CW - S(104), eh, TRUE);
+        SendMessageW(p_dname, EM_LIMITTEXT, 32, 0);
+        {
+            std::wstring def = W(t_conn.name); if (!def.empty() && def[0] == L'~') def.erase(0, 1);
+            SendMessageW(p_dname, EM_SETCUEBANNER, TRUE, (LPARAM)(def.empty() ? L"비우면 NAS 폴더 이름" : (def + L" (비우면 NAS 폴더 이름)").c_str()));
+        }
+        AddTip(p_tip, p_dname, L"탐색기 '내 PC'에 이 드라이브가 보일 이름입니다 (32자까지). 비워 두면 NAS 폴더 이름을 씁니다. 저장하면 드라이브를 다시 붙이며 바뀝니다.");
         p_wfsp = Ctl(h, L"BUTTON", L"WinFsp 설치", BS_PUSHBUTTON | WS_TABSTOP, IDP_WFSP);
         MoveWindow(p_wfsp, x, ch - S(46), S(150), S(32), TRUE);
         AddTip(p_tip, p_mFolder, L"아래에 적은 PC 폴더 자리에 NAS 내용이 보입니다. 그 폴더는 아직 없거나 비어 있어야 합니다.");
@@ -1960,6 +1975,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 PickTab(h, 0); InstallWinFsp(h); break;
             }
             if (!t_conn.web && p_loaded && p_loadName == name) PickApply();
+            if (t_conn.web) t_conn.label = Trim(GetText(p_dname));
             t_conn.name = name; t_conn.local = local;
             if (t_idx < 0) { s_conns.push_back(t_conn); s_sel = (int)s_conns.size() - 1; }
             else s_conns[t_idx] = t_conn;

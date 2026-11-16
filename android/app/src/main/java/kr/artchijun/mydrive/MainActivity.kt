@@ -453,7 +453,24 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     // ---------- 보기 방식: 0 목록 · 1 바둑판(작은 그림) · 2 큰 그림 ----------
-    private var viewMode get() = pf.int("viewMode", 0); set(v) = pf.putInt("viewMode", v)
+    //   폴더마다 기억 (pref "viewModes" = {위치 키: 0·1·2}). 정한 적 없으면: 사진·동영상 모음이나 사진 폴더는 바둑판, 나머지는 기본(목록)
+    private var viewMode: Int
+        get() = if (tabs.isEmpty()) pf.int("viewMode", 0) else viewFor(tab.loc)   // 탭을 불러오기 전(화면 만들 때)에는 기본
+        set(v) {
+            val m = viewModes(); m.put(tab.loc.key(), v)
+            if (m.length() > 400) m.remove(m.keys().next())   // 너무 많이 쌓이지 않게 오래된 것부터
+            pf.putStr("viewModes", m.toString())
+        }
+    private fun viewModes() = try { org.json.JSONObject(pf.str("viewModes", "{}")) } catch (e: Exception) { org.json.JSONObject() }
+    private fun viewFor(l: Loc): Int {
+        viewModes().optInt(l.key(), -1).takeIf { it >= 0 }?.let { return it }
+        val photo = Regex("(^|/)(DCIM|Pictures|Camera|Screenshots|PHOTO|사진)(/|$)", RegexOption.IGNORE_CASE)
+        return when {
+            l.kind == "lib" && Lib.keyOfPath(l.path) in setOf("image", "video") -> 1
+            (l.kind == "local" || l.kind == "nas" || l.kind == "cloud") && (photo.containsMatchIn(l.path) || photo.containsMatchIn(l.root.removePrefix("~"))) -> 1
+            else -> pf.int("viewMode", 0)   // 기본 보기 (설정)
+        }
+    }
     private fun gridCols() = maxOf(2, (resources.displayMetrics.widthPixels / resources.displayMetrics.density / (if (viewMode == 2) 170 else 112)).toInt())
     private fun fileRows(l: List<Item>): List<Row> =
         if (viewMode == 0 || tab.loc.kind == "trash") l.map { Row(2, item = it) }
@@ -461,7 +478,7 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun viewMenu() {
         val names = arrayOf("목록 (자세히)", "바둑판 (작은 그림)", "큰 그림")
-        AlertDialog.Builder(this).setTitle("보기 방식").setSingleChoiceItems(names, viewMode) { d, w -> d.dismiss(); if (w != viewMode) { viewMode = w; applyView() } }.show()
+        AlertDialog.Builder(this).setTitle("보기 방식 — 이 폴더").setSingleChoiceItems(names, viewMode) { d, w -> d.dismiss(); if (w != viewMode) { viewMode = w; applyView() } }.show()
     }
     private fun applyView() {
         viewBtn.setImageDrawable(g(if (viewMode == 0) "grid" else "listview", ui.sub))
@@ -618,6 +635,7 @@ class MainActivity : Activity(), Transfers.Listener {
     private fun refreshChrome() {
         val l = tab.loc
         title.text = tabTitle(l)
+        if (::viewBtn.isInitialized) viewBtn.setImageDrawable(g(if (viewMode == 0) "grid" else "listview", ui.sub))
         pathBar.visibility = if (l.kind == "home") View.GONE else View.VISIBLE   // 홈에서는 주소 줄 없음
         // 경로 조각
         crumbs.removeAllViews()

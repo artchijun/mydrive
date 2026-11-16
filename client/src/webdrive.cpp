@@ -183,6 +183,18 @@ struct WebDrive::Impl {
         std::string par;
         return ResolveLocked(Parent(rel), &par) ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_OBJECT_PATH_NOT_FOUND;
     }
+    // 탐색기에 보일 이름: 지정한 이름, 없으면 연결 이름(웹 폴더는 ~ 뺌)
+    std::wstring Display() const { return !c.label.empty() ? c.label : W(lazy ? c.name.substr(1) : c.name); }
+    // 드라이브 문자로 붙인 네트워크 드라이브는 탐색기가 이름을 레지스트리에서 읽음 (MountPoints2\##mydrive#이름 → _LabelFromReg)
+    void SetExplorerLabel(const std::wstring& share) {
+        std::wstring key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##mydrive#" + share;
+        HKEY k;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+        std::wstring v = Display();
+        RegSetValueExW(k, L"_LabelFromReg", 0, REG_SZ, (const BYTE*)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+
     // ---------- 웹 폴더: 폴더 하나의 목록 받기 ----------
     bool LoadDir(const std::string& dir) {
         Resp r = http.Req(L"GET", "/v1/list", {{"root", c.name}, {"path", dir}}, nullptr, 60);
@@ -487,7 +499,7 @@ static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* fs, FSP_FSCTL_VOLUME_INFO* vi) {
     uint64_t t = d->total, f = d->freeB;
     vi->TotalSize = t ? t : (1ULL << 44);
     vi->FreeSize = t ? f : (1ULL << 43);
-    std::wstring l = W(d->lazy ? d->c.name.substr(1) : d->c.name);
+    std::wstring l = d->Display();
     size_t n = std::min<size_t>(l.size(), 31);
     memcpy(vi->VolumeLabel, l.c_str(), n * sizeof(WCHAR));
     vi->VolumeLabelLength = (UINT16)(n * sizeof(WCHAR));
@@ -844,8 +856,10 @@ bool WebDrive::Impl::Mount(std::string* err) {
     vp.UmFileContextIsUserContext2 = 1;
     wcscpy_s(vp.FileSystemName, L"Mydrive");
     if (letter) {   // 드라이브 문자: 네트워크 드라이브로 (탐색기 '네트워크 위치'에 \\mydrive\이름 으로 보임)
-        std::wstring pre = L"\\mydrive\\" + W(lazy ? c.name.substr(1) : c.name);
+        std::wstring share = W(lazy ? c.name.substr(1) : c.name);
+        std::wstring pre = L"\\mydrive\\" + share;
         wcsncpy_s(vp.Prefix, pre.c_str(), _TRUNCATE);
+        SetExplorerLabel(share);
     }
     FSP_FILE_SYSTEM* f = nullptr;
     NTSTATUS s = FspFileSystemCreate((PWSTR)(letter ? L"" FSP_FSCTL_NET_DEVICE_NAME : L"" FSP_FSCTL_DISK_DEVICE_NAME), &vp, &g_iface, &f);
