@@ -13,9 +13,11 @@ package main
 //	  조각을 받기 전에 그 DSM 세션이 살아 있는지 확인함 (아무나 NAS 에 임시 파일을 쓰지 못하게)
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -111,8 +113,20 @@ func loginAllowed(ip string) bool {
 	return true
 }
 
+// 중계가 DSM 에 보내는 X-Forwarded-For 와 같은 값 (DSM 은 세션을 만든 접속 주소로 세션을 확인하므로 똑같이 보내야 함)
+func fwdFor(r *http.Request) string {
+	ip := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(ip); err == nil {
+		ip = h
+	}
+	if prior := r.Header.Values("X-Forwarded-For"); len(prior) > 0 {
+		return strings.Join(prior, ", ") + ", " + ip
+	}
+	return ip
+}
+
 // 이 DSM 세션이 살아 있고 사진 앱을 쓸 수 있나 (10분 동안 기억)
-func photoSessionOK(sid, token string) bool {
+func photoSessionOK(r *http.Request, sid, token string) bool {
 	if sid == "" {
 		return false
 	}
@@ -126,8 +140,19 @@ func photoSessionOK(sid, token string) bool {
 	if token != "" {
 		v.Set("SynoToken", token)
 	}
-	j, err := dsmCall(v)
+	req, _ := http.NewRequest(http.MethodPost, dsmURL()+"/webapi/entry.cgi", strings.NewReader(v.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Forwarded-For", fwdFor(r))
+	if token != "" {
+		req.Header.Set("X-SYNO-TOKEN", token)
+	}
+	resp, err := dsmClient.Do(req)
 	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	var j map[string]any
+	if json.NewDecoder(resp.Body).Decode(&j) != nil {
 		return false
 	}
 	if s, _ := j["success"].(bool); !s {
@@ -154,7 +179,7 @@ func hPhotoPart(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad_request", "id 가 올바르지 않음")
 		return
 	}
-	if !photoSessionOK(q.Get("_sid"), q.Get("SynoToken")) {
+	if !photoSessionOK(r, q.Get("_sid"), q.Get("SynoToken")) {
 		httpErr(w, 401, "session", "시놀로지 로그인이 필요함")
 		return
 	}
@@ -202,7 +227,7 @@ func hPhotoFinish(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad_request", "요청이 올바르지 않음")
 		return
 	}
-	if !photoSessionOK(q.Get("_sid"), q.Get("SynoToken")) {
+	if !photoSessionOK(r, q.Get("_sid"), q.Get("SynoToken")) {
 		httpErr(w, 401, "session", "시놀로지 로그인이 필요함")
 		return
 	}
@@ -249,6 +274,7 @@ func hPhotoFinish(w http.ResponseWriter, r *http.Request) {
 	u := dsmURL() + "/webapi/entry.cgi?" + url.Values{"api": {q.Get("api")}, "method": {q.Get("method")}, "version": {q.Get("version")}, "_sid": {q.Get("_sid")}, "SynoToken": {q.Get("SynoToken")}}.Encode()
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, u, pr)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("X-Forwarded-For", fwdFor(r))
 	if t := q.Get("SynoToken"); t != "" {
 		req.Header.Set("X-SYNO-TOKEN", t)
 	}
