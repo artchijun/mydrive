@@ -39,6 +39,8 @@
         <activity android:name=".BackupActivity" android:exported="false" />
         <activity android:name=".SettingsActivity" android:exported="false" />
         <activity android:name=".FreeUpActivity" android:exported="false" />
+        <activity android:name=".BucketPickActivity" android:exported="false" />
+        <activity android:name=".BackupListActivity" android:exported="false" />
         <activity android:name=".DupActivity" android:exported="false" />
 
         <service android:name=".BackupService" android:exported="false" android:foregroundServiceType="dataSync" />

@@ -63,6 +63,21 @@ object Thumbs {
         return b
     }
 
+    /** 휴대폰에만 있는 사진: 안드로이드가 만들어 둔 썸네일 */
+    fun loadLocal(iv: ImageView, uri: String, onDone: (Bitmap?) -> Unit) {
+        val key = "local|$uri"
+        iv.tag = key
+        mem.get(key)?.let { b -> iv.setImageBitmap(b); onDone(b); return }
+        iv.setImageDrawable(null)
+        val ctx = iv.context.applicationContext
+        pool.execute {
+            if (iv.tag != key) return@execute
+            val b = try { ctx.contentResolver.loadThumbnail(android.net.Uri.parse(uri), android.util.Size(320, 320), null) } catch (e: Exception) { null }
+            if (b != null) mem.put(key, b)
+            main.post { if (iv.tag == key) { if (b != null) iv.setImageBitmap(b); onDone(b) } }
+        }
+    }
+
     /** 시놀로지가 아직 썸네일을 못 만든 작은 사진(8MB 이하): 원본을 받아 줄여서 칸에 넣음 (만든 것은 캐시에 둠) */
     fun loadFromOriginal(iv: ImageView, ns: String, it: Item, onDone: (Bitmap?) -> Unit) {
         val key = "$ns|orig|${it.cacheKey}|sm"
@@ -72,22 +87,24 @@ object Thumbs {
         val ctx = iv.context.applicationContext
         pool.execute {
             if (iv.tag != key) return@execute
-            val bmp = try {
-                val f = File(disk(ctx), "orig_${it.cacheKey}_sm.jpg".replace('/', '_'))
-                if (f.length() > 0) BitmapFactory.decodeFile(f.path)
-                else {
-                    val syno = Syno(ctx)
-                    val bytes = syno.open({ syno.originalUrl(ns, it) }, 60_000).inputStream.use { inp -> inp.readBytes() }
-                    val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
-                    var smp = 1; while (minOf(o.outWidth, o.outHeight) / (smp * 2) >= 320) smp *= 2
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = smp })?.also { b ->
-                        f.outputStream().use { out -> b.compress(Bitmap.CompressFormat.JPEG, 85, out) }; trim(f.length())
-                    }
-                }
-            } catch (e: Exception) { null }
+            val bmp = try { smallFromOriginal(ctx, ns, it) } catch (e: Exception) { null }
             if (bmp != null) mem.put(key, bmp)
             main.post { if (iv.tag == key) { if (bmp != null) iv.setImageBitmap(bmp); onDone(bmp) } }
+        }
+    }
+
+    /** 일하는 스레드에서: 원본(작은 사진만)을 받아 줄인 그림 — 썸네일이 없는 사진용. 만든 것은 디스크 캐시에 */
+    fun smallFromOriginal(ctx: Context, ns: String, it: Item, min: Int = 320): Bitmap? {
+        if (it.video || it.size <= 0 || it.size > 20L * 1024 * 1024) return null
+        val f = File(disk(ctx), "orig_${it.cacheKey}_${min}.jpg".replace('/', '_'))
+        if (f.length() > 0) return BitmapFactory.decodeFile(f.path)
+        val syno = Syno(ctx)
+        val bytes = syno.open({ syno.originalUrl(ns, it) }, 60_000).inputStream.use { inp -> inp.readBytes() }
+        val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, o)
+        var smp = 1; while (minOf(o.outWidth, o.outHeight) / (smp * 2) >= min) smp *= 2
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = smp })?.also { b ->
+            f.outputStream().use { out -> b.compress(Bitmap.CompressFormat.JPEG, 85, out) }; trim(f.length())
         }
     }
 

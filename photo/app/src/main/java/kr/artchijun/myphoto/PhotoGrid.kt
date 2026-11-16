@@ -39,10 +39,47 @@ class PhotoGrid(
         /** 묶음 단위: day · month · year */
         fun groupKey(unit: String, t: Long): String = fmt(when (unit) { "year" -> "yyyy"; "month" -> "yyyyMM"; else -> "yyyyMMdd" }, t)
         fun groupTitle(unit: String, t: Long): String = fmt(when (unit) { "year" -> "yyyy년"; "month" -> "yyyy년 M월"; else -> "yyyy년 M월 d일 (E)" }, t)
+        /** 동영상 길이 "00:19" · "1:02:03" */
+        fun duration(ms: Long): String { val t = ms / 1000; return if (t >= 3600) "%d:%02d:%02d".format(t / 3600, t / 60 % 60, t % 60) else "%02d:%02d".format(t / 60, t % 60) }
         fun stamp(t: Long): String = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA).apply { timeZone = utc }.format(Date(t * 1000))
     }
 
-    val items = ArrayList<Item>()
+    /** 받은 것 전부 (서버 + 끼워 넣은 휴대폰에만 있는 것) */
+    private val all = ArrayList<Item>()
+    /** 보이는 것 (상태 거르기를 한 뒤) */
+    var items: List<Item> = emptyList(); private set
+    private var serverCount = 0
+    /** 휴대폰에만 있는 사진(백업 안 됨)도 날짜 사이에 끼워 보여 줄지 (전체 사진 화면) */
+    var mergePhone = false
+    private var phoneOnly: List<Item> = emptyList()
+    private val inserted = HashSet<Long>()
+    /** 백업 상태로 거르기: 0 모두 · Library.BOTH · SERVER_ONLY · PHONE_ONLY */
+    var statusFilter = 0
+        set(v) { field = v; rebuild(); list.setSelection(0) }
+    private val showStatus get() = pf.bool("show_status", true)
+    fun statusOf(it: Item): Int = when {
+        it.local != null -> Library.PHONE_ONLY
+        !Library.phoneLoaded -> 0
+        Library.phoneHas(it) -> Library.BOTH
+        else -> Library.SERVER_ONLY
+    }
+    /** 휴대폰 목록·서버 대조가 새로 끝났을 때: 표시와 끼워 넣은 것을 다시 */
+    fun phoneChanged(list: List<Item>?) {
+        if (list != null) {
+            val gone = list.map { it.id }.toSet()
+            all.removeAll { it.local != null && it.id !in gone }; inserted.retainAll(gone)
+            phoneOnly = list
+        }
+        mergeLocal(); rebuild()
+    }
+    /** 서버 목록이 내려온 날짜까지의 휴대폰에만 있는 것을 끼워 넣음 (다 받았으면 전부) */
+    private fun mergeLocal() {
+        if (!mergePhone || phoneOnly.isEmpty()) return
+        val edge = if (done) Long.MIN_VALUE else (all.lastOrNull { it.local == null }?.time ?: Long.MAX_VALUE)
+        var add = false
+        for (p in phoneOnly) if (p.time >= edge && inserted.add(p.id)) { all += p; add = true }
+        if (add) all.sortWith(compareByDescending<Item> { it.time }.thenByDescending { it.id })
+    }
     val selected = LinkedHashSet<Long>()
     val selecting get() = selected.isNotEmpty()
     private class Row(val header: String?, val count: Int, val start: Int, val end: Int)
@@ -52,6 +89,8 @@ class PhotoGrid(
     /** 묶음 단위 (일·월·년). 바꾸면 칸 수도 그 단위에 맞게 (일 4 · 월 5 · 년 7 기본, 오므리기로 바꾼 값은 단위별로 기억) */
     var unit: String = pf.str("unit", "day")
         set(v) { field = v; pf.putStr("unit", v); cols = pf.int("cols_$v", when (v) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) }); rebuild(); list.setSelection(0) }
+    /** 아래에 떠 있는 것(일·월·연도 고르기)에 가리지 않도록 목록 끝에 두는 여백 */
+    fun setBottomSpace(px: Int) { list.setPadding(0, 0, 0, px) }
     private var loading = false
     private var done = false
     private var seq = 0
@@ -64,6 +103,7 @@ class PhotoGrid(
         if (grouped) cols = pf.int("cols_$unit", when (unit) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) })
         list.divider = null; list.dividerHeight = 0; list.selector = android.graphics.drawable.ColorDrawable(0)
         list.isFastScrollEnabled = true; list.setBackgroundColor(ui.bg)
+        list.clipToPadding = false
         list.adapter = adapter
         list.setOnScrollListener(object : AbsListView.OnScrollListener {
             override fun onScrollStateChanged(v: AbsListView, s: Int) {}
@@ -77,27 +117,30 @@ class PhotoGrid(
 
     // ---------- 받기 ----------
     fun reload() {
-        seq++; items.clear(); selected.clear(); done = false; loading = false; rebuild(); onSelect(0)
+        seq++; all.clear(); inserted.clear(); serverCount = 0; selected.clear(); done = false; loading = false; rebuild(); onSelect(0)
         spin.visibility = View.VISIBLE; empty.visibility = View.GONE
         more()
     }
 
     private fun more() {
         if (loading || done) return
-        loading = true; val my = seq; val off = items.size
+        loading = true; val my = seq; val off = serverCount
         net.execute {
             val r = try { Result.success(loader(off, PAGE)) } catch (e: Exception) { Result.failure(e) }
             a.runOnUiThread {
                 if (my != seq) return@runOnUiThread
                 loading = false; spin.visibility = View.GONE
-                r.onSuccess { got -> items.addAll(got); if (got.size < PAGE) done = true; rebuild() }
-                r.onFailure { e -> done = true; if (items.isEmpty()) { empty.text = e.message ?: "불러오지 못했습니다"; empty.visibility = View.VISIBLE } }
-                if (r.isSuccess && items.isEmpty()) { empty.text = "사진이 없습니다"; empty.visibility = View.VISIBLE }
+                r.onSuccess { got -> all.addAll(got); serverCount += got.size; if (got.size < PAGE) done = true; mergeLocal(); rebuild() }
+                r.onFailure { e -> done = true; if (all.isEmpty()) { empty.text = e.message ?: "불러오지 못했습니다"; empty.visibility = View.VISIBLE } }
+                if (r.isSuccess && all.isEmpty()) { empty.text = "사진이 없습니다"; empty.visibility = View.VISIBLE }
             }
         }
     }
 
     private fun rebuild() {
+        items = if (statusFilter == 0) ArrayList(all) else all.filter { statusOf(it) == statusFilter }
+        if (statusFilter != 0 && done) { empty.text = if (items.isEmpty()) "해당하는 사진이 없습니다" else ""; empty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE }
+        else if (statusFilter == 0 && all.isNotEmpty()) empty.visibility = View.GONE
         val out = ArrayList<Row>()
         var i = 0
         while (i < items.size) {
@@ -113,6 +156,7 @@ class PhotoGrid(
         }
         rows = out
         adapter.notifyDataSetChanged()
+        if (!done && !loading && rows.size < 40 && all.isNotEmpty()) list.post { more() }
     }
 
     // ---------- 칸 수 바꾸기 (오므리기·벌리기) ----------
@@ -150,8 +194,8 @@ class PhotoGrid(
         if (ids.all { it in selected }) selected.removeAll(ids.toSet()) else selected.addAll(ids)
         adapter.notifyDataSetChanged(); onSelect(selected.size)
     }
-    fun removeItems(ids: Set<Long>) { items.removeAll { it.id in ids }; selected.removeAll(ids); rebuild(); onSelect(selected.size) }
-    fun update(it: Item) { val i = items.indexOfFirst { x -> x.id == it.id }; if (i >= 0) { items[i] = it; adapter.notifyDataSetChanged() } }
+    fun removeItems(ids: Set<Long>) { all.removeAll { it.id in ids }; phoneOnly = phoneOnly.filter { it.id !in ids }; selected.removeAll(ids); rebuild(); onSelect(selected.size) }
+    fun update(it: Item) { val i = all.indexOfFirst { x -> x.id == it.id }; if (i >= 0) { all[i] = it; rebuild() } }
 
     // ---------- 칸 그리기 ----------
     private val adapter: BaseAdapter = object : BaseAdapter() {
@@ -193,18 +237,30 @@ class PhotoGrid(
     private fun cell(): FrameLayout = FrameLayout(a).apply {
         setBackgroundColor(ui.panel2)
         addView(ImageView(a).apply { scaleType = ImageView.ScaleType.CENTER_CROP }, LayoutParams(-1, -1))
-        addView(ImageView(a).apply { setImageDrawable(Glyph("play", Color.WHITE)); alpha = 0.95f }, LayoutParams(ui.dp(20), ui.dp(20), Gravity.TOP or Gravity.END).apply { setMargins(0, ui.dp(5), ui.dp(5), 0) })
+        // 동영상 표시: 길이 + 흰 동그라미 안의 ▶ (시놀로지 사진 앱처럼 오른쪽 위)
+        addView(LinearLayout(a).apply {
+            orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(a).apply { textSize = 12.5f; setTextColor(Color.WHITE); setShadowLayer(4f, 0f, 1f, 0xAA000000.toInt()); setPadding(0, 0, ui.dp(4), 0) })
+            addView(ImageView(a).apply { setImageDrawable(Glyph("play", 0xFF202020.toInt())); background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) }
+                val q = ui.dp(3); setPadding(q, q, q, q) }, LinearLayout.LayoutParams(ui.dp(17), ui.dp(17)))
+        }, LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { setMargins(0, ui.dp(6), ui.dp(6), 0) })
         addView(View(a), LayoutParams(-1, -1))   // 고른 칸 덮개
         addView(ImageView(a), LayoutParams(ui.dp(22), ui.dp(22), Gravity.TOP or Gravity.START).apply { setMargins(ui.dp(6), ui.dp(6), 0, 0) })
         addView(ImageView(a).apply { setImageDrawable(Glyph("heartOn", Color.WHITE)) }, LayoutParams(ui.dp(16), ui.dp(16), Gravity.BOTTOM or Gravity.START).apply { setMargins(ui.dp(5), 0, 0, ui.dp(5)) })
+        addView(StatusBadge.view(a, ui), LayoutParams(ui.dp(19), ui.dp(19), Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, ui.dp(4), ui.dp(4)) })   // 백업 상태
     }
 
     private fun bind(c: FrameLayout, it: Item, idx: Int) {
         val iv = c.getChildAt(0) as ImageView
         iv.scaleType = ImageView.ScaleType.CENTER_CROP
         // 시놀로지가 아직 썸네일을 못 만든 것: 작은 사진은 원본을 줄여 보여 주고, 그래도 안 되면 그림 표시
-        Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) Thumbs.loadFromOriginal(iv, ns, it) { o -> if (o == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } } }
-        c.getChildAt(1).visibility = if (it.video) View.VISIBLE else View.GONE
+        if (it.local != null) Thumbs.loadLocal(iv, it.local) { b -> if (b == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } }
+        else Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) Thumbs.loadFromOriginal(iv, ns, it) { o -> if (o == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } } }
+        (c.getChildAt(1) as LinearLayout).apply {
+            visibility = if (it.video) View.VISIBLE else View.GONE
+            // 칸이 좁으면(7칸 이상) 길이는 빼고 ▶ 만
+            (getChildAt(0) as TextView).apply { text = duration(it.dur); visibility = if (it.dur > 0 && cols <= 6) View.VISIBLE else View.GONE }
+        }
         val on = it.id in selected
         c.getChildAt(2).apply { visibility = if (on) View.VISIBLE else View.GONE; setBackgroundColor(0x5560CDFF) }
         (c.getChildAt(3) as ImageView).apply {
@@ -214,6 +270,7 @@ class PhotoGrid(
             val p = ui.dp(3); setPadding(p, p, p, p)
         }
         c.getChildAt(4).visibility = if (it.fav) View.VISIBLE else View.GONE
+        StatusBadge.set(c.getChildAt(5) as ImageView, if (showStatus && cols <= 6) statusOf(it) else 0)
         c.setOnClickListener { _ -> if (selecting) toggle(it) else onOpen(items, idx) }
         c.setOnLongClickListener { _ -> toggle(it); true }
     }

@@ -17,6 +17,8 @@ data class Item(
     val id: Long, val name: String, val size: Long, val time: Long,   // time: 찍은 때 (초)
     val type: String, val folderId: Long, val cacheKey: String, val unitId: Long,
     val w: Int, val h: Int, val orient: Int, val fav: Boolean, val indexed: Long = 0,   // indexed: 시놀로지에 들어온 때 (ms)
+    val dur: Long = 0,   // 동영상 길이 (ms, 모르면 0)
+    val local: String? = null,   // 휴대폰에만 있는 파일이면 그 content:// 주소 (id 는 음수)
 ) {
     val video get() = type == "video"
     val live get() = type == "live"
@@ -27,7 +29,8 @@ data class Item(
             val res = a?.optJSONObject("resolution")
             return Item(o.optLong("id"), o.optString("filename"), o.optLong("filesize"), o.optLong("time"), o.optString("type"),
                 o.optLong("folder_id"), th?.optString("cache_key") ?: "", th?.optLong("unit_id", o.optLong("id")) ?: o.optLong("id"),
-                res?.optInt("width") ?: 0, res?.optInt("height") ?: 0, a?.optInt("orientation", 1) ?: 1, a?.optBoolean("favorite") ?: false, o.optLong("indexed_time"))
+                res?.optInt("width") ?: 0, res?.optInt("height") ?: 0, a?.optInt("orientation", 1) ?: 1, a?.optBoolean("favorite") ?: false, o.optLong("indexed_time"),
+                a?.optJSONObject("video_meta")?.optLong("duration") ?: 0)
         }
     }
 }

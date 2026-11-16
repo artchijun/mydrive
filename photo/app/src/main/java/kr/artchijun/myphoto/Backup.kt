@@ -35,7 +35,7 @@ object Backup {
         var on: Boolean get() = pf.bool("bk_on", false); set(v) = pf.putBool("bk_on", v)
         /** 공유 공간 안 기기 폴더 이름 (예: JUN PHONE) */
         var root: String get() = pf.str("bk_root", ""); set(v) = pf.putStr("bk_root", v.trim().trim('/'))
-        /** 올릴 휴대폰 폴더들 (RELATIVE_PATH, 예: "DCIM/Camera/") */
+        /** 올릴 휴대폰 폴더들: "DCIM/Camera/" = 그 폴더와 아래 하위 폴더 전부, "=DCIM/" = 그 폴더에 바로 있는 파일만, "=" = 맨 위 파일 */
         var buckets: Set<String> get() = pf.str("bk_buckets", "DCIM/Camera/").split('\n').filter { it.isNotEmpty() }.toSet()
             set(v) = pf.putStr("bk_buckets", v.joinToString("\n"))
         var wifiOnly: Boolean get() = pf.bool("bk_wifi", true); set(v) = pf.putBool("bk_wifi", v)
@@ -48,13 +48,13 @@ object Backup {
     }
 
     // ---------- DB ----------
-    class Db(ctx: Context) : SQLiteOpenHelper(ctx, "backup.db", null, 2) {
+    class Db(ctx: Context) : SQLiteOpenHelper(ctx, "backup.db", null, 3) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("""CREATE TABLE media(id INTEGER PRIMARY KEY, video INTEGER, rel TEXT, name TEXT, size INTEGER, mtime INTEGER, taken INTEGER,
                 state INTEGER DEFAULT 0, tries INTEGER DEFAULT 0, err TEXT, at INTEGER DEFAULT 0)""")
             db.execSQL("CREATE INDEX media_state ON media(state, taken)")
             db.execSQL("CREATE TABLE log(t INTEGER, msg TEXT)")
-            onUpgrade(db, 1, 2)
+            onUpgrade(db, 1, 3)
         }
         // 2: 서버에서 확인한 자리 (공간 확보가 씀) — srv_folder: 공유 공간 폴더 번호, srv_at: 서버에 있음을 확인한 때
         override fun onUpgrade(db: SQLiteDatabase, o: Int, n: Int) {
@@ -62,6 +62,8 @@ object Backup {
                 db.execSQL("ALTER TABLE media ADD COLUMN srv_folder INTEGER DEFAULT 0"); db.execSQL("ALTER TABLE media ADD COLUMN srv_at INTEGER DEFAULT 0")
                 db.execSQL("UPDATE media SET state=0 WHERE state=1")   // 예전 완료는 다음 백업 때 서버 자리를 다시 확인 (이미 있으면 올리지 않고 바로 완료)
             }
+            // 3: 어떻게 끝났는지 (how: 1 올림 · 2 이미 있어 건너뜀) 와 서버 경로 — 백업 기록 화면이 보여 줌
+            if (o < 3) { db.execSQL("ALTER TABLE media ADD COLUMN how INTEGER DEFAULT 0"); db.execSQL("ALTER TABLE media ADD COLUMN srv_path TEXT") }
         }
     }
     @Volatile private var db: Db? = null
@@ -75,10 +77,20 @@ object Backup {
     fun recentLog(ctx: Context, n: Int = 60): List<Pair<Long, String>> =
         db(ctx).rawQuery("SELECT t, msg FROM log ORDER BY t DESC LIMIT $n", null).use { c -> List(c.count) { c.moveToNext(); c.getLong(0) to c.getString(1) } }
 
-    class Counts(val waiting: Int, val done: Int, val failed: Int, val waitBytes: Long)
+    class Counts(val waiting: Int, val done: Int, val failed: Int, val waitBytes: Long, val uploaded: Int = 0, val skipped: Int = 0)
     fun counts(ctx: Context): Counts = db(ctx).rawQuery(
-        "SELECT SUM(state=0), SUM(state=1), SUM(state=2), SUM(CASE WHEN state=0 THEN size ELSE 0 END) FROM media", null).use { c ->
-        c.moveToFirst(); Counts(c.getInt(0), c.getInt(1), c.getInt(2), c.getLong(3)) }
+        "SELECT SUM(state=0), SUM(state=1), SUM(state=2), SUM(CASE WHEN state=0 THEN size ELSE 0 END), SUM(state=1 AND how=1), SUM(state=1 AND how=2) FROM media", null).use { c ->
+        c.moveToFirst(); Counts(c.getInt(0), c.getInt(1), c.getInt(2), c.getLong(3), c.getInt(4), c.getInt(5)) }
+
+    /** 백업 기록 화면의 한 줄 */
+    class Entry(val key: Long, val video: Boolean, val rel: String, val name: String, val size: Long, val taken: Long, val state: Int, val how: Int, val at: Long, val srvPath: String?, val err: String?) {
+        val uri: Uri get() = ContentUris.withAppendedId(if (video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, key / 2)
+    }
+    /** state: 0 기다림(올릴 차례대로) · 1 완료(최근 것부터) · 2 실패 */
+    fun entries(ctx: Context, state: Int, limit: Int = 3000): List<Entry> =
+        db(ctx).rawQuery("SELECT id, video, rel, name, size, taken, state, how, at, srv_path, err FROM media WHERE state=$state ORDER BY " +
+            (if (state == 0) "taken DESC" else "at DESC") + " LIMIT $limit", null).use { c ->
+            List(c.count) { c.moveToNext(); Entry(c.getLong(0), c.getInt(1) == 1, c.getString(2) ?: "", c.getString(3) ?: "", c.getLong(4), c.getLong(5), c.getInt(6), c.getInt(7), c.getLong(8), c.getString(9), c.getString(10)) } }
 
     fun failures(ctx: Context): List<Pair<String, String>> =
         db(ctx).rawQuery("SELECT rel||name, err FROM media WHERE state=2 ORDER BY at DESC LIMIT 100", null).use { c -> List(c.count) { c.moveToNext(); c.getString(0) to (c.getString(1) ?: "") } }
@@ -95,6 +107,18 @@ object Backup {
         return m.entries.sortedWith(compareBy({ !it.key.startsWith("DCIM/") }, { it.key })).map { it.key to it.value }
     }
 
+    /** 고른 폴더 → MediaStore 조건 (하위 폴더 포함은 LIKE '경로%') */
+    fun bucketWhere(buckets: Set<String>): Pair<String, Array<String>> {
+        val rp = MediaStore.MediaColumns.RELATIVE_PATH
+        val parts = ArrayList<String>(); val args = ArrayList<String>()
+        for (b in buckets) when {
+            b == "=" -> parts += "($rp IS NULL OR $rp='' OR $rp='/')"
+            b.startsWith("=") -> { parts += "$rp=?"; args += b.removePrefix("=") }
+            else -> { parts += "$rp LIKE ? ESCAPE '\\'"; args += b.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%" }
+        }
+        return parts.joinToString(" OR ") to args.toTypedArray()
+    }
+
     /** 고른 폴더의 사진을 DB 와 맞춤: 새것은 '기다림'으로, 바뀐 것은 다시 '기다림'으로, 사라진 것은 지움 */
     fun scan(ctx: Context): Int {
         val st = Settings(ctx)
@@ -103,8 +127,7 @@ object Backup {
         var added = 0
         val buckets = st.buckets
         if (buckets.isEmpty()) return 0
-        val where = buckets.joinToString(" OR ") { "${MediaStore.MediaColumns.RELATIVE_PATH}=?" }
-        val args = buckets.toTypedArray()
+        val (where, args) = bucketWhere(buckets)
         val sources = arrayListOf(MediaStore.Images.Media.EXTERNAL_CONTENT_URI to 0)
         if (st.videos) sources += MediaStore.Video.Media.EXTERNAL_CONTENT_URI to 1
         d.beginTransaction()
@@ -163,7 +186,9 @@ object Backup {
     }
 
     // ---------- 올리기 ----------
-    class Progress(val done: Int, val total: Int, val name: String, val bytes: Long, val size: Long)
+    /** 지금 올리는 파일: done/total 번째, 이름, 보낸 바이트/크기, 휴대폰 번호(key), 휴대폰 폴더, 이 파일을 시작한 때(ms), 서버 폴더 */
+    class Progress(val done: Int, val total: Int, val name: String, val bytes: Long, val size: Long,
+                   val key: Long = 0, val rel: String = "", val started: Long = System.currentTimeMillis(), val target: String = "")
     private val runLock = Any()
     @Volatile var running = false; private set
     @Volatile var current: Progress? = null; private set
@@ -207,20 +232,21 @@ object Backup {
                 if (stop()) { st.lastMsg = "멈춤 — ${rows.size - n}개 남음"; return false }
                 blocker(ctx)?.let { st.lastMsg = it; log(ctx, "멈춤: $it"); return false }
                 n++
-                current = Progress(n, rows.size, r.name, 0, r.size); onProgress(current)
+                val t0 = System.currentTimeMillis()
+                val path = target(st, r.rel, r.taken)
+                current = Progress(n, rows.size, r.name, 0, r.size, r.key, r.rel, t0, path); onProgress(current)
                 try {
-                    val path = target(st, r.rel, r.taken)
                     val fid = folderIds[path] ?: ph.folderByPath(ns, path, true)!!.also { folderIds[path] = it }
                     val names = existing.getOrPut(fid) { listNames(ph, ns, fid) }
                     val have = names[r.name.lowercase()]
-                    if (have == r.size) { done(d, r.key, fid); skipped++; continue }   // 이미 있음 (같은 이름·크기) — 서버 자리도 적어 둠
+                    if (have == r.size) { done(d, r.key, fid, 2, path); skipped++; continue }   // 이미 있음 (같은 이름·크기) — 서버 자리도 적어 둠
                     // 밖(터널)에서 큰 파일은 Syno.upload 가 알아서 나눠 올림
                     val uri = ContentUris.withAppendedId(if (r.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, r.key / 2)
                     ph.syno.upload(ns, fid, r.name, r.mtime, r.size, { openOriginal(ctx, uri) },
                         duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
-                        progress = { b -> current = Progress(n, rows.size, r.name, b, r.size); onProgress(current) }, canceled = stop)
+                        progress = { b -> current = Progress(n, rows.size, r.name, b, r.size, r.key, r.rel, t0, path); onProgress(current) }, canceled = stop)
                     names[r.name.lowercase()] = r.size
-                    done(d, r.key, fid); uploaded++
+                    done(d, r.key, fid, 1, path); uploaded++
                     st.lastOk = System.currentTimeMillis()
                 } catch (e: InterruptedException) {
                     st.lastMsg = "멈춤"; return false
@@ -297,9 +323,9 @@ object Backup {
         ctx.contentResolver.openInputStream(MediaStore.setRequireOriginal(uri))!!
     } catch (e: SecurityException) { ctx.contentResolver.openInputStream(uri)!! } catch (e: UnsupportedOperationException) { ctx.contentResolver.openInputStream(uri)!! }
 
-    private fun done(d: SQLiteDatabase, key: Long, folder: Long) {
+    private fun done(d: SQLiteDatabase, key: Long, folder: Long, how: Int, path: String) {
         val now = System.currentTimeMillis()
-        d.update("media", ContentValues().apply { put("state", DONE); put("err", null as String?); put("at", now); put("srv_folder", folder); put("srv_at", now) }, "id=?", arrayOf(key.toString()))
+        d.update("media", ContentValues().apply { put("state", DONE); put("err", null as String?); put("at", now); put("srv_folder", folder); put("srv_at", now); put("how", how); put("srv_path", path) }, "id=?", arrayOf(key.toString()))
     }
     private fun fail(d: SQLiteDatabase, r: Row, err: String) {
         d.update("media", ContentValues().apply { put("state", FAIL); put("err", err); put("tries", r.tries + 1); put("at", System.currentTimeMillis()) }, "id=?", arrayOf(r.key.toString()))

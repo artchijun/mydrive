@@ -84,6 +84,16 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "heart", "heartOn" -> { path.reset(); path.moveTo(12f, 20f); path.cubicTo(5f, 15f, 3f, 12f, 3f, 8.8f); path.cubicTo(3f, 6.2f, 5f, 4.2f, 7.5f, 4.2f); path.cubicTo(9.4f, 4.2f, 11f, 5.4f, 12f, 7f); path.cubicTo(13f, 5.4f, 14.6f, 4.2f, 16.5f, 4.2f); path.cubicTo(19f, 4.2f, 21f, 6.2f, 21f, 8.8f); path.cubicTo(21f, 12f, 19f, 15f, 12f, 20f); path.close(); cv.drawPath(path, if (kind == "heartOn") f else p) }
             "play" -> { path.reset(); path.moveTo(8f, 5f); path.lineTo(19f, 12f); path.lineTo(8f, 19f); path.close(); cv.drawPath(path, f) }
             "backup" -> { path.reset(); path.moveTo(7f, 18.5f); path.lineTo(17.5f, 18.5f); path.cubicTo(19.7f, 18.5f, 21.2f, 16.9f, 21.2f, 14.9f); path.cubicTo(21.2f, 13f, 19.8f, 11.5f, 17.9f, 11.3f); path.cubicTo(17.5f, 8.4f, 15f, 6.3f, 12f, 6.3f); path.cubicTo(9.4f, 6.3f, 7.3f, 8f, 6.6f, 10.5f); path.cubicTo(4.4f, 10.9f, 2.8f, 12.6f, 2.8f, 14.6f); path.cubicTo(2.8f, 16.8f, 4.7f, 18.5f, 7f, 18.5f); cv.drawPath(path, p); ln(12f, 16f, 12f, 10.5f); poly(9.5f, 13f, 12f, 10.5f, 14.5f, 13f) }
+            // 구름 (백업 상태 표시): cloud 서버에만 · cloudok 백업됨 · cloudoff 백업 안 됨
+            "cloud", "cloudok", "cloudoff" -> {
+                path.reset(); path.moveTo(7f, 18.5f); path.lineTo(17.5f, 18.5f)
+                path.cubicTo(20.5f, 18.5f, 22f, 16f, 21.3f, 13.6f); path.cubicTo(20.7f, 11.6f, 18.8f, 10.6f, 17.2f, 10.9f)
+                path.cubicTo(16.4f, 7.6f, 13.2f, 5.6f, 10f, 6.4f); path.cubicTo(7.3f, 7.1f, 5.6f, 9.6f, 5.9f, 12.3f)
+                path.cubicTo(3.6f, 12.7f, 2.3f, 14.7f, 2.8f, 16.6f); path.cubicTo(3.3f, 17.9f, 4.8f, 18.6f, 7f, 18.5f); path.close()
+                cv.drawPath(path, p)
+                if (kind == "cloudok") poly(8.6f, 13.2f, 11f, 15.5f, 15.6f, 10.8f)
+                if (kind == "cloudoff") ln(4f, 4f, 20f, 21f)
+            }
             "folder" -> poly(3f, 18.5f, 3f, 5.5f, 9f, 5.5f, 11f, 7.5f, 21f, 7.5f, 21f, 18.5f, close = true)
             "pause" -> { ln(9f, 6f, 9f, 18f); ln(15f, 6f, 15f, 18f) }
             "warn" -> { poly(12f, 3.5f, 21f, 19.5f, 3f, 19.5f, close = true); ln(12f, 9.5f, 12f, 14f); cv.drawCircle(12f, 16.8f, 1f, f) }
@@ -160,4 +170,21 @@ class FileIcon(private val dir: Boolean, private val name: String, private val s
     override fun setAlpha(alpha: Int) { fill.alpha = alpha }
     override fun setColorFilter(cf: ColorFilter?) { fill.colorFilter = cf }
     @Deprecated("Deprecated in Java") override fun getOpacity() = PixelFormat.TRANSLUCENT
+}
+
+
+/** 사진 칸 오른쪽 아래의 백업 상태 표시 (Library.BOTH · SERVER_ONLY · PHONE_ONLY) */
+object StatusBadge {
+    fun view(ctx: android.content.Context, ui: Ui) = android.widget.ImageView(ctx).apply { val q = ui.dp(3); setPadding(q, q, q, q) }
+    fun set(iv: android.widget.ImageView, status: Int) {
+        if (status == 0) { iv.visibility = android.view.View.GONE; return }
+        iv.visibility = android.view.View.VISIBLE
+        iv.setImageDrawable(Glyph(when (status) { Library.BOTH -> "cloudok"; Library.SERVER_ONLY -> "cloud"; else -> "cloudoff" }, Color.WHITE))
+        iv.background = android.graphics.drawable.GradientDrawable().apply {
+            shape = android.graphics.drawable.GradientDrawable.OVAL
+            setColor(when (status) { Library.BOTH -> 0xCC1F8A4C.toInt(); Library.SERVER_ONLY -> 0x99000000.toInt(); else -> 0xE6E8890C.toInt() })
+        }
+    }
+    /** 설명 (색과 뜻) */
+    val legend = listOf(Library.BOTH to "백업됨 (휴대폰·서버 모두)", Library.SERVER_ONLY to "서버에만", Library.PHONE_ONLY to "백업 안 됨 (휴대폰에만)")
 }

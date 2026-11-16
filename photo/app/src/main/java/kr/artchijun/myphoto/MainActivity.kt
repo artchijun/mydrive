@@ -126,6 +126,7 @@ class MainActivity : Activity() {
     private fun grid(): PhotoGrid? = if (tab < 4) stacks[tab].lastOrNull()?.second.let { (it as? PhotoGrid) ?: (it as? GridPage)?.grid } else null
     private fun refresh() {
         val top = stacks[tab].lastOrNull() ?: return
+        (top.second as? GridPage)?.onRefresh?.invoke()   // 백업 상태도 다시 대조
         grid()?.reload() ?: run {
             stacks[tab].removeAt(stacks[tab].size - 1)
             select(tab)   // 맨 위 화면이면 다시 만들기
@@ -146,6 +147,7 @@ class MainActivity : Activity() {
 
     private fun onSel(n: Int) {
         selBar.visibility = if (n > 0) View.VISIBLE else View.GONE
+        (stacks.getOrNull(tab)?.lastOrNull()?.second as? GridPage)?.floating?.visibility = if (n > 0) View.GONE else View.VISIBLE
         selCount.text = "${n}장 고름"
     }
 
@@ -153,28 +155,74 @@ class MainActivity : Activity() {
         PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) })
 
     // ---------- 사진 (전체) ----------
-    /** 전체 사진: 위에 [일 | 월 | 년] 고르기 */
+    /** 전체 사진: 아래에 떠 있는 [연도 | 월 | 일] 고르기 (시놀로지 사진 앱처럼) */
     private fun timelinePage(): View {
         val g = photoGrid(true, emptyMap())
-        val seg = ui.row().apply { setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(4)); setBackgroundColor(ui.bg) }
-        val units = listOf("day" to "일", "month" to "월", "year" to "년")
+        val units = listOf("year" to "연도", "month" to "월", "day" to "일")
+        val on = if (ui.dark) 0xFF4A4A4A.toInt() else 0xFFDDE3EC.toInt()
+        val pill = ui.row().apply {
+            background = ui.round(if (ui.dark) 0xF2303030.toInt() else 0xF7FFFFFF.toInt(), 26, stroke = if (ui.dark) 0 else ui.line)
+            elevation = ui.dpf(8f); val q = ui.dp(5); setPadding(q, q, q, q)
+        }
         fun paint() {
-            for (k in 0 until seg.childCount) {
-                val on = units[k].first == g.unit
-                (seg.getChildAt(k) as TextView).apply {
-                    setTextColor(if (on) ui.onAccent else ui.text)
-                    background = ui.press(ui.round(if (on) ui.accent else ui.panel2, 16), 16)
+            for (k in 0 until pill.childCount) {
+                val sel = units[k].first == g.unit
+                (pill.getChildAt(k) as TextView).apply {
+                    setTextColor(if (sel) ui.text else ui.sub); typeface = if (sel) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
+                    background = if (sel) ui.round(on, 21) else ui.press(null, 21)
                 }
             }
         }
         units.forEach { (u, name) ->
-            seg.addView(ui.label(name, 14f, ui.text, bold = true).apply {
-                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(ui.dp(64), ui.dp(34)).apply { rightMargin = ui.dp(8) }
-                setOnClickListener { g.unit = u; paint() }
+            pill.addView(ui.label(name, 15f, ui.sub).apply {
+                gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(ui.dp(76), ui.dp(42))
+                setOnClickListener { if (g.unit != u) { g.unit = u; paint() } }
             })
         }
         paint()
-        return GridPage(this, ui.col(seg, g.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), g)
+        g.setBottomSpace(ui.dp(76))
+        g.mergePhone = true
+        // 위: 백업 상태로 거르기 [모두 | 백업됨 | 서버에만 | 백업 안 됨] + 대조 진행 줄
+        val chips = ui.row().apply { setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6)) }
+        val note = ui.label("", 12.5f, ui.sub).apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(6)); visibility = View.GONE }
+        val kinds = listOf(0 to "모두") + StatusBadge.legend.map { (k, _) -> k to when (k) { Library.BOTH -> "백업됨"; Library.SERVER_ONLY -> "서버에만"; else -> "백업 안 됨" } }
+        fun paintChips() {
+            for (i in 0 until chips.childCount) {
+                val sel = kinds[i].first == g.statusFilter
+                val c = chips.getChildAt(i) as LinearLayout
+                c.background = ui.press(ui.round(if (sel) ui.accent else ui.panel2, 17), 17)
+                (c.getChildAt(c.childCount - 1) as TextView).setTextColor(if (sel) ui.onAccent else ui.text)
+            }
+        }
+        kinds.forEach { (k, name) ->
+            val c = ui.row().apply { setPadding(ui.dp(if (k == 0) 14 else 8), 0, ui.dp(14), 0); minimumHeight = ui.dp(34)
+                layoutParams = LinearLayout.LayoutParams(-2, ui.dp(34)).apply { rightMargin = ui.dp(6) } }
+            if (k != 0) c.addView(StatusBadge.view(this, ui).also { StatusBadge.set(it, k) }, LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)).apply { rightMargin = ui.dp(6) })
+            c.addView(ui.label(name, 13.5f, ui.text))
+            c.setOnClickListener { g.statusFilter = k; paintChips() }
+            chips.addView(c)
+        }
+        paintChips()
+        val strip = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips); setBackgroundColor(ui.bg) }
+        loadStatus(g, note)
+        return GridPage(this, ui.col(strip, note, g.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), g, pill).apply { onRefresh = { loadStatus(g, note) } }
+    }
+
+    /** 휴대폰 목록을 읽고, 서버 목록이 없거나 12시간 넘었으면 새로 읽어 대조 → 백업 안 된 사진을 끼워 넣음 */
+    private fun loadStatus(g: PhotoGrid, note: TextView) {
+        Thread {
+            Library.phone(this, force = true)
+            runOnUiThread { g.phoneChanged(null) }
+            if (Library.stale(this, 12 * 3_600_000L)) {
+                var last = 0L
+                try { Library.refreshServer(this) { n, t ->
+                    val now = System.currentTimeMillis(); if (now - last < 500 && n < t) return@refreshServer; last = now
+                    runOnUiThread { note.visibility = View.VISIBLE; note.text = "서버와 대조하는 중  ${"%,d".format(n)} / ${"%,d".format(t)} — 끝나면 '백업 안 됨' 사진이 보입니다" }
+                } } catch (e: Exception) { runOnUiThread { note.visibility = View.VISIBLE; note.text = "서버와 대조하지 못했습니다: ${e.message}" } }
+            }
+            val only = Library.phoneOnly(this)?.map { it.toItem() }
+            runOnUiThread { if (only != null) { if (note.text.startsWith("서버와 대조하는 중")) note.visibility = View.GONE; g.phoneChanged(only) } }
+        }.start()
     }
 
     // ---------- 폴더 ----------
@@ -257,7 +305,8 @@ class MainActivity : Activity() {
     // ---------- 고른 사진 ----------
     private fun favSelected() {
         val g = grid() ?: return
-        val sel = g.selectedItems(); if (sel.isEmpty()) return
+        val sel = g.selectedItems().filter { it.local == null }
+        if (sel.isEmpty()) { Toast.makeText(this, "휴대폰에만 있는 사진은 즐겨찾기를 할 수 없습니다 (먼저 백업)", Toast.LENGTH_SHORT).show(); return }
         val on = !sel.all { it.fav }
         net.execute {
             val err = try { ph.setFavorite(ns, sel.map { it.id }, on); null } catch (e: Exception) { e.message }
@@ -271,9 +320,12 @@ class MainActivity : Activity() {
 
     private fun deleteSelected() {
         val g = grid() ?: return
-        val sel = g.selectedItems(); if (sel.isEmpty()) return
+        val all = g.selectedItems()
+        val sel = all.filter { it.local == null }   // 휴대폰에만 있는 것(백업 안 됨)은 여기서 지우지 않음
+        if (sel.isEmpty()) { Toast.makeText(this, "고른 것은 모두 휴대폰에만 있는 사진입니다 — 여기서는 지우지 않습니다", Toast.LENGTH_LONG).show(); return }
         AlertDialog.Builder(this).setTitle("${sel.size}장을 지울까요?")
-            .setMessage("시놀로지에서 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다.")
+            .setMessage("시놀로지에서 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다." +
+                (if (all.size > sel.size) "\n\n휴대폰에만 있는(백업 안 된) ${all.size - sel.size}장은 지우지 않습니다." else ""))
             .setPositiveButton("지우기") { _, _ ->
                 net.execute {
                     val err = try { sel.chunked(100).forEach { c -> ph.delete(ns, c.map { it.id }) }; null } catch (e: Exception) { e.message }
@@ -286,7 +338,11 @@ class MainActivity : Activity() {
     }
 }
 
-/** 격자를 다른 것(일·월·년 단추 등)과 함께 담은 화면 — 격자를 찾을 수 있게 */
-class GridPage(ctx: android.content.Context, content: View, val grid: PhotoGrid) : FrameLayout(ctx) {
-    init { addView(content, LayoutParams(-1, -1)) }
+/** 격자를 다른 것(아래에 떠 있는 연도·월·일 고르기 등)과 함께 담은 화면 — 격자를 찾을 수 있게 */
+class GridPage(ctx: android.content.Context, content: View, val grid: PhotoGrid, val floating: View? = null) : FrameLayout(ctx) {
+    var onRefresh: (() -> Unit)? = null
+    init {
+        addView(content, LayoutParams(-1, -1))
+        floating?.let { addView(it, LayoutParams(-2, -2, android.view.Gravity.BOTTOM or android.view.Gravity.CENTER_HORIZONTAL).apply { bottomMargin = (14 * ctx.resources.displayMetrics.density).toInt() }) }
+    }
 }

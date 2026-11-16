@@ -123,10 +123,11 @@ class ViewerActivity : Activity() {
         val my = ++seq
         val it = cur
         title.text = it.name
-        sub.text = PhotoGrid.stamp(it.time) + "  ·  " + Fmt.size(it.size) + "  ·  ${index + 1}/${items.size}"
+        sub.text = PhotoGrid.stamp(it.time) + "  ·  " + Fmt.size(it.size) + "  ·  ${index + 1}/${items.size}" + (if (it.local != null) "  ·  휴대폰에만 (백업 안 됨)" else "")
         heart.setImageDrawable(Glyph(if (it.fav) "heartOn" else "heart", Color.WHITE))
         stage.removeAllViews()
         if (it.video) { playVideo(it); return }
+        if (it.local != null) { showLocal(it, my); return }
         val zv = ZoomView(this, { d -> turn(d) }, { toggleBars() }, { loadOriginal(it, my) })
         stage.addView(zv, FrameLayout.LayoutParams(-1, -1))
         Thumbs.cached("${ViewerActivity.ns}|unit|${it.cacheKey}|sm")?.let { zv.set(BitmapDrawable(resources, it), it.width, it.height, true) }
@@ -145,6 +146,28 @@ class ViewerActivity : Activity() {
             }
         }
     }
+
+    /** 휴대폰에만 있는 사진: 휴대폰의 파일을 바로 보여 줌 */
+    private fun showLocal(it: Item, my: Int) {
+        val zv = ZoomView(this, { d -> turn(d) }, { toggleBars() }, {})
+        stage.addView(zv, FrameLayout.LayoutParams(-1, -1))
+        spin.visibility = View.VISIBLE
+        bg.execute {
+            val b = try {
+                android.graphics.ImageDecoder.decodeBitmap(android.graphics.ImageDecoder.createSource(contentResolver, Uri.parse(it.local))) { dec, info, _ ->
+                    val max = 4096; val s = maxOf(info.size.width, info.size.height)
+                    if (s > max) dec.setTargetSize(info.size.width * max / s, info.size.height * max / s)
+                    dec.allocator = android.graphics.ImageDecoder.ALLOCATOR_SOFTWARE
+                }
+            } catch (e: Exception) { null }
+            runOnUiThread {
+                if (my != seq) return@runOnUiThread
+                spin.visibility = View.GONE
+                if (b != null) zv.set(BitmapDrawable(resources, b), b.width, b.height, false) else Toast.makeText(this, "사진을 열지 못했습니다", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+    private fun localOnly(): Boolean { if (cur.local == null) return false; Toast.makeText(this, "휴대폰에만 있는 사진입니다 (아직 백업 안 됨)", Toast.LENGTH_SHORT).show(); return true }
 
     /** 크게 확대했을 때: 원본을 받아 더 선명하게 (한 번만) */
     private fun loadOriginal(it: Item, my: Int, failToast: Boolean = false) {
@@ -194,7 +217,7 @@ class ViewerActivity : Activity() {
         spin.visibility = View.VISIBLE
         val my = seq
         bg.execute {
-            val url = try { Syno(this).originalUrl(ViewerActivity.ns, it) } catch (e: Exception) { null }
+            val url = if (it.local != null) it.local else try { Syno(this).originalUrl(ViewerActivity.ns, it) } catch (e: Exception) { null }
             runOnUiThread {
                 if (my != seq) return@runOnUiThread
                 if (url == null) { spin.visibility = View.GONE; Toast.makeText(this, "동영상을 열지 못했습니다", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
@@ -216,6 +239,11 @@ class ViewerActivity : Activity() {
     // ---------- 단추 ----------
     private fun info() {
         val it = cur
+        if (it.local != null) {
+            val p = Library.phone(this).firstOrNull { x -> -x.key == it.id }
+            AlertDialog.Builder(this).setTitle("정보").setMessage("이름: ${it.name}\n찍은 때: ${PhotoGrid.stamp(it.time)}\n크기: ${Fmt.size(it.size)}\n휴대폰 폴더: ${p?.rel?.trimEnd('/') ?: "?"}\n\n서버에서 같은 사진을 찾지 못했습니다 (백업 안 됨).").setPositiveButton("닫기", null).show()
+            return
+        }
         val lines = arrayListOf("이름: ${it.name}", "찍은 때: ${PhotoGrid.stamp(it.time)}", "크기: ${Fmt.size(it.size)}" + (if (it.w > 0) "  ·  ${it.w}×${it.h}" else ""))
         val dlg = AlertDialog.Builder(this).setTitle("정보").setMessage(lines.joinToString("\n") + "\n\n더 불러오는 중…").setPositiveButton("닫기", null).show()
         bg.execute {
@@ -235,6 +263,7 @@ class ViewerActivity : Activity() {
     }
 
     private fun toggleFav() {
+        if (localOnly()) return
         val it = cur; val on = !it.fav
         bg.execute {
             val err = try { ph.setFavorite(ViewerActivity.ns, listOf(it.id), on); null } catch (e: Exception) { e.message }
@@ -248,6 +277,7 @@ class ViewerActivity : Activity() {
 
     /** 휴대폰의 사진 폴더(Pictures/Myphoto)에 원본 저장 */
     private fun save() {
+        if (localOnly()) return
         val it = cur
         Toast.makeText(this, "받는 중…", Toast.LENGTH_SHORT).show()
         bg.execute {
@@ -271,6 +301,11 @@ class ViewerActivity : Activity() {
 
     private fun share() {
         val it = cur
+        if (it.local != null) {
+            startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType(if (it.video) "video/*" else "image/*").putExtra(Intent.EXTRA_STREAM, Uri.parse(it.local))
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION), "공유"))
+            return
+        }
         Toast.makeText(this, "받는 중…", Toast.LENGTH_SHORT).show()
         bg.execute {
             val f = try { fetchOriginal(it) } catch (e: Exception) { null }
@@ -284,6 +319,7 @@ class ViewerActivity : Activity() {
     }
 
     private fun delete() {
+        if (localOnly()) return
         val it = cur
         AlertDialog.Builder(this).setTitle("지울까요?").setMessage("${it.name}\n\n시놀로지에서 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다.")
             .setPositiveButton("지우기") { _, _ ->
