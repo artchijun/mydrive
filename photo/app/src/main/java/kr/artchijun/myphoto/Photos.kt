@@ -36,6 +36,26 @@ class Photos(ctx: Context) {
         return items(syno.call("$ns.Browse.Item", "list", 4, p))
     }
 
+    /**
+     * 전체 사진의 날짜별 장수 (찍은 때 새것부터) — 사진 목록(takentime desc)과 같은 순서.
+     * 시놀로지는 하루가 크면 여러 구간(section)으로 나눠 같은 날을 여러 번 주므로 날마다 한 번만 셈
+     * → [yyyyMMdd, 장수]
+     */
+    fun timelineDays(ns: String): List<IntArray> {
+        val d = syno.call("$ns.Browse.Timeline", "get", 5, mapOf("timeline_group_unit" to "day"))
+        val out = ArrayList<IntArray>(); val seen = HashSet<Int>()
+        val secs = d.optJSONArray("section") ?: return out
+        for (i in 0 until secs.length()) {
+            val l = secs.getJSONObject(i).optJSONArray("list") ?: continue
+            for (k in 0 until l.length()) {
+                val o = l.getJSONObject(k)
+                val key = o.optInt("year") * 10000 + o.optInt("month") * 100 + o.optInt("day")
+                if (seen.add(key)) out += intArrayOf(key, o.optInt("item_count"))
+            }
+        }
+        return out
+    }
+
     /** 날짜별 장수 (시간 막대용): [(년,월,일,장수)] */
     fun timeline(ns: String): List<IntArray> {
         val d = syno.call("$ns.Browse.Timeline", "get", 5, mapOf("timeline_group_unit" to "day"))

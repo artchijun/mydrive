@@ -27,11 +27,25 @@ import java.util.concurrent.Executor
  *   두 손가락으로 오므리면/벌리면 한 줄 칸 수가 바뀜 (3~8). 길게 누르면 고르기.
  *   시놀로지의 time 은 '찍은 그 곳의 시각'을 UTC 로 적은 값이라 날짜도 UTC 로 읽음
  */
+/** 사진 격자들(PhotoGrid · TimelineGrid)이 화면에 주는 것 — 고르기·지우기·새로 고침 */
+interface PhotoView {
+    val selected: Set<Long>
+    val selecting: Boolean
+    var unit: String
+    fun clearSelection()
+    fun selectAll()
+    fun selectedItems(): List<Item>
+    fun removeItems(ids: Set<Long>)
+    fun update(it: Item)
+    fun reload()
+    fun phoneChanged(list: List<Item>?)
+}
+
 class PhotoGrid(
     private val a: Activity, private val ui: Ui, private val net: Executor, val ns: String,
     private val grouped: Boolean, private val loader: (offset: Int, limit: Int) -> List<Item>,
     private val onOpen: (List<Item>, Int) -> Unit, private val onSelect: (Int) -> Unit,
-) : FrameLayout(a) {
+) : FrameLayout(a), PhotoView {
     companion object {
         private const val PAGE = 300
         private val utc = TimeZone.getTimeZone("UTC")
@@ -64,7 +78,7 @@ class PhotoGrid(
         else -> Library.SERVER_ONLY
     }
     /** 휴대폰 목록·서버 대조가 새로 끝났을 때: 표시와 끼워 넣은 것을 다시 */
-    fun phoneChanged(list: List<Item>?) {
+    override fun phoneChanged(list: List<Item>?) {
         if (list != null) {
             val gone = list.map { it.id }.toSet()
             all.removeAll { it.local != null && it.id !in gone }; inserted.retainAll(gone)
@@ -80,14 +94,14 @@ class PhotoGrid(
         for (p in phoneOnly) if (p.time >= edge && inserted.add(p.id)) { all += p; add = true }
         if (add) all.sortWith(compareByDescending<Item> { it.time }.thenByDescending { it.id })
     }
-    val selected = LinkedHashSet<Long>()
-    val selecting get() = selected.isNotEmpty()
+    override val selected = LinkedHashSet<Long>()
+    override val selecting get() = selected.isNotEmpty()
     private class Row(val header: String?, val count: Int, val start: Int, val end: Int)
     private var rows = ArrayList<Row>()
     private val pf = Prefs(a)
     private var cols = pf.int("cols", 4)
     /** 묶음 단위 (일·월·년). 바꾸면 칸 수도 그 단위에 맞게 (일 4 · 월 5 · 년 7 기본, 오므리기로 바꾼 값은 단위별로 기억) */
-    var unit: String = pf.str("unit", "day")
+    override var unit: String = pf.str("unit", "day")
         set(v) { field = v; pf.putStr("unit", v); cols = pf.int("cols_$v", when (v) { "year" -> 7; "month" -> 5; else -> pf.int("cols", 4) }); rebuild(); list.setSelection(0) }
     /** 아래에 떠 있는 것(일·월·연도 고르기)에 가리지 않도록 목록 끝에 두는 여백 */
     fun setBottomSpace(px: Int) { list.setPadding(0, 0, 0, px) }
@@ -121,7 +135,7 @@ class PhotoGrid(
     }
 
     // ---------- 받기 ----------
-    fun reload() {
+    override fun reload() {
         seq++; all.clear(); inserted.clear(); serverCount = 0; selected.clear(); done = false; loading = false; rebuild(); onSelect(0)
         spin.visibility = View.VISIBLE; empty.visibility = View.GONE
         more()
@@ -195,9 +209,9 @@ class PhotoGrid(
     }
 
     // ---------- 고르기 ----------
-    fun clearSelection() { selected.clear(); adapter.notifyDataSetChanged(); onSelect(0) }
-    fun selectAll() { items.forEach { selected += it.id }; adapter.notifyDataSetChanged(); onSelect(selected.size) }
-    fun selectedItems(): List<Item> = items.filter { it.id in selected }
+    override fun clearSelection() { selected.clear(); adapter.notifyDataSetChanged(); onSelect(0) }
+    override fun selectAll() { items.forEach { selected += it.id }; adapter.notifyDataSetChanged(); onSelect(selected.size) }
+    override fun selectedItems(): List<Item> = items.filter { it.id in selected }
     fun toggle(it: Item) { if (!selected.remove(it.id)) selected += it.id; adapter.notifyDataSetChanged(); onSelect(selected.size) }
     /** 한 날짜 묶음 전체 고르기/풀기 */
     private fun toggleDay(r: Row) {
@@ -205,8 +219,8 @@ class PhotoGrid(
         if (ids.all { it in selected }) selected.removeAll(ids.toSet()) else selected.addAll(ids)
         adapter.notifyDataSetChanged(); onSelect(selected.size)
     }
-    fun removeItems(ids: Set<Long>) { all.removeAll { it.id in ids }; phoneOnly = phoneOnly.filter { it.id !in ids }; selected.removeAll(ids); rebuild(); onSelect(selected.size) }
-    fun update(it: Item) { val i = all.indexOfFirst { x -> x.id == it.id }; if (i >= 0) { all[i] = it; rebuild() } }
+    override fun removeItems(ids: Set<Long>) { all.removeAll { it.id in ids }; phoneOnly = phoneOnly.filter { it.id !in ids }; selected.removeAll(ids); rebuild(); onSelect(selected.size) }
+    override fun update(it: Item) { val i = all.indexOfFirst { x -> x.id == it.id }; if (i >= 0) { all[i] = it; rebuild() } }
 
     // ---------- 칸 그리기 ----------
     // ---------- 스크롤 막대의 날짜 ----------

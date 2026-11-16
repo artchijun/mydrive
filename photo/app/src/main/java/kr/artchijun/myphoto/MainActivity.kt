@@ -77,7 +77,8 @@ class MainActivity : Activity() {
         setContentView(root)
         select(0)
         BackupSchedule.schedule(this)
-        Update.checkOnStart(this)   // 하루 두 번까지 새 판 확인 → 있으면 앱 안에서 받아 설치
+        Update.checkOnStart(this)
+   // 하루 두 번까지 새 판 확인 → 있으면 앱 안에서 받아 설치
     }
 
     override fun onResume() {
@@ -124,7 +125,7 @@ class MainActivity : Activity() {
         topBar.findViewWithTag<View>("back").visibility = if (stacks[tab].size > 1) View.VISIBLE else View.GONE
         onSel(grid()?.selected?.size ?: 0)
     }
-    private fun grid(): PhotoGrid? = if (tab < 4) stacks[tab].lastOrNull()?.second.let { (it as? PhotoGrid) ?: (it as? GridPage)?.grid } else null
+    private fun grid(): PhotoView? = if (tab < 4) stacks[tab].lastOrNull()?.second.let { (it as? PhotoView) ?: (it as? GridPage)?.grid } else null
     private fun refresh() {
         val top = stacks[tab].lastOrNull() ?: return
         (top.second as? GridPage)?.onRefresh?.invoke()   // 백업 상태도 다시 대조
@@ -156,40 +157,43 @@ class MainActivity : Activity() {
         PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) })
 
     // ---------- 사진 (전체) ----------
-    /** 전체 사진: 아래에 떠 있는 [연도 | 월 | 일] 고르기 (시놀로지 사진 앱처럼) */
+    /** 전체 사진: 시놀로지 사진 앱처럼 날짜별 장수를 먼저 받아 전체 자리를 잡아 둔 격자(오른쪽 막대로 어느 해든 바로) +
+     *  아래에 떠 있는 [연도 | 월 | 일] 고르기. 위의 백업 상태 칩을 고르면 그 상태만 모아 보는 격자로 바뀜 */
     private fun timelinePage(): View {
-        val g = photoGrid(true, emptyMap())
         val units = listOf("year" to "연도", "month" to "월", "day" to "일")
         val on = if (ui.dark) 0xFF4A4A4A.toInt() else 0xFFDDE3EC.toInt()
         val pill = ui.row().apply {
             background = ui.round(if (ui.dark) 0xF2303030.toInt() else 0xF7FFFFFF.toInt(), 26, stroke = if (ui.dark) 0 else ui.line)
             elevation = ui.dpf(8f); val q = ui.dp(5); setPadding(q, q, q, q)
         }
+        lateinit var page: GridPage
         fun paint() {
             for (k in 0 until pill.childCount) {
-                val sel = units[k].first == g.unit
+                val sel = units[k].first == page.grid.unit
                 (pill.getChildAt(k) as TextView).apply {
                     setTextColor(if (sel) ui.text else ui.sub); typeface = if (sel) android.graphics.Typeface.DEFAULT_BOLD else android.graphics.Typeface.DEFAULT
                     background = if (sel) ui.round(on, 21) else ui.press(null, 21)
                 }
             }
         }
+        val tg = TimelineGrid(this, ui, net, ns, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }, { paint() })
+        tg.setBottomSpace(ui.dp(76))
+        var filtered: PhotoGrid? = null   // 백업 상태로 거른 격자 (칩을 고를 때 만듦)
+        val holder = FrameLayout(this).apply { addView(tg, FrameLayout.LayoutParams(-1, -1)) }
         units.forEach { (u, name) ->
             pill.addView(ui.label(name, 15f, ui.sub).apply {
                 gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(ui.dp(76), ui.dp(42))
-                setOnClickListener { if (g.unit != u) { g.unit = u; paint() } }
+                setOnClickListener { if (page.grid.unit != u) { page.grid.unit = u; paint() } }
             })
         }
-        paint()
-        g.setBottomSpace(ui.dp(76))
-        g.mergePhone = true
         // 위: 백업 상태로 거르기 [모두 | 백업됨 | 서버에만 | 백업 안 됨] + 대조 진행 줄
         val chips = ui.row().apply { setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6)) }
         val note = ui.label("", 12.5f, ui.sub).apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(6)); visibility = View.GONE }
         val kinds = listOf(0 to "모두") + StatusBadge.legend.map { (k, _) -> k to when (k) { Library.BOTH -> "백업됨"; Library.SERVER_ONLY -> "서버에만"; else -> "백업 안 됨" } }
+        var status = 0
         fun paintChips() {
             for (i in 0 until chips.childCount) {
-                val sel = kinds[i].first == g.statusFilter
+                val sel = kinds[i].first == status
                 val c = chips.getChildAt(i) as LinearLayout
                 c.background = ui.press(ui.round(if (sel) ui.accent else ui.panel2, 17), 17)
                 (c.getChildAt(c.childCount - 1) as TextView).setTextColor(if (sel) ui.onAccent else ui.text)
@@ -200,20 +204,36 @@ class MainActivity : Activity() {
                 layoutParams = LinearLayout.LayoutParams(-2, ui.dp(34)).apply { rightMargin = ui.dp(6) } }
             if (k != 0) c.addView(StatusBadge.view(this, ui).also { StatusBadge.set(it, k) }, LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)).apply { rightMargin = ui.dp(6) })
             c.addView(ui.label(name, 13.5f, ui.text))
-            c.setOnClickListener { g.statusFilter = k; paintChips() }
+            c.setOnClickListener {
+                if (status == k) return@setOnClickListener
+                page.grid.clearSelection(); status = k; paintChips()
+                holder.removeAllViews()
+                if (k == 0) { holder.addView(tg, FrameLayout.LayoutParams(-1, -1)); page.grid = tg }
+                else {
+                    val g = filtered ?: photoGrid(true, emptyMap()).apply { mergePhone = true; setBottomSpace(ui.dp(76))
+                        net.execute { val l = Library.phoneOnly(this@MainActivity)?.map { it.toItem() }; runOnUiThread { phoneChanged(l) } } }.also { filtered = it }
+                    g.statusFilter = k; g.unit = tg.unit
+                    holder.addView(g, FrameLayout.LayoutParams(-1, -1)); page.grid = g
+                }
+                paint()
+            }
             chips.addView(c)
         }
         paintChips()
         val strip = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips); setBackgroundColor(ui.bg) }
-        loadStatus(g, note)
-        return GridPage(this, ui.col(strip, note, g.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), g, pill).apply { onRefresh = { loadStatus(g, note) } }
+        page = GridPage(this, ui.col(strip, note, holder.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), tg, pill)
+        paint()
+        val views = { listOfNotNull<PhotoView>(tg, filtered) }
+        loadStatus(views, note)
+        page.onRefresh = { loadStatus(views, note) }
+        return page
     }
 
     /** 휴대폰 목록을 읽고, 서버 목록이 없거나 12시간 넘었으면 새로 읽어 대조 → 백업 안 된 사진을 끼워 넣음 */
-    private fun loadStatus(g: PhotoGrid, note: TextView) {
+    private fun loadStatus(views: () -> List<PhotoView>, note: TextView) {
         Thread {
             Library.phone(this, force = true)
-            runOnUiThread { g.phoneChanged(null) }
+            runOnUiThread { views().forEach { it.phoneChanged(null) } }
             // 백업 폴더(올릴 곳)만 읽어 대조 — 빠름. 서버 전체는 공간 확보에서 넓혀 볼 때만 읽음 (읽어 둔 것이 있으면 함께 씀)
             if (Library.backupRoot(this).isNotEmpty() && Library.stale(this, 12 * 3_600_000L, Library.BACKUP)) {
                 var last = 0L
@@ -223,7 +243,7 @@ class MainActivity : Activity() {
                 } } catch (e: Exception) { runOnUiThread { note.visibility = View.VISIBLE; note.text = "백업 폴더와 대조하지 못했습니다: ${e.message}" } }
             }
             val only = Library.phoneOnly(this)?.map { it.toItem() }
-            runOnUiThread { if (only != null) { if (note.text.startsWith("백업 폴더와 대조하는 중")) note.visibility = View.GONE; g.phoneChanged(only) } }
+            runOnUiThread { if (only != null) { if (note.text.startsWith("백업 폴더와 대조하는 중")) note.visibility = View.GONE; views().forEach { it.phoneChanged(only) } } }
         }.start()
     }
 
@@ -380,7 +400,7 @@ class MainActivity : Activity() {
 }
 
 /** 격자를 다른 것(아래에 떠 있는 연도·월·일 고르기 등)과 함께 담은 화면 — 격자를 찾을 수 있게 */
-class GridPage(ctx: android.content.Context, content: View, val grid: PhotoGrid, val floating: View? = null) : FrameLayout(ctx) {
+class GridPage(ctx: android.content.Context, content: View, var grid: PhotoView, val floating: View? = null) : FrameLayout(ctx) {
     var onRefresh: (() -> Unit)? = null
     init {
         addView(content, LayoutParams(-1, -1))
