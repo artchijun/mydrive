@@ -234,7 +234,7 @@ func hAdminInfo(w http.ResponseWriter, r *http.Request) {
 	verMu.Unlock()
 	writeJSON(w, r, map[string]any{
 		"version": version, "started": started.UnixNano(), "nasBase": nasBase,
-		"roots": ris, "policy": pol, "clients": cs, "log": srvLog.Tail(200),
+		"roots": ris, "policy": pol, "clients": cs, "log": srvLog.Tail(200), "adding": addingList(),
 	})
 }
 
@@ -306,20 +306,57 @@ func addRoot(name, dir string) error {
 		}
 	}
 	rootsMu.RUnlock()
-	rt, err := OpenRoot(name, d, stateDir)
-	if err != nil {
-		return err
+	addingMu.Lock()
+	for n, ad := range adding {
+		if n == name || ad == d || strings.HasPrefix(ad, d+"/") || strings.HasPrefix(d, ad+"/") {
+			addingMu.Unlock()
+			return errors.New("'" + n + "' 를 추가하는 중 — 끝난 뒤에 다시")
+		}
 	}
-	rootsMu.Lock()
-	roots[name] = rt
-	rootsMu.Unlock()
-	rt.Save()
+	adding[name] = d
+	addingMu.Unlock()
+	// 큰 폴더(USB 디스크 등)는 전체 목록을 만드는 데 몇 분 걸릴 수 있음 → 뒤에서 하고 바로 답함 (관리 콘솔이 기다리다 끊기지 않게)
 	cfgMu.Lock()
 	srvCfg.Roots = append(srvCfg.Roots, RootCfg{name, d})
 	cfgMu.Unlock()
-	log.Printf("공유 폴더 추가: %s = %s", name, d)
-	return saveCfg()
+	if err := saveCfg(); err != nil {
+		addingMu.Lock()
+		delete(adding, name)
+		addingMu.Unlock()
+		return err
+	}
+	log.Printf("공유 폴더 추가: %s = %s (목록 만드는 중)", name, d)
+	go func() {
+		defer func() { addingMu.Lock(); delete(adding, name); addingMu.Unlock() }()
+		rt, err := OpenRoot(name, d, stateDir)
+		if err != nil {
+			log.Printf("[%s] 공유 폴더 추가 실패: %v", name, err)
+			cfgMu.Lock()
+			keep := srvCfg.Roots[:0]
+			for _, rc := range srvCfg.Roots {
+				if rc.Name != name {
+					keep = append(keep, rc)
+				}
+			}
+			srvCfg.Roots = keep
+			cfgMu.Unlock()
+			saveCfg()
+			return
+		}
+		rootsMu.Lock()
+		roots[name] = rt
+		rootsMu.Unlock()
+		rt.Save()
+		log.Printf("[%s] 공유 폴더 준비됨", name)
+	}()
+	return nil
 }
+
+// 추가하는 중인 동기화 폴더 (이름 → 폴더)
+var (
+	adding   = map[string]string{}
+	addingMu sync.Mutex
+)
 
 func removeRoot(name string) error {
 	rootsMu.Lock()
@@ -421,4 +458,15 @@ func hAdminToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, r, map[string]any{"ok": true, "token": nt})
+}
+
+func addingList() []RootCfg {
+	addingMu.Lock()
+	defer addingMu.Unlock()
+	out := []RootCfg{}
+	for n, d := range adding {
+		out = append(out, RootCfg{n, d})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }

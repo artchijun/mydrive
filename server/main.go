@@ -127,6 +127,7 @@ func main() {
 	mux.HandleFunc("/v1/admin/activity", adminAuth(hAdminActivity))
 	mux.HandleFunc("/v1/admin/browse", adminAuth(hAdminBrowse))
 	mux.HandleFunc("/v1/admin/roots", adminAuth(hAdminRoots))
+	mux.HandleFunc("/v1/admin/webs", adminAuth(hWebs))       // 웹 폴더 (관리 콘솔)
 	mux.HandleFunc("/v1/admin/policy", adminAuth(hAdminPolicy))
 	mux.HandleFunc("/v1/admin/token", adminAuth(hAdminToken))
 	mux.HandleFunc("/v1/admin/devices", adminAuth(hAdminDevices))

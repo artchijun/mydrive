@@ -27,7 +27,7 @@ namespace md {
 
 namespace {
 struct Ent { bool d = false; int64_t s = 0, m = 0; uint64_t i = 0; };
-struct Node { Ent e; std::set<std::string> kids; };
+struct Node { Ent e; std::set<std::string> kids; uint64_t loadedAt = 0; };   // loadedAt: 웹 폴더(나중에 읽기)에서 이 폴더 목록을 받은 때 (0 = 아직)
 
 std::string Rel(PCWSTR fn) {   // L"\\가\\나.txt" → "가/나.txt"
     std::wstring w = fn ? fn : L"";
@@ -111,8 +111,12 @@ struct WebDrive::Impl {
     std::vector<std::shared_ptr<FileObj>> pending;      // 닫았는데 아직 못 올린 파일 (다시 시도)
     PSECURITY_DESCRIPTOR sd = nullptr; ULONG sdLen = 0;
     std::atomic<uint64_t> tmpSeq{0};
+    // 웹 폴더 (서버의 root 가 ~이름): 서버에 전체 목록·변경 기록이 없음 → 폴더를 열 때 그 폴더만 받음 (잠깐 기억)
+    bool lazy = false;
+    static constexpr uint64_t kFresh = 15000;   // 받은 목록을 믿는 시간 (ms)
 
     Impl(WebDriveCfg cfg, WebDrive* o) : c(std::move(cfg)), owner(o), http(c.serverUrl, c.token), poll(c.serverUrl, c.token), up(c.serverUrl, c.token) {
+        lazy = !c.name.empty() && c.name[0] == '~';
         ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)", SDDL_REVISION_1, &sd, &sdLen);
         nodes[""].e.d = true;
         CreateDirectoryW(c.cacheDir.c_str(), nullptr);
@@ -179,6 +183,67 @@ struct WebDrive::Impl {
         std::string par;
         return ResolveLocked(Parent(rel), &par) ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_OBJECT_PATH_NOT_FOUND;
     }
+    // ---------- 웹 폴더: 폴더 하나의 목록 받기 ----------
+    bool LoadDir(const std::string& dir) {
+        Resp r = http.Req(L"GET", "/v1/list", {{"root", c.name}, {"path", dir}}, nullptr, 60);
+        if (!r.ok()) { if (r.status == 0) online = false; return false; }
+        json j = json::parse(r.body, nullptr, false);
+        if (j.is_discarded() || !j["entries"].is_array()) return false;
+        online = true;
+        std::vector<std::pair<std::string, Ent>> es;
+        for (auto& x : j["entries"]) {
+            std::string n = Leaf(x.value("p", std::string()));
+            if (n.empty()) continue;
+            std::string p = Join(dir, n);
+            if (!Hidden(p)) es.push_back({p, FromJ(x)});
+        }
+        std::set<std::string> openNew;   // 막 만들어 아직 올리지 않은 파일은 목록에 없어도 남김
+        { std::lock_guard<std::mutex> g(omu); for (auto& [k, fo] : open) if (fo->isNew && Parent(k) == dir) openNew.insert(Leaf(k)); }
+        std::unique_lock<std::shared_mutex> g(tmu);
+        auto it = nodes.find(dir);
+        if (it == nodes.end()) { Ent de; de.d = true; PutLocked(dir, de); it = nodes.find(dir); }
+        std::set<std::string> now;
+        for (auto& [p, e] : es) now.insert(Leaf(p));
+        std::vector<std::string> gone;
+        for (auto& k : it->second.kids) if (!now.count(k) && !openNew.count(k)) gone.push_back(k);
+        for (auto& k : gone) DelLocked(Join(dir, k));
+        for (auto& [p, e] : es) {
+            auto ci = nodes.find(p);
+            if (ci != nodes.end() && ci->second.e.d && !e.d) { ci->second.kids.clear(); ci->second.loadedAt = 0; }
+            PutLocked(p, e);
+        }
+        nodes[dir].loadedAt = GetTickCount64();
+        return true;
+    }
+    bool StaleLocked(const std::string& dir) {
+        auto it = nodes.find(dir);
+        return it != nodes.end() && it->second.e.d && (it->second.loadedAt == 0 || GetTickCount64() - it->second.loadedAt > kFresh);
+    }
+    // rel 까지 가는 길의 폴더 목록을 받아 둠 (self = rel 이 폴더면 그 안도). 동기화 폴더면 할 일 없음
+    void Ensure(const std::string& rel, bool self) {
+        if (!lazy) return;
+        std::string cur;
+        for (size_t i = 0;;) {
+            bool stale; { std::shared_lock<std::shared_mutex> g(tmu); stale = StaleLocked(cur); }
+            bool last = i >= rel.size();
+            if (stale && (!last || self || cur.empty())) LoadDir(cur);
+            if (last) return;
+            size_t j = rel.find('/', i); if (j == std::string::npos) j = rel.size();
+            std::string comp = rel.substr(i, j - i), hit;
+            {
+                std::shared_lock<std::shared_mutex> g(tmu);
+                auto it = nodes.find(cur);
+                if (it == nodes.end()) return;
+                if (it->second.kids.count(comp)) hit = comp;
+                else for (auto& k : it->second.kids) if (EqNoCase(k, comp)) { hit = k; break; }
+                if (hit.empty()) return;
+                cur = Join(cur, hit);
+                if (!nodes[cur].e.d) return;
+            }
+            i = j + 1;
+        }
+    }
+
     // 옮기기·이름 바꾸기: 아래 항목까지 새 이름으로
     void MoveTree(const std::string& from, const std::string& to) {
         std::unique_lock<std::shared_mutex> g(tmu);
@@ -291,11 +356,12 @@ struct WebDrive::Impl {
         Fill(e, fi);
     }
     void SpaceRefresh() {
-        Resp r = http.Req(L"GET", "/v1/roots", {}, nullptr, 20);
+        Resp r = http.Req(L"GET", lazy ? "/v1/webs" : "/v1/roots", {}, nullptr, 20);
         if (!r.ok()) return;
         json j = json::parse(r.body, nullptr, false);
         if (!j.is_array()) return;
-        for (auto& x : j) if (x.value("name", std::string()) == c.name) { total = x.value("total", (uint64_t)0); freeB = x.value("free", (uint64_t)0); }
+        std::string me = lazy ? c.name.substr(1) : c.name;
+        for (auto& x : j) if (x.value("name", std::string()) == me) { total = x.value("total", (uint64_t)0); freeB = x.value("free", (uint64_t)0); }
     }
 
     // ---------- 목록 받기 · 변경 기다리기 ----------
@@ -385,7 +451,7 @@ struct WebDrive::Impl {
         uint64_t spaceAt = 0;
         while (!stop) {
             if (!loaded) {
-                if (!LoadSnapshot()) {
+                if (!(lazy ? LoadDir("") : LoadSnapshot())) {
                     online = false;
                     if (fail++ == 0) Ev("웹드라이브 연결 안 됨", c.name, "NAS 목록을 받지 못함 — 잠시 뒤 다시");
                     WaitForSingleObject(wake, 10000);
@@ -404,7 +470,8 @@ struct WebDrive::Impl {
                 Ev("🔗 웹드라이브 붙임", c.name, U(c.mount));
             }
             if (GetTickCount64() > spaceAt) { SpaceRefresh(); spaceAt = GetTickCount64() + 300000; }
-            PollOnce();
+            if (lazy) WaitForSingleObject(wake, 30000);   // 웹 폴더: 변경 기록 없음 (폴더를 열 때 새로 받음)
+            else PollOnce();
             if (!stop) RetryPending();
         }
     }
@@ -420,7 +487,7 @@ static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* fs, FSP_FSCTL_VOLUME_INFO* vi) {
     uint64_t t = d->total, f = d->freeB;
     vi->TotalSize = t ? t : (1ULL << 44);
     vi->FreeSize = t ? f : (1ULL << 43);
-    std::wstring l = W(d->c.name);
+    std::wstring l = W(d->lazy ? d->c.name.substr(1) : d->c.name);
     size_t n = std::min<size_t>(l.size(), 31);
     memcpy(vi->VolumeLabel, l.c_str(), n * sizeof(WCHAR));
     vi->VolumeLabelLength = (UINT16)(n * sizeof(WCHAR));
@@ -430,6 +497,7 @@ static NTSTATUS GetVolumeInfo(FSP_FILE_SYSTEM* fs, FSP_FSCTL_VOLUME_INFO* vi) {
 static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* fs, PWSTR fn, PUINT32 pAttr, PSECURITY_DESCRIPTOR sd, SIZE_T* pSd) {
     auto* d = I(fs);
     std::string rel = Rel(fn), p; Ent e;
+    d->Ensure(rel, false);
     if (!d->Lookup(rel, &p, &e)) return d->NotFound(rel);
     if (pAttr) *pAttr = e.d ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE;
     if (pSd) {
@@ -443,6 +511,7 @@ static NTSTATUS GetSecurityByName(FSP_FILE_SYSTEM* fs, PWSTR fn, PUINT32 pAttr, 
 static NTSTATUS Create(FSP_FILE_SYSTEM* fs, PWSTR fn, UINT32 co, UINT32, UINT32, PSECURITY_DESCRIPTOR, UINT64, PVOID* pctx, FSP_FSCTL_FILE_INFO* fi) {
     auto* d = I(fs);
     std::string rel = Rel(fn), par;
+    d->Ensure(Parent(rel), true);
     {
         std::shared_lock<std::shared_mutex> g(d->tmu);
         std::string x;
@@ -477,6 +546,7 @@ static NTSTATUS Create(FSP_FILE_SYSTEM* fs, PWSTR fn, UINT32 co, UINT32, UINT32,
 static NTSTATUS Open(FSP_FILE_SYSTEM* fs, PWSTR fn, UINT32, UINT32, PVOID* pctx, FSP_FSCTL_FILE_INFO* fi) {
     auto* d = I(fs);
     std::string rel = Rel(fn), p; Ent e;
+    d->Ensure(rel, false);
     if (!d->Lookup(rel, &p, &e)) return d->NotFound(rel);
     auto fo = d->Acquire(p, e);
     *pctx = new Handle{fo};
@@ -615,6 +685,7 @@ static NTSTATUS SetFileSize(FSP_FILE_SYSTEM* fs, PVOID ctx, UINT64 ns, BOOLEAN a
 static NTSTATUS CanDelete(FSP_FILE_SYSTEM* fs, PVOID ctx, PWSTR) {
     auto* d = I(fs); auto fo = H(ctx)->fo;
     if (!fo->dir) return STATUS_SUCCESS;
+    if (d->lazy) d->LoadDir(fo->path);   // 안이 비었는지 NAS 에서 확인
     std::shared_lock<std::shared_mutex> g(d->tmu);
     auto it = d->nodes.find(fo->path);
     return it != d->nodes.end() && !it->second.kids.empty() ? STATUS_DIRECTORY_NOT_EMPTY : STATUS_SUCCESS;
@@ -623,6 +694,7 @@ static NTSTATUS CanDelete(FSP_FILE_SYSTEM* fs, PVOID ctx, PWSTR) {
 static NTSTATUS Rename(FSP_FILE_SYSTEM* fs, PVOID ctx, PWSTR, PWSTR newFn, BOOLEAN replace) {
     auto* d = I(fs); auto fo = H(ctx)->fo;
     std::string src = fo->path, nrel = Rel(newFn), npar, dst, exists;
+    d->Ensure(Parent(nrel), true);
     {
         std::shared_lock<std::shared_mutex> g(d->tmu);
         if (!d->ResolveLocked(Parent(nrel), &npar)) return STATUS_OBJECT_PATH_NOT_FOUND;
@@ -675,6 +747,7 @@ static bool AddDir(WebDrive::Impl* d, PVOID* buf, const std::string& name, const
 static NTSTATUS ReadDirectory(FSP_FILE_SYSTEM* fs, PVOID ctx, PWSTR, PWSTR marker, PVOID buf, ULONG len, PULONG pn) {
     auto* d = I(fs); auto* h = H(ctx);
     NTSTATUS res = STATUS_SUCCESS;
+    if (d->lazy && marker == nullptr) { bool st; { std::shared_lock<std::shared_mutex> g(d->tmu); st = d->StaleLocked(h->fo->path); } if (st) d->LoadDir(h->fo->path); }
     if (FspFileSystemAcquireDirectoryBuffer(&h->dirBuf, marker == nullptr, &res)) {
         std::vector<std::pair<std::string, Ent>> list;
         Ent self; self.d = true;
@@ -700,6 +773,7 @@ static NTSTATUS GetDirInfoByName(FSP_FILE_SYSTEM* fs, PVOID ctx, PWSTR fn, FSP_F
     auto* d = I(fs); auto fo = H(ctx)->fo;
     std::string want = U(fn ? fn : L""), hit;
     Ent e;
+    if (d->lazy) { bool st; { std::shared_lock<std::shared_mutex> g(d->tmu); st = d->StaleLocked(fo->path); } if (st) d->LoadDir(fo->path); }
     {
         std::shared_lock<std::shared_mutex> g(d->tmu);
         auto it = d->nodes.find(fo->path);
@@ -770,7 +844,7 @@ bool WebDrive::Impl::Mount(std::string* err) {
     vp.UmFileContextIsUserContext2 = 1;
     wcscpy_s(vp.FileSystemName, L"Mydrive");
     if (letter) {   // 드라이브 문자: 네트워크 드라이브로 (탐색기 '네트워크 위치'에 \\mydrive\이름 으로 보임)
-        std::wstring pre = L"\\mydrive\\" + W(c.name);
+        std::wstring pre = L"\\mydrive\\" + W(lazy ? c.name.substr(1) : c.name);
         wcsncpy_s(vp.Prefix, pre.c_str(), _TRUNCATE);
     }
     FSP_FILE_SYSTEM* f = nullptr;

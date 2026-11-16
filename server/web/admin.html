@@ -113,7 +113,7 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
     <div class="brand"><div class="logo">{{SYNC}}</div><div><b>Mydrive</b><span id="ver">관리 콘솔</span></div></div>
     <button class="nav on" data-p="over">{{HOME}}개요</button>
     <button class="nav" data-p="act">{{ACT}}동기화 기록</button>
-    <button class="nav" data-p="roots">{{FOLDER}}동기화 폴더</button>
+    <button class="nav" data-p="roots">{{FOLDER}}NAS 폴더</button>
     <button class="nav" data-p="ver">{{HIST}}버전 보관</button>
     <button class="nav" data-p="pcs">{{PC}}접속한 PC</button>
     <button class="nav" data-p="log">{{LOG}}서버 기록</button>
@@ -146,8 +146,10 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
     </section>
 
     <section id="p-roots" style="display:none">
-      <h1>동기화 폴더</h1><p class="lead">PC 앱이 맞출 수 있는 NAS 폴더입니다. 빼도 NAS의 파일은 그대로 남습니다.</p>
+      <h1>동기화 폴더</h1><p class="lead">PC 앱이 맞출 수 있는 NAS 폴더입니다. PC 에 파일을 두고 늘 같게 맞춥니다. 빼도 NAS의 파일은 그대로 남습니다.</p>
       <div class="panel"><h2>목록<span class="sp"></span><button class="btn pri sm" id="addBtn">+ 폴더 추가</button></h2><table id="rootsFull"></table></div>
+      <h1 style="margin-top:28px">웹 폴더</h1><p class="lead">동기화하지 않고 필요할 때만 여는 NAS 폴더입니다. USB 디스크(ELEMENTS)나 NAS 전체도 고를 수 있습니다. PC 앱에서는 웹드라이브로 붙이고, 휴대폰 앱에서는 홈의 NAS 섹션에 나옵니다. 목록을 미리 만들지 않아 NAS 가 무겁지 않습니다.</p>
+      <div class="panel"><h2>목록<span class="sp"></span><button class="btn pri sm" id="addWebBtn">+ 웹 폴더 추가</button></h2><table id="websFull"></table></div>
     </section>
 
     <section id="p-ver" style="display:none">
@@ -198,7 +200,7 @@ input:focus { outline: 2px solid #3b5f99; border-color: transparent; }
 </div>
 
 <div id="mAdd" class="modal"><div class="dlg">
-  <h3>동기화 폴더 추가</h3>
+  <h3 id="addTitle">동기화 폴더 추가</h3>
   <div class="body">
     <div class="crumb" id="crumb"></div>
     <div class="dirs" id="dirs"></div>
@@ -230,7 +232,7 @@ const PROXY = /\.cgi$/.test(location.pathname) ? location.pathname + '?u=' : '';
 const U = (p) => PROXY ? PROXY + encodeURIComponent(p) : p;
 let TOKEN = '';
 try { TOKEN = localStorage.getItem('mdAdmin') || ''; } catch (e) {}
-let INFO = null, browsePath = '', browseBase = '';
+let INFO = null, browsePath = '', browseBase = '', addMode = 'sync';
 
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function size(b) { const u = ['B','KB','MB','GB','TB']; let i = 0; b = Number(b) || 0; while (b >= 1024 && i < 4) { b /= 1024; i++; } return (i ? b.toFixed(b < 10 ? 1 : 0) : b) + ' ' + u[i]; }
@@ -293,7 +295,7 @@ function show(p) {
   document.querySelectorAll('.nav[data-p]').forEach(b => b.classList.toggle('on', b.dataset.p === p));
   document.querySelectorAll('main > section').forEach(s => s.style.display = s.id === 'p-' + p ? '' : 'none');
 }
-document.querySelectorAll('.nav[data-p]').forEach(b => b.onclick = () => { show(b.dataset.p); if (b.dataset.p === 'act') loadAct(false); });
+document.querySelectorAll('.nav[data-p]').forEach(b => b.onclick = () => { show(b.dataset.p); if (b.dataset.p === 'act') loadAct(false); if (b.dataset.p === 'roots') loadWebs(); });
 document.querySelectorAll('[data-go]').forEach(b => b.onclick = () => show(b.dataset.go));
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).classList.remove('on'));
 
@@ -353,7 +355,8 @@ function render() {
   const head = (full) => `<tr><th>이름 / NAS 폴더</th><th>항목</th><th>버전</th>${full ? '<th></th>' : ''}</tr>`;
   const row = (r, full) => `<tr><td><b>${esc(r.name)}</b><div class="sub">${esc(r.dir)}</div></td><td>${r.items.toLocaleString()}개</td><td>${size(r.verBytes)} <span class="sub">(${r.verFiles.toLocaleString()}개)</span></td>${full ? `<td style="text-align:right"><button class="btn sm danger" data-rm="${esc(r.name)}">빼기</button></td>` : ''}</tr>`;
   $('rootsMini').innerHTML = i.roots.length ? head(false) + i.roots.map(r => row(r, false)).join('') : '<tr><td class="empty">아직 없습니다</td></tr>';
-  $('rootsFull').innerHTML = i.roots.length ? head(true) + i.roots.map(r => row(r, true)).join('') : '<tr><td class="empty">아직 없습니다. [+ 폴더 추가]로 NAS 폴더를 고르세요.</td></tr>';
+  const addingRows = (i.adding || []).map(a => `<tr><td><b>${esc(a.name)}</b><div class="sub">${esc(a.dir)}</div></td><td colspan="3" class="sub">목록 만드는 중… (큰 폴더는 몇 분)</td></tr>`).join('');
+  $('rootsFull').innerHTML = (i.roots.length || addingRows) ? head(true) + i.roots.map(r => row(r, true)).join('') + addingRows : '<tr><td class="empty">아직 없습니다. [+ 폴더 추가]로 NAS 폴더를 고르세요.</td></tr>';
   $('verUse').innerHTML = head(false) + i.roots.map(r => row(r, false)).join('');
   document.querySelectorAll('[data-rm]').forEach(b => b.onclick = () => removeRoot(b.dataset.rm));
   const pcRow = c => `<tr><td><span class="dot ${Date.now() - c.last / 1e6 < 60000 ? '' : 'old'}"></span><b>${esc(c.pc)}</b></td><td class="sub">${esc(c.ip)}</td><td>${ago(c.last)}</td><td class="sub">요청 ${c.calls.toLocaleString()}번</td></tr>`;
@@ -392,15 +395,38 @@ async function browse(p) {
     $('crumb').innerHTML = crumbs.join(' / ');
     $('dirs').innerHTML = j.dirs.length ? j.dirs.map(d => `<div data-b="${esc(j.path + '/' + d)}">${ICON_FOLDER}${esc(d)}</div>`).join('') : '<div style="cursor:default;color:var(--muted)">하위 폴더 없음</div>';
     document.querySelectorAll('#crumb [data-b], #dirs [data-b]').forEach(el => el.onclick = () => browse(el.dataset.b));
-    $('picked').textContent = j.path === j.base ? '(공유 폴더 안의 폴더를 고르세요)' : j.path.slice(j.base.length);
-    if (j.path !== j.base && !$('newName').dataset.touched) $('newName').value = rel[rel.length - 1].toLowerCase().replace(/[^\p{L}\p{N}_-]/gu, '').slice(0, 40);
+    const top = j.path === j.base;
+    $('picked').textContent = top ? (addMode === 'web' ? 'NAS 전체 (모든 공유 폴더)' : '(공유 폴더 안의 폴더를 고르세요)') : j.path.slice(j.base.length);
+    if (!$('newName').dataset.touched) $('newName').value = top ? (addMode === 'web' ? 'NAS전체' : '') : (addMode === 'web' ? rel[rel.length - 1] : rel[rel.length - 1].toLowerCase()).replace(/[^\p{L}\p{N}_-]/gu, '_').slice(0, 40);
   } catch (e) { toast(e.message, true); }
 }
-$('addBtn').onclick = () => { $('newName').value = ''; delete $('newName').dataset.touched; $('mAdd').classList.add('on'); browse(''); };
+function openAdd(mode) {
+  addMode = mode;
+  $('addTitle').textContent = mode === 'web' ? '웹 폴더 추가' : '동기화 폴더 추가';
+  $('newName').value = ''; delete $('newName').dataset.touched; $('mAdd').classList.add('on'); browse('');
+}
+$('addBtn').onclick = () => openAdd('sync');
+$('addWebBtn').onclick = () => openAdd('web');
+async function loadWebs() {
+  try {
+    const ws = await api('/v1/admin/webs');
+    $('websFull').innerHTML = ws.length ? '<tr><th>이름 / NAS 폴더</th><th>남은 공간</th><th></th></tr>' + ws.map(w => `<tr><td><b>${esc(w.name)}</b><div class="sub">${esc(w.share || '/ (NAS 전체)')}</div></td><td class="sub">${w.total ? size(w.free) + ' / ' + size(w.total) : ''}</td><td style="text-align:right"><button class="btn sm danger" data-rmw="${esc(w.name)}">빼기</button></td></tr>`).join('')
+      : '<tr><td class="empty">아직 없습니다. [+ 웹 폴더 추가]로 고르세요.</td></tr>';
+    document.querySelectorAll('[data-rmw]').forEach(b => b.onclick = async () => {
+      if (!await ask(`'${b.dataset.rmw}' 웹 폴더를 뺄까요?\n\nNAS의 파일은 그대로 남습니다. 이 웹 폴더를 붙여 쓰던 PC·휴대폰에서는 더 이상 열 수 없습니다.`)) return;
+      try { await api('/v1/admin/webs', { remove: b.dataset.rmw }); toast('뺐습니다 (파일은 그대로)'); loadWebs(); } catch (e) { toast(e.message, true); }
+    });
+  } catch (e) { $('websFull').innerHTML = `<tr><td class="empty">${esc(e.message)}</td></tr>`; }
+}
 $('newName').oninput = () => $('newName').dataset.touched = '1';
 $('addOk').onclick = async () => {
-  if (browsePath === browseBase) return toast('NAS 폴더를 고르세요', true);
-  try { await api('/v1/admin/roots', { add: { name: $('newName').value.trim(), dir: browsePath } }); $('mAdd').classList.remove('on'); toast('동기화 폴더를 추가했습니다'); refresh(); }
+  if (addMode === 'web') {
+    try { await api('/v1/admin/webs', { add: { name: $('newName').value.trim(), dir: browsePath.slice(browseBase.length) || '/' } }); $('mAdd').classList.remove('on'); toast('웹 폴더를 추가했습니다'); loadWebs(); }
+    catch (e) { toast(e.message, true); }
+    return;
+  }
+  if (browsePath === browseBase) return toast('동기화 폴더는 NAS 전체를 고를 수 없습니다 — 공유 폴더 안을 고르거나, 웹 폴더로 추가하세요', true);
+  try { await api('/v1/admin/roots', { add: { name: $('newName').value.trim(), dir: browsePath } }); $('mAdd').classList.remove('on'); toast('추가했습니다 — 큰 폴더는 목록을 만드는 데 몇 분 걸립니다'); refresh(); }
   catch (e) { toast(e.message, true); }
 };
 async function removeRoot(n) {

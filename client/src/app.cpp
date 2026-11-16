@@ -1358,7 +1358,13 @@ static void StartTest(HWND h) {
     std::thread([h, server, token] {
         Http http(server, token);
         Resp r = http.Req(L"GET", "/v1/roots", {}, nullptr, 8);
-        auto* out = new std::pair<int, std::string>(r.status, r.ok() ? r.body : (r.error.empty() ? r.body : r.error));
+        std::string body = r.ok() ? r.body : (r.error.empty() ? r.body : r.error);
+        if (r.ok()) {   // 웹 폴더(동기화하지 않는 NAS 폴더: USB 디스크·NAS 전체 등)도 '~이름'으로 — 웹드라이브로만 붙임
+            Resp w = http.Req(L"GET", "/v1/webs", {}, nullptr, 8);
+            json a = json::parse(body, nullptr, false), b = w.ok() ? json::parse(w.body, nullptr, false) : json();
+            if (a.is_array() && b.is_array()) { for (auto& x : b) a.push_back({{"name", "~" + x.value("name", std::string())}, {"items", -1}}); body = a.dump(); }
+        }
+        auto* out = new std::pair<int, std::string>(r.status, body);
         if (!PostMessageW(h, WM_APP_TESTED, 0, (LPARAM)out)) delete out;
     }).detach();
 }
@@ -1374,7 +1380,8 @@ static void OnTested(std::pair<int, std::string>* res) {
             std::wstring n = W(r.value("name", std::string()));
             s_names.push_back(n);
             if (s_root) SendMessageW(s_root, CB_ADDSTRING, 0, (LPARAM)n.c_str());
-            names += (names.empty() ? L"" : L", ") + n + Fmt(L"(%lld개)", (long long)r.value("items", 0LL));
+            long long it = r.value("items", 0LL);
+            names += (names.empty() ? L"" : L", ") + n + (it >= 0 ? Fmt(L"(%lld개)", it) : std::wstring(L"(웹 폴더)"));
         }
         if (s_root) SetWindowTextW(s_root, cur.c_str());
         SetTestResult(L"✔ 연결됨 · NAS 폴더: " + names, true);
@@ -1788,7 +1795,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 bool used = false; for (auto& c : s_conns) if (W(c.name) == n) used = true;
                 if (!used) SendMessageW(p_rootBox, CB_ADDSTRING, 0, (LPARAM)n.c_str());
             }
-            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기");
+            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기 (~ 는 웹 폴더 · 웹드라이브 전용)");
             s_root = p_rootBox;   // [연결 시험] 결과가 오면 목록이 채워짐
             if (!Trim(GetText(s_token)).empty()) StartTest(g_settings);
         } else {
@@ -1920,6 +1927,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         switch (LOWORD(wp)) {
         case IDP_TAB0: case IDP_TAB1: case IDP_TAB2: PickTab(h, LOWORD(wp) - IDP_TAB0); break;
         case IDP_OD: case IDP_ALL:
+            if (!PickRootName().empty() && PickRootName()[0] == '~') { MessageBoxW(h, L"웹 폴더(~)는 동기화하지 않고 웹드라이브로만 붙입니다.\n(NAS 전체·USB 디스크처럼 큰 곳을 PC에 받아 두지 않도록)", L"Mydrive", MB_ICONINFORMATION); break; }
             t_conn.onDemand = LOWORD(wp) == IDP_OD; t_conn.web = false;
             PickModeUi();
             InvalidateRect(p_list, nullptr, FALSE); PickInfo();
@@ -1934,11 +1942,18 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case IDP_LETTER: if (HIWORD(wp) == CBN_SELCHANGE && !t_conn.mount.empty()) t_conn.mount = PickLetter(); break;
         case IDP_WFSP: InstallWinFsp(h); break;
         case IDP_BROWSE: BrowseFolder(h, p_local); break;
-        case IDP_ROOT: if (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == CBN_EDITCHANGE) { p_loaded = false; } break;
+        case IDP_ROOT: if (HIWORD(wp) == CBN_SELCHANGE || HIWORD(wp) == CBN_EDITCHANGE) {
+                p_loaded = false;
+                // '~' 로 시작 = 웹 폴더 → 웹드라이브로만 (서버에 전체 목록이 없어 동기화할 수 없음)
+                wchar_t b[300] = {}; int sel = (int)SendMessageW(p_rootBox, CB_GETCURSEL, 0, 0);
+                if (HIWORD(wp) == CBN_SELCHANGE && sel >= 0) SendMessageW(p_rootBox, CB_GETLBTEXT, sel, (LPARAM)b); else GetWindowTextW(p_rootBox, b, 300);
+                if (b[0] == L'~' && !t_conn.web) { if (Trim(GetText(p_local)).empty()) t_conn.mount = PickLetter(); t_conn.web = true; PickModeUi(); }
+            } break;
         case IDP_OK: case IDOK: {
             std::string name = PickRootName();
             std::wstring local = Trim(GetText(p_local));
             if (t_conn.web && !t_conn.mount.empty()) t_conn.mount = PickLetter();
+            if (!name.empty() && name[0] == '~' && !t_conn.web) { t_conn.web = true; if (local.empty()) t_conn.mount = PickLetter(); PickModeUi(); }
             if (!CheckTask(h, name, local, t_idx, t_conn.web, t_conn.mount)) { PickTab(h, 0); break; }
             if (t_conn.web && !WinFspInstalled() &&
                 MessageBoxW(h, L"웹드라이브에는 WinFsp 드라이버가 필요합니다. 지금 설치할까요?\n(GitHub의 공식 설치 파일을 받아 실행합니다. Windows가 관리자 승인을 묻습니다.)", L"Mydrive", MB_YESNO | MB_ICONQUESTION) == IDYES) {
