@@ -128,6 +128,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (!takeGo(intent)) takeShare(intent)
         renderTabs(); load()
         loadNas(); loadCloud()
+        if (pf.bool("phoneShare", false) && pf.paired && !PhoneShareService.running) try { PhoneShareService.start(this) } catch (e: Exception) { }   // 켜 두었던 'PC 에서 이 휴대폰 열기' 이어서
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); if (!takeGo(intent)) takeShare(intent) }

@@ -1365,6 +1365,10 @@ static void StartTest(HWND h) {
             Resp w = http.Req(L"GET", "/v1/webs", {}, nullptr, 8);
             json a = json::parse(body, nullptr, false), b = w.ok() ? json::parse(w.body, nullptr, false) : json();
             if (a.is_array() && b.is_array()) { for (auto& x : b) a.push_back({{"name", "~" + x.value("name", std::string())}, {"items", -1}}); body = a.dump(); }
+            // 휴대폰 (휴대폰 Mydrive 의 'PC 에서 이 휴대폰 열기'를 켠 적 있는 것): '~phone:이름' — 웹드라이브로만
+            Resp ph = http.Req(L"GET", "/v1/phones", {}, nullptr, 8);
+            json c = ph.ok() ? json::parse(ph.body, nullptr, false) : json(), a2 = json::parse(body, nullptr, false);
+            if (c.is_array() && a2.is_array()) { for (auto& x : c) a2.push_back({{"name", "~phone:" + x.value("name", std::string())}, {"items", -2}}); body = a2.dump(); }
         }
         auto* out = new std::pair<int, std::string>(r.status, body);
         if (!PostMessageW(h, WM_APP_TESTED, 0, (LPARAM)out)) delete out;
@@ -1383,7 +1387,7 @@ static void OnTested(std::pair<int, std::string>* res) {
             s_names.push_back(n);
             if (s_root) SendMessageW(s_root, CB_ADDSTRING, 0, (LPARAM)n.c_str());
             long long it = r.value("items", 0LL);
-            names += (names.empty() ? L"" : L", ") + n + (it >= 0 ? Fmt(L"(%lld개)", it) : std::wstring(L"(웹 폴더)"));
+            names += (names.empty() ? L"" : L", ") + n + (it >= 0 ? Fmt(L"(%lld개)", it) : std::wstring(it == -2 ? L"(휴대폰)" : L"(웹 폴더)"));
         }
         if (s_root) SetWindowTextW(s_root, cur.c_str());
         SetTestResult(L"✔ 연결됨 · NAS 폴더: " + names, true);
@@ -1799,7 +1803,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 bool used = false; for (auto& c : s_conns) if (W(c.name) == n) used = true;
                 if (!used) SendMessageW(p_rootBox, CB_ADDSTRING, 0, (LPARAM)n.c_str());
             }
-            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기 (~ 는 웹 폴더 · 웹드라이브 전용)");
+            SendMessageW(p_rootBox, CB_SETCUEBANNER, 0, (LPARAM)L"NAS 폴더 고르기 (~ 웹 폴더 · ~phone: 휴대폰 — 웹드라이브 전용)");
             s_root = p_rootBox;   // [연결 시험] 결과가 오면 목록이 채워짐
             if (!Trim(GetText(s_token)).empty()) StartTest(g_settings);
         } else {
@@ -1858,7 +1862,8 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         MoveWindow(p_dname, x + S(104), S(444), CW - S(104), eh, TRUE);
         SendMessageW(p_dname, EM_LIMITTEXT, 32, 0);
         {
-            std::wstring def = W(t_conn.name); if (!def.empty() && def[0] == L'~') def.erase(0, 1);
+            std::wstring def = W(t_conn.name);
+            if (def.rfind(L"~phone:", 0) == 0) def = def.substr(7) + L" 휴대폰"; else if (!def.empty() && def[0] == L'~') def.erase(0, 1);
             SendMessageW(p_dname, EM_SETCUEBANNER, TRUE, (LPARAM)(def.empty() ? L"비우면 NAS 폴더 이름" : (def + L" (비우면 NAS 폴더 이름)").c_str()));
         }
         AddTip(p_tip, p_dname, L"탐색기 '내 PC'에 이 드라이브가 보일 이름입니다 (32자까지). 비워 두면 NAS 폴더 이름을 씁니다. 저장하면 드라이브를 다시 붙이며 바뀝니다.");

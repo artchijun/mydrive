@@ -133,6 +133,19 @@ class SettingsActivity : Activity() {
             AlertDialog.Builder(this).setMessage("${c.title} (${c.account}) 연결을 끊을까요?").setPositiveButton("끊기") { _, _ -> c.disconnect(); changed() }.setNegativeButton("취소", null).show() }
         item("plus", "구글 드라이브 연결", "휴대폰에 로그인된 구글 계정을 골라 붙입니다. 여러 계정도 됩니다. 파일은 휴대폰과 구글 사이에서만 오갑니다") { CloudConnectActivity.start(this) }
 
+        // ===== PC 에서 이 휴대폰 열기 =====
+        head("PC 에서 이 휴대폰 열기")
+        val on = PhoneShareService.running
+        item("phone", "PC 에서 이 휴대폰 열기", "켜 두면 PC 의 Mydrive 에서 이 휴대폰 저장소를 웹드라이브로 붙여 열 수 있습니다. 같은 와이파이든 밖이든 NAS 를 거쳐 이어집니다. 켜져 있는 동안 알림이 떠 있습니다", sw = on) {
+            if (!pf.paired) { Toast.makeText(this, "먼저 NAS 에 연결해 주세요 (아래 연결)", Toast.LENGTH_LONG).show(); return@item }
+            if (on) PhoneShareService.stop(this) else PhoneShareService.start(this)
+            body.postDelayed({ render() }, 300)
+        }
+        if (on && PhoneShareService.status.isNotEmpty()) item("info", "상태", PhoneShareService.status) { render() }
+        item("edit", "휴대폰 이름", "PC 의 Mydrive 목록에 보일 이름 (글자·숫자·공백·_·-·.)", PhoneShareService.name(this)) {
+            ask("휴대폰 이름", PhoneShareService.name(this)) { pf.putStr("phoneName", it.trim()); if (PhoneShareService.running) { PhoneShareService.stop(this); PhoneShareService.start(this) }; changed() }
+        }
+
         // ===== 정보 =====
         head("정보")
         item("info", "Mydrive ${Update.current(this)}", "휴대폰 파일과 NAS 폴더를 탭으로 오가는 탐색기") { }

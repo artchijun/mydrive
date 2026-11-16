@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.16"
+const version = "0.6.17"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
@@ -107,6 +107,10 @@ func main() {
 	mux.HandleFunc("/v1/server/update", auth(hServerUpdate)) // 서버 스스로 새 판으로 (서명 확인, selfupdate.go)
 	mux.HandleFunc("/v1/webs", auth(hWebs))                  // 웹 폴더 (동기화 안 하는 NAS 폴더, webfolders.go)
 	mux.HandleFunc("/v1/nasdirs", auth(hNasDirs))
+	mux.HandleFunc("/v1/phones", auth(hPhones))        // PC 에서 열 수 있는 휴대폰 (phonerelay.go)
+	mux.HandleFunc("/v1/phone/poll", auth(hPhonePoll)) // 휴대폰: 할 일 기다리기
+	mux.HandleFunc("/v1/phone/body", auth(hPhoneBody))
+	mux.HandleFunc("/v1/phone/reply", auth(hPhoneReply))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
 	mux.HandleFunc("/v1/rescan", auth(hRescan))     // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
 	mux.HandleFunc("/v1/file", auth(logged(hFile))) // logged: 동기화 기록 (activity.go)
@@ -127,7 +131,7 @@ func main() {
 	mux.HandleFunc("/v1/admin/activity", adminAuth(hAdminActivity))
 	mux.HandleFunc("/v1/admin/browse", adminAuth(hAdminBrowse))
 	mux.HandleFunc("/v1/admin/roots", adminAuth(hAdminRoots))
-	mux.HandleFunc("/v1/admin/webs", adminAuth(hWebs))       // 웹 폴더 (관리 콘솔)
+	mux.HandleFunc("/v1/admin/webs", adminAuth(hWebs)) // 웹 폴더 (관리 콘솔)
 	mux.HandleFunc("/v1/admin/policy", adminAuth(hAdminPolicy))
 	mux.HandleFunc("/v1/admin/token", adminAuth(hAdminToken))
 	mux.HandleFunc("/v1/admin/devices", adminAuth(hAdminDevices))
@@ -177,6 +181,10 @@ func auth(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		noteClient(r)
+		if name := r.URL.Query().Get("root"); strings.HasPrefix(name, phonePrefix) { // 휴대폰 폴더 → 그 휴대폰으로 넘김 (phonerelay.go)
+			phoneProxy(w, r, strings.TrimPrefix(name, phonePrefix))
+			return
+		}
 		h(w, r)
 	}
 }

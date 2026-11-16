@@ -184,7 +184,12 @@ struct WebDrive::Impl {
         return ResolveLocked(Parent(rel), &par) ? STATUS_OBJECT_NAME_NOT_FOUND : STATUS_OBJECT_PATH_NOT_FOUND;
     }
     // 탐색기에 보일 이름: 지정한 이름, 없으면 연결 이름(웹 폴더는 ~ 뺌)
-    std::wstring Display() const { return !c.label.empty() ? c.label : W(lazy ? c.name.substr(1) : c.name); }
+    // 휴대폰 (~phone:이름): 휴대폰 Mydrive 앱이 NAS 를 거쳐 답함 (server/phonerelay.go)
+    bool IsPhone() const { return c.name.rfind("~phone:", 0) == 0; }
+    std::string Bare() const { return IsPhone() ? c.name.substr(7) : lazy ? c.name.substr(1) : c.name; }
+    std::wstring Display() const { return !c.label.empty() ? c.label : W(Bare()) + (IsPhone() ? L" 휴대폰" : L""); }
+    // 네트워크 드라이브 주소 \\mydrive\<이름> 의 이름 (':' 등 쓸 수 없는 글자는 바꿈)
+    std::wstring Share() const { std::wstring s = W((IsPhone() ? "phone-" : "") + Bare()); for (auto& ch : s) if (wcschr(L":\\/*?\"<>|", ch)) ch = L'_'; return s; }
     // 드라이브 문자로 붙인 네트워크 드라이브는 탐색기가 이름을 레지스트리에서 읽음 (MountPoints2\##mydrive#이름 → _LabelFromReg)
     void SetExplorerLabel(const std::wstring& share) {
         std::wstring key = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##mydrive#" + share;
@@ -368,11 +373,11 @@ struct WebDrive::Impl {
         Fill(e, fi);
     }
     void SpaceRefresh() {
-        Resp r = http.Req(L"GET", lazy ? "/v1/webs" : "/v1/roots", {}, nullptr, 20);
+        Resp r = http.Req(L"GET", IsPhone() ? "/v1/phones" : lazy ? "/v1/webs" : "/v1/roots", {}, nullptr, 20);
         if (!r.ok()) return;
         json j = json::parse(r.body, nullptr, false);
         if (!j.is_array()) return;
-        std::string me = lazy ? c.name.substr(1) : c.name;
+        std::string me = Bare();
         for (auto& x : j) if (x.value("name", std::string()) == me) { total = x.value("total", (uint64_t)0); freeB = x.value("free", (uint64_t)0); }
     }
 
@@ -856,7 +861,7 @@ bool WebDrive::Impl::Mount(std::string* err) {
     vp.UmFileContextIsUserContext2 = 1;
     wcscpy_s(vp.FileSystemName, L"Mydrive");
     if (letter) {   // 드라이브 문자: 네트워크 드라이브로 (탐색기 '네트워크 위치'에 \\mydrive\이름 으로 보임)
-        std::wstring share = W(lazy ? c.name.substr(1) : c.name);
+        std::wstring share = Share();
         std::wstring pre = L"\\mydrive\\" + share;
         wcsncpy_s(vp.Prefix, pre.c_str(), _TRUNCATE);
         SetExplorerLabel(share);
