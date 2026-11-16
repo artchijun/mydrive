@@ -123,6 +123,12 @@ class Api(servers: List<String>, var token: String) {
         (0 until a.length()).map { entry(a.getJSONObject(it)) } to j.optBoolean("more")
     }
 
+    /** 사진 미리보기 (서버 0.6.14+) — JPEG 바이트, 만들 수 없으면 null */
+    fun thumb(root: String, path: String, size: Int): ByteArray? = try {
+        val c = open("GET", "/v1/thumb", mapOf("root" to root, "path" to path, "s" to size.toString()), 30000)
+        if (c.responseCode == 200) c.inputStream.use { it.readBytes() } else { c.errorStream?.close(); null }
+    } catch (e: IOException) { active = null; null }
+
     /** 웹 폴더 (서버 0.6.12+): 동기화하지 않는 NAS 폴더. 요청할 때 root 는 "~이름" */
     fun webs(): List<RootInfo> = retry { parseRoots(readBody(open("GET", "/v1/webs", emptyMap()))) }
     fun addWeb(name: String, dir: String): List<RootInfo> = retry { parseRoots(post("/v1/webs", JSONObject().put("add", JSONObject().put("name", name).put("dir", dir)).toString())) }

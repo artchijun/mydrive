@@ -108,6 +108,7 @@ class ViewerActivity : Activity() {
     override fun onSaveInstanceState(out: Bundle) { super.onSaveInstanceState(out); out.putInt("index", index) }
     override fun onDestroy() { super.onDestroy(); bg.shutdownNow() }
 
+    private fun shown(i: Int) = names[i].substringAfterLast('/')
     private fun pathOf(i: Int) = if (loc.path.isEmpty()) names[i] else loc.path + "/" + names[i]
 
     /** 그 파일을 휴대폰 안에서 (NAS 면 앱 안에 받아서) */
@@ -134,7 +135,7 @@ class ViewerActivity : Activity() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
     private fun show() {
-        title.text = if (names.size > 1) "${names[index]}  (${index + 1}/${names.size})" else names[index]
+        title.text = if (names.size > 1) "${shown(index)}  (${index + 1}/${names.size})" else shown(index)
         stage.removeAllViews()
         when (kind) {
             IMG -> showImage()
@@ -259,9 +260,9 @@ class ViewerActivity : Activity() {
                         }
                     }
                     list.adapter = ad
-                    list.setOnItemClickListener { _, _, p, _ -> toggleBar(); title.text = "${names[index]}  (${p + 1}/${pr.pageCount}쪽)" }
+                    list.setOnItemClickListener { _, _, p, _ -> toggleBar(); title.text = "${shown(index)}  (${p + 1}/${pr.pageCount}쪽)" }
                     stage.addView(list, FrameLayout.LayoutParams(-1, -1))
-                    title.text = "${names[index]}  (${pr.pageCount}쪽)"
+                    title.text = "${shown(index)}  (${pr.pageCount}쪽)"
                 }
             }
         }

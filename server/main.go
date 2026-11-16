@@ -47,7 +47,10 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.12"
+const version = "0.6.14"
+
+// 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
+const versionTag = "mydrived " + version
 
 func main() {
 	stateDir = env("MYDRIVE_STATE", "/state")
@@ -71,6 +74,7 @@ func main() {
 		roots[rc.Name] = r
 	}
 	loadWebs()
+	go autoUpdateLoop()
 	go func() {
 		for range time.Tick(2 * time.Minute) { // 색인 통째 복사·기록은 무거워서 2분마다 (꺼졌다 켜지면 디스크를 다시 훑어 이어 붙이므로 잃는 것 없음)
 			for _, r := range rootList() {
@@ -98,9 +102,10 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/roots", auth(hRoots))
 	mux.HandleFunc("/v1/snapshot", auth(hSnapshot))
-	mux.HandleFunc("/v1/list", auth(hList))     // 폴더 하나만 (휴대폰 앱)
-	mux.HandleFunc("/v1/search", auth(hSearch)) // 이름 검색 (휴대폰 탐색기)
-	mux.HandleFunc("/v1/webs", auth(hWebs))     // 웹 폴더 (동기화 안 하는 NAS 폴더, webfolders.go)
+	mux.HandleFunc("/v1/list", auth(hList))                  // 폴더 하나만 (휴대폰 앱)
+	mux.HandleFunc("/v1/search", auth(hSearch))              // 이름 검색 (휴대폰 탐색기)
+	mux.HandleFunc("/v1/server/update", auth(hServerUpdate)) // 서버 스스로 새 판으로 (서명 확인, selfupdate.go)
+	mux.HandleFunc("/v1/webs", auth(hWebs))                  // 웹 폴더 (동기화 안 하는 NAS 폴더, webfolders.go)
 	mux.HandleFunc("/v1/nasdirs", auth(hNasDirs))
 	mux.HandleFunc("/v1/changes", auth(hChanges))
 	mux.HandleFunc("/v1/rescan", auth(hRescan))     // PC 앱의 'NAS 다시 확인' — 실시간 감시가 못 보는 폴더까지 지금 전체 비교
@@ -111,6 +116,7 @@ func main() {
 	mux.HandleFunc("/v1/move", auth(logged(hMove)))
 	mux.HandleFunc("/v1/mkdir", auth(logged(hMkdir)))
 	mux.HandleFunc("/v1/hash", auth(hHash))
+	mux.HandleFunc("/v1/thumb", auth(hThumb)) // 사진 미리보기 (thumb.go)
 	mux.HandleFunc("/v1/versions", auth(hVersions))
 	mux.HandleFunc("/v1/version", auth(hVersion))
 	mux.HandleFunc("/v1/restore", auth(logged(hRestore)))
@@ -147,7 +153,7 @@ func main() {
 	})
 	mux.HandleFunc("/admin", hAdminPage)
 	mux.HandleFunc("/", hRootRedirect)
-	mux.HandleFunc("/v1/ping", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("mydrived " + version + "\n")) })
+	mux.HandleFunc("/v1/ping", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, versionTag+"\n") })
 	log.Printf("mydrived %s 시작: %s (공유 폴더 %d개)", version, listen, len(roots))
 	srv := &http.Server{Addr: listen, Handler: tunnelGuard(mux), ReadHeaderTimeout: 30 * time.Second}
 	log.Fatal(srv.ListenAndServe())
@@ -213,7 +219,7 @@ func getRoot(w http.ResponseWriter, r *http.Request) *Root {
 	if rt == nil && strings.HasPrefix(name, webPrefix) {
 		rt = getWeb(strings.TrimPrefix(name, webPrefix))
 		switch r.URL.Path { // 웹 폴더는 둘러보기·받기·올리기·정리만 (동기화·이전 버전 없음)
-		case "/v1/list", "/v1/search", "/v1/file", "/v1/part", "/v1/move", "/v1/mkdir", "/v1/hash":
+		case "/v1/list", "/v1/search", "/v1/file", "/v1/part", "/v1/move", "/v1/mkdir", "/v1/hash", "/v1/thumb":
 		default:
 			if rt != nil {
 				httpErr(w, 400, "web_folder", "웹 폴더에서는 쓸 수 없는 기능")

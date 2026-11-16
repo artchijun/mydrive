@@ -435,7 +435,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (l.kind == "home") { statusText.text = "Mydrive ${Update.current(this)}"; return }
         if (l.kind == "usage") { statusText.text = usageStatus(l); return }
         val d = items.count { it.dir }; val f = items.size - d
-        statusText.text = (if (l.kind == "search") "찾음 · " else if (l.kind == "lib") "새것부터 · " else "") + "폴더 ${d}개, 파일 ${f}개 (${Fmt.size(items.filter { !it.dir }.sumOf { it.size })})" + (if (more) " · 더 있음 (검색어를 좁혀 주세요)" else "")
+        statusText.text = (if (l.kind == "search") "찾음 · " else if (l.kind == "lib") "새것부터 · " else "") + (if (d > 0 || l.kind != "lib") "폴더 ${d}개, " else "") + "파일 ${f}개 (${Fmt.size(items.filter { !it.dir }.sumOf { it.size })})" + (if (more) " · 더 있음 (검색어를 좁혀 주세요)" else "")
     }
 
     // ---------- 처음 화면 ----------
@@ -627,9 +627,13 @@ class MainActivity : Activity(), Transfers.Listener {
         val vk = ViewerActivity.kindOf(it.name)
         if (builtinViewer && vk != null && (l.kind == "local" || l.kind == "nas")) {
             // 같은 폴더의 같은 종류(사진이면 사진들)를 넘겨 볼 수 있게
-            val dir = it.path.substringBeforeLast('/', "")
-            val same = if (vk == ViewerActivity.IMG && tab.loc.browsable) items.filter { x -> !x.dir && ViewerActivity.kindOf(x.name) == vk } else listOf(it)
-            ViewerActivity.start(this, l.copy(path = dir), same.map { x -> x.name }, same.map { x -> x.size }, same.map { x -> x.mtimeMs }, same.indexOf(it).coerceAtLeast(0), vk)
+            val same = if (vk == ViewerActivity.IMG) items.filter { x -> !x.dir && ViewerActivity.kindOf(x.name) == vk } else listOf(it)
+            if (tab.loc.browsable) {
+                val dir = it.path.substringBeforeLast('/', "")
+                ViewerActivity.start(this, l.copy(path = dir), same.map { x -> x.name }, same.map { x -> x.size }, same.map { x -> x.mtimeMs }, same.indexOf(it).coerceAtLeast(0), vk)
+            } else {   // 모아 보기·검색·분석: 여러 폴더의 사진을 이어서 넘김 (저장소 기준 경로)
+                ViewerActivity.start(this, l.copy(path = ""), same.map { x -> x.path }, same.map { x -> x.size }, same.map { x -> x.mtimeMs }, same.indexOf(it).coerceAtLeast(0), vk)
+            }
             return
         }
         when (l.kind) {
@@ -1352,26 +1356,31 @@ class MainActivity : Activity(), Transfers.Listener {
 
     // ---------- 사진·동영상 미리보기 (휴대폰 파일) ----------
     private val thumbs = object : android.util.LruCache<String, android.graphics.Bitmap>(8 * 1024 * 1024) { override fun sizeOf(k: String, b: android.graphics.Bitmap) = b.byteCount }
-    private val thumbPool = Executors.newFixedThreadPool(2)
+    private val thumbPool = Executors.newFixedThreadPool(3)
     private val thumbMiss = HashSet<String>()
     private val showThumbs by lazy { pf.bool("thumbs", true) }
 
     private fun thumb(iv: ImageView, it: Item) {
         val l = tab.loc
-        val base = baseOf(l).takeIf { b -> b.kind == "local" && showThumbs } ?: run { iv.tag = null; return }
+        val base = baseOf(l).takeIf { b -> (b.kind == "local" || b.kind == "nas") && showThumbs } ?: run { iv.tag = null; return }
         val k = FileIcon.kindOf(it.name)
-        if (it.dir || (k != "image" && k != "video")) { iv.tag = null; return }
-        val f = File(base.root, it.path); val key = f.path + ":" + it.mtimeMs
+        val ext = it.name.substringAfterLast('.', "").lowercase()
+        // NAS: 서버가 만든 작은 그림 (JPEG·PNG·GIF). 휴대폰: 사진·동영상
+        if (it.dir || (base.kind == "nas" && ext !in setOf("jpg", "jpeg", "png", "gif")) || (k != "image" && k != "video")) { iv.tag = null; return }
+        val key = base.kind + ":" + base.root + ":" + it.path + ":" + it.mtimeMs
         iv.tag = key
         thumbs.get(key)?.let { b -> iv.setImageBitmap(b); return }
         if (key in thumbMiss) return
+        val px = ui.dp(68)
         thumbPool.execute {
-            val b = try {
-                val sz = android.util.Size(ui.dp(68), ui.dp(68))
-                if (k == "image") android.media.ThumbnailUtils.createImageThumbnail(f, sz, null) else android.media.ThumbnailUtils.createVideoThumbnail(f, sz, null)
+            val still = iv.tag == key                 // 이미 화면 밖으로 지나갔으면 받지 않음
+            val b = if (!still) null else try {
+                if (base.kind == "nas") api.thumb(base.root, it.path, maxOf(160, px * 2))?.let { bytes -> android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                else { val f = File(base.root, it.path); val sz = android.util.Size(px, px)
+                    if (k == "image") android.media.ThumbnailUtils.createImageThumbnail(f, sz, null) else android.media.ThumbnailUtils.createVideoThumbnail(f, sz, null) }
             } catch (e: Exception) { null }
             val r = b?.let { cropRound(it) }
-            runOnUiThread { if (r == null) thumbMiss += key else { thumbs.put(key, r); if (iv.tag == key) iv.setImageBitmap(r) } }
+            runOnUiThread { if (r == null) { if (still) thumbMiss += key } else { thumbs.put(key, r); if (iv.tag == key) iv.setImageBitmap(r) } }
         }
     }
 
