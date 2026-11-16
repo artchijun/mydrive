@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Myplorer 와 같은 어두운 화면 (기본) -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#60CDFF</item>
+        <item name="android:colorPrimary">#202020</item>
+        <item name="android:windowBackground">#191919</item>
+        <item name="android:statusBarColor">#202020</item>
+        <item name="android:navigationBarColor">#202020</item>
+        <item name="android:alertDialogTheme">@style/AppDialog</item>
+    </style>
+    <style name="AppDialog" parent="@android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#60CDFF</item>
+        <item name="android:colorBackground">#2C2C2C</item>
+    </style>
+    <!-- 밝은 화면 -->
+    <style name="AppTheme.Light" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#1F6FE0</item>
+        <item name="android:windowBackground">#F4F5F7</item>
+        <item name="android:statusBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+</resources>

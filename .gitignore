@@ -30,3 +30,10 @@ _서명열쇠/
 # 서버 업데이트 서명 열쇠 (_서명열쇠 폴더에만)
 *.key
 server-update.key
+
+# 사진 앱 (photo/): 서명 열쇠 설정·SDK 경로·빌드 결과
+photo/keystore.properties
+photo/local.properties
+photo/build/
+photo/app/build/
+photo/.gradle/
