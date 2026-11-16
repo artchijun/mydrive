@@ -123,6 +123,17 @@ class Api(servers: List<String>, var token: String) {
         (0 until a.length()).map { entry(a.getJSONObject(it)) } to j.optBoolean("more")
     }
 
+    /** 내용 SHA-256 (중복 파일 확인) */
+    fun hash(root: String, path: String): String = retry { JSONObject(readBody(open("GET", "/v1/hash", mapOf("root" to root, "path" to path), 120000))).getString("sha256") }
+
+    /** 연결 폴더의 모든 항목 (저장소 분석). 큰 목록이라 한 항목씩 읽어 넘김 */
+    fun snapshot(root: String, canceled: () -> Boolean, each: (Entry) -> Unit) {
+        val c = open("GET", "/v1/snapshot", mapOf("root" to root), 180000)
+        val code = c.responseCode
+        if (code !in 200..299) { readBody(c); return }
+        c.inputStream.bufferedReader().use { r -> JsonStream(r).entries(canceled, each) }
+    }
+
     /** 파일 하나 정보 (없으면 null) — 폴더 안 목록에서 찾음 */
     fun stat(root: String, path: String): Entry? {
         val dir = path.substringBeforeLast('/', "")
@@ -234,6 +245,59 @@ class Api(servers: List<String>, var token: String) {
             val r = inp.read(buf, 0, minOf(buf.size.toLong(), n - done).toInt())
             if (r < 0) throw IOException("파일이 예상보다 짧음")
             out.write(buf, 0, r); done += r; progress(base + done, total)
+        }
+    }
+}
+
+/** 아주 작은 JSON 읽개: {"...": ..., "entries": [ {p,d,s,m}, ... ]} 에서 entries 만 한 개씩 */
+internal class JsonStream(private val r: java.io.Reader) {
+    private var peeked = -2
+    private fun peek(): Int { if (peeked == -2) peeked = r.read(); return peeked }
+    private fun next(): Int { val c = peek(); peeked = -2; return c }
+    private fun ws(): Int { while (true) { val c = peek(); if (c == ' '.code || c == '\n'.code || c == '\r'.code || c == '\t'.code) next() else return c } }
+    private fun expect(ch: Char) { val c = ws(); if (c != ch.code) throw IOException("목록 형식이 이상함"); next() }
+
+    fun entries(canceled: () -> Boolean, each: (Entry) -> Unit) {
+        expect('{')
+        if (ws() == '}'.code) return
+        while (true) {
+            val key = str(); expect(':')
+            if (key == "entries" && ws() == '['.code) {
+                next()
+                if (ws() == ']'.code) next() else while (true) {
+                    if (canceled()) throw Canceled()
+                    @Suppress("UNCHECKED_CAST") val o = value() as Map<String, Any?>
+                    each(Entry(o["p"] as String, o["d"] == true, (o["s"] as? Number)?.toLong() ?: 0, (o["m"] as? Number)?.toLong() ?: 0))
+                    val c = ws(); next(); if (c == ']'.code) break; if (c != ','.code) throw IOException("목록 형식이 이상함")
+                }
+            } else value()
+            val c = ws(); next(); if (c == '}'.code) return; if (c != ','.code) throw IOException("목록 형식이 이상함")
+        }
+    }
+
+    private fun value(): Any? = when (val c = ws()) {
+        '"'.code -> str()
+        '{'.code -> { next(); val m = HashMap<String, Any?>(); if (ws() == '}'.code) next() else while (true) { val k = str(); expect(':'); m[k] = value(); val d = ws(); next(); if (d == '}'.code) break }; m }
+        '['.code -> { next(); val l = ArrayList<Any?>(); if (ws() == ']'.code) next() else while (true) { l += value(); val d = ws(); next(); if (d == ']'.code) break }; l }
+        't'.code -> { repeat(4) { next() }; true }
+        'f'.code -> { repeat(5) { next() }; false }
+        'n'.code -> { repeat(4) { next() }; null }
+        else -> { val sb = StringBuilder(); while (true) { val d = peek(); if (d == '-'.code || d == '+'.code || d == '.'.code || d == 'e'.code || d == 'E'.code || (d >= '0'.code && d <= '9'.code)) sb.append(next().toChar()) else break }
+            if (sb.isEmpty()) throw IOException("목록 형식이 이상함 ($c)"); val t = sb.toString(); t.toLongOrNull() ?: t.toDouble() }
+    }
+
+    private fun str(): String {
+        if (ws() != '"'.code) throw IOException("목록 형식이 이상함"); next()
+        val sb = StringBuilder()
+        while (true) {
+            val c = next(); if (c < 0) throw IOException("목록이 중간에 끊김")
+            if (c == '"'.code) return sb.toString()
+            if (c != '\\'.code) { sb.append(c.toChar()); continue }
+            when (val e = next()) {
+                'n'.code -> sb.append('\n'); 't'.code -> sb.append('\t'); 'r'.code -> sb.append('\r'); 'b'.code -> sb.append('\b'); 'f'.code -> sb.append('\u000C')
+                'u'.code -> { val h = CharArray(4) { next().toChar() }; sb.append(String(h).toInt(16).toChar()) }
+                else -> sb.append(e.toChar())
+            }
         }
     }
 }

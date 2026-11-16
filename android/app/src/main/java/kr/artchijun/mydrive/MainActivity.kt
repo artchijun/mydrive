@@ -50,7 +50,8 @@ class MainActivity : Activity(), Transfers.Listener {
     private class Clip(val loc: Loc, val items: List<Item>, val move: Boolean)
     /** 목록 한 칸: 머리글 / 카드(처음 화면) / 파일·폴더 */
     private class Row(val type: Int, val title: String = "", val sub: String = "", val right: String = "", val frac: Int = -1,
-                      val icon: Drawable? = null, val go: Loc? = null, val item: Item? = null, val act: (() -> Unit)? = null)
+                      val icon: Drawable? = null, val go: Loc? = null, val item: Item? = null, val act: (() -> Unit)? = null,
+                      val long: (() -> Unit)? = null, val segs: List<Triple<Int, Float, String>> = emptyList())
 
     private lateinit var ui: Ui
     private lateinit var pf: Prefs
@@ -242,12 +243,13 @@ class MainActivity : Activity(), Transfers.Listener {
         "home" -> "홈"
         "trash" -> "휴지통"
         "search" -> "검색: " + l.path.substringBefore('\u0001').ifEmpty { "." + l.path.substringAfter('\u0001') }
+        "usage" -> usageTitle(l)
         "nas" -> if (l.path.isEmpty()) l.root else l.name
         "zip" -> if (l.path.isEmpty()) File(l.root).name else l.name
         else -> if (l.path.isEmpty()) volTitle(l.root) else l.name
     }
     private fun tabIcon(l: Loc): Drawable = when (l.kind) {
-        "home" -> g("home", ui.sub); "trash" -> g("trash", ui.sub); "search" -> g("search", ui.sub)
+        "home" -> g("home", ui.sub); "trash" -> g("trash", ui.sub); "search" -> g("search", ui.sub); "usage" -> g("chart", ui.accent)
         "nas" -> if (l.path.isEmpty()) g("nas", ui.accent) else FileIcon(true, l.name)
         "zip" -> FileIcon(false, "a.zip")
         else -> if (l.path.isEmpty()) g(if (l.root == fs.volumes().first().root.path) "phone" else "sd", ui.accent) else if (l.path == "Download") FileIcon(true, "", "download") else FileIcon(true, l.name)
@@ -337,6 +339,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val l = tab.loc
         when {
             l.kind == "search" -> Loc.parse(l.root)?.let { navigate(it) }
+            l.kind == "usage" -> usageUp(l)
             l.parent() != null -> navigate(l.parent()!!)
             l.kind == "zip" -> { val f = File(l.root); vol(f)?.let { v -> navigate(Loc("local", v.root.path, f.parentFile!!.relativeTo(v.root).path)) } }
             l.kind != "home" -> navigate(Loc.HOME)
@@ -362,6 +365,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val l = tab.loc; val seq = ++loadSeq
         refreshChrome()
         if (l.kind == "home") { rows = homeRows(); items = emptyList(); showList(); return }
+        if (l.kind == "usage") { loadUsage(l, seq); return }
         empty.visibility = View.GONE
         statusText.text = "불러오는 중…"
         net.execute {
@@ -401,6 +405,7 @@ class MainActivity : Activity(), Transfers.Listener {
         empty.visibility = if (err != null || (rows.isEmpty() && l.kind != "home")) View.VISIBLE else View.GONE
         empty.text = err ?: when (l.kind) { "trash" -> "휴지통이 비어 있습니다"; "search" -> "찾은 것이 없습니다"; else -> "빈 폴더" }
         if (l.kind == "home") { statusText.text = "Mydrive ${Update.current(this)}"; return }
+        if (l.kind == "usage") { statusText.text = usageStatus(l); return }
         val d = items.count { it.dir }; val f = items.size - d
         statusText.text = (if (l.kind == "search") "찾음 · " else "") + "폴더 ${d}개, 파일 ${f}개 (${Fmt.size(items.filter { !it.dir }.sumOf { it.size })})" + (if (more) " · 더 있음 (검색어를 좁혀 주세요)" else "")
     }
@@ -428,6 +433,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val favs = favList()
         if (favs.isNotEmpty()) { out += Row(0, "즐겨찾기"); favs.forEach { l -> out += Row(1, tabTitle(l), placeText(l), icon = tabIcon(l), go = l) } }
         out += Row(0, "정리")
+        out += Row(1, "저장소 분석", "어디에 용량이 들었는지 · 큰 파일 · 중복 파일", icon = g("chart", ui.accent), act = { pickAnalyze() })
         out += Row(1, "휴지통", "휴대폰에서 지운 파일 (NAS 에서 지운 것은 NAS 휴지통)", icon = g("trash", ui.sub), go = Loc.TRASH)
         return out
     }
@@ -508,7 +514,7 @@ class MainActivity : Activity(), Transfers.Listener {
         val l = tab.loc
         when {
             l.kind == "trash" -> trashMenu(it)
-            l.kind == "search" -> { val base = Loc.parse(l.root)!!; if (it.dir) navigate(base.copy(path = it.path)) else openItem(base, it) }
+            l.kind == "search" || l.kind == "usage" -> { val base = baseOf(l); if (it.dir) navigate(base.copy(path = it.path)) else openItem(base, it) }
             it.dir -> navigate(l.copy(path = it.path))
             else -> openItem(l, it)
         }
@@ -516,7 +522,9 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun longTap(pos: Int) {
         val r = rows.getOrNull(pos) ?: return
-        if (r.type == 1) { r.go?.let { g -> AlertDialog.Builder(this).setItems(arrayOf("새 탭에서 열기", if (favList().contains(g)) "즐겨찾기에서 빼기" else "즐겨찾기에 넣기")) { _, w -> if (w == 0) newTab(g) else toggleFav(g) }.show() }; return }
+        if (r.type == 1 && r.long != null) { r.long.invoke(); return }
+        if (r.type == 1) { r.go?.let { g -> val can = g.kind == "local" || g.kind == "nas"
+            AlertDialog.Builder(this).setItems(arrayOf("새 탭에서 열기", if (favList().contains(g)) "즐겨찾기에서 빼기" else "즐겨찾기에 넣기") + (if (can) arrayOf("저장소 분석") else emptyArray())) { _, w -> when (w) { 0 -> newTab(g); 1 -> toggleFav(g); else -> analyze(g) } }.show() }; return }
         if (r.type == 2) toggle(r.item!!)
     }
 
@@ -535,7 +543,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (builtinViewer && vk != null && (l.kind == "local" || l.kind == "nas")) {
             // 같은 폴더의 같은 종류(사진이면 사진들)를 넘겨 볼 수 있게
             val dir = it.path.substringBeforeLast('/', "")
-            val same = if (vk == ViewerActivity.IMG && tab.loc.kind != "search") items.filter { x -> !x.dir && ViewerActivity.kindOf(x.name) == vk } else listOf(it)
+            val same = if (vk == ViewerActivity.IMG && tab.loc.browsable) items.filter { x -> !x.dir && ViewerActivity.kindOf(x.name) == vk } else listOf(it)
             ViewerActivity.start(this, l.copy(path = dir), same.map { x -> x.name }, same.map { x -> x.size }, same.map { x -> x.mtimeMs }, same.indexOf(it).coerceAtLeast(0), vk)
             return
         }
@@ -577,9 +585,9 @@ class MainActivity : Activity(), Transfers.Listener {
     // ================= 선택 작업 =================
     private fun startClip(move: Boolean) {
         val its = selItems(); if (its.isEmpty()) return
-        val l = tab.loc
+        val l = baseOf(tab.loc)
         if (move && !l.writable) { toast("여기서는 옮길 수 없습니다 — 복사를 써 주세요"); return }
-        clip = Clip(if (l.kind == "search") Loc.parse(l.root)!! else l, its, move)
+        clip = Clip(l, its, move)
         clearSel()
         toast("붙여 넣을 폴더로 가서 [붙여넣기]를 누르세요 — 다른 탭도 됩니다")
     }
@@ -605,18 +613,21 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun deleteSel() {
         val its = selItems(); if (its.isEmpty()) return
-        val l = tab.loc
+        val view = tab.loc; val l = baseOf(view)
         val where = when (l.kind) { "local" -> "휴대폰 휴지통으로 옮깁니다 (되살릴 수 있음)"; "nas" -> "NAS 휴지통으로 옮깁니다 (DSM 에서 되살릴 수 있음)"; "trash" -> "완전히 지웁니다. 되살릴 수 없습니다."; else -> "" }
         if (where.isEmpty()) { toast("여기서는 지울 수 없습니다"); return }
-        AlertDialog.Builder(this).setTitle(if (its.size == 1) "‘${its[0].name}’ 지우기" else "${its.size}개 지우기").setMessage(where)
-            .setPositiveButton("지우기") { _, _ -> bg({ fs.delete(l, its) }) { clearSelSilently(); load(); toast(if (l.kind == "trash") "지웠습니다" else "휴지통으로 옮겼습니다") } }
+        // 중복 파일: 한 묶음을 모두 고르면 하나도 남지 않음
+        val whole = if (view.kind == "usage" && view.path == "dup") Usage.get(l)?.dups?.count { g -> g.all { sel.contains(it.path) } } ?: 0 else 0
+        val warn = if (whole > 0) "\n\n주의: ${whole}묶음은 모두 골라서 하나도 남지 않습니다." else ""
+        AlertDialog.Builder(this).setTitle(if (its.size == 1) "‘${its[0].name}’ 지우기" else "${its.size}개 지우기 (${Fmt.size(its.filter { !it.dir }.sumOf { it.size })})").setMessage(where + warn)
+            .setPositiveButton("지우기") { _, _ -> bg({ fs.delete(l, its) }) { if (l.kind == "local" || l.kind == "nas") Usage.removed(l, its.map { it.path }); clearSelSilently(); load(); toast(if (l.kind == "trash") "지웠습니다" else "휴지통으로 옮겼습니다") } }
             .setNegativeButton("취소", null).show()
     }
 
     private fun shareSel() {
         val its = selItems().filter { !it.dir }
         if (its.isEmpty()) { toast("파일을 골라 주세요 (폴더는 공유할 수 없음)"); return }
-        val l = tab.loc
+        val l = baseOf(tab.loc)
         when (l.kind) {
             "local" -> shareFiles(its.map { File(l.root, it.path) })
             "nas", "zip" -> {
@@ -642,7 +653,7 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     private fun selMore() {
-        val its = selItems(); val l = tab.loc
+        val its = selItems(); val l = baseOf(tab.loc)
         val opts = mutableListOf<Pair<String, () -> Unit>>()
         if (l.kind == "trash") {
             opts += "되살리기" to { bg({ fs.restore(its) }) { n -> clearSelSilently(); load(); toast("${n}개 되살렸습니다") } }
@@ -657,7 +668,7 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     private fun zipSel(its: List<Item>) {
-        val l = tab.loc
+        val l = baseOf(tab.loc)
         val def = (if (its.size == 1) its[0].name.substringBeforeLast('.').ifEmpty { its[0].name } else tabTitle(l)) + ".zip"
         ask("압축 파일 이름", def, select = def.length - 4) { n ->
             clearSel(); askNotify()
@@ -666,7 +677,7 @@ class MainActivity : Activity(), Transfers.Listener {
     }
 
     private fun props(its: List<Item>) {
-        val l = tab.loc
+        val l = baseOf(tab.loc)
         val msg = if (its.size == 1) { val it = its[0]
             "위치: ${placeText(l.copy(path = it.path.substringBeforeLast('/', "")))}\n종류: ${if (it.dir) "폴더" else it.name.substringAfterLast('.', "파일").uppercase()}\n" +
                 (if (!it.dir) "크기: ${Fmt.size(it.size)} (%,d 바이트)\n".format(it.size) else if (it.count >= 0) "항목: ${it.count}개\n" else "") +
@@ -786,7 +797,7 @@ class MainActivity : Activity(), Transfers.Listener {
     // ================= 검색 · 정렬 · 메뉴 =================
     private fun askSearch() {
         val l = tab.loc
-        val base = when { l.kind == "search" -> Loc.parse(l.root)!!; l.kind == "local" || l.kind == "nas" -> l; else -> Loc("local", fs.volumes().first().root.path) }
+        val base = when { l.kind == "search" || l.kind == "usage" -> Loc.parse(l.root)!!; l.kind == "local" || l.kind == "nas" -> l; else -> Loc("local", fs.volumes().first().root.path) }
         val q = ui.input("이름 일부 (예: 보고서)")
         val ext = ui.input("확장자 (예: jpg,pdf — 비워도 됨)")
         val box = ui.col(ui.label("찾는 곳: ${placeText(base)} 아래 전체", 13f, ui.sub), q.apply { layoutParams = ui.lp(top = 10) }, ext.apply { layoutParams = ui.lp(top = 8) }).apply { setPadding(ui.dp(20), ui.dp(8), ui.dp(20), 0) }
@@ -810,6 +821,8 @@ class MainActivity : Activity(), Transfers.Listener {
         val opts = mutableListOf<Pair<String, () -> Unit>>()
         opts += "새로 고침" to { if (tab.loc.kind == "home") loadNas(); load() }
         if (tab.loc.browsable) opts += "이 위치를 새 탭으로" to { newTab(tab.loc) }
+        if (tab.loc.writable) opts += "이 폴더 용량 분석" to { analyze(tab.loc) }
+        if (tab.loc.kind == "usage") usageMenu(opts)
         opts += "정렬" to { sortMenu() }
         opts += (if (showHidden) "숨김 파일 감추기" else "숨김 파일 보기 (점으로 시작)") to { showHidden = !showHidden; load() }
         if (tab.loc.kind == "trash") opts += "휴지통 비우기" to { emptyTrash() }
@@ -866,6 +879,7 @@ class MainActivity : Activity(), Transfers.Listener {
         fs.volumes().forEach { v -> item(g(if (v.removable) "sd" else "phone", ui.accent), v.title, "${Fmt.size(v.free)} 남음") { navigate(Loc("local", v.root.path)) } }
         nasRoots.forEach { r -> item(g("nas", ui.accent), r.name, "NAS ${r.share}") { navigate(Loc("nas", r.name)) } }
         item(g("trash", ui.sub), "휴지통") { navigate(Loc.TRASH) }
+        item(g("chart", ui.sub), "저장소 분석", "큰 파일 · 중복 파일") { pickAnalyze() }
         val rec = recentList().filter { !favs.contains(it) }.take(8)
         if (rec.isNotEmpty()) { head("최근 위치"); rec.forEach { l -> item(g("history", ui.sub), tabTitle(l), placeText(l)) { navigate(l) } } }
         head("설정")
@@ -966,6 +980,210 @@ class MainActivity : Activity(), Transfers.Listener {
         catch (e: Exception) { toast(e.message ?: "설치할 수 없습니다") }
     }
 
+    // ================= 저장소 분석 =================
+    /** 검색·분석 화면의 항목은 원래 저장소 기준 경로 → 그 저장소 */
+    private fun baseOf(l: Loc): Loc = if (l.kind == "search" || l.kind == "usage") Loc.parse(l.root) ?: l else l
+
+    private fun analyze(l: Loc) = navigate(Loc("usage", l.key(), ""))
+
+    private fun pickAnalyze() {
+        val ls = fs.volumes().map { Loc("local", it.root.path) } + nasRoots.map { Loc("nas", it.name) }
+        AlertDialog.Builder(this).setTitle("어느 저장소를 분석할까요?").setItems(ls.map { placeText(it) }.toTypedArray()) { _, w -> analyze(ls[w]) }.show()
+    }
+
+    private fun usageTitle(l: Loc): String {
+        val b = Loc.parse(l.root) ?: return "분석"; val v = l.path
+        return when {
+            v.isEmpty() -> "분석: " + tabTitle(b)
+            v.startsWith("t:") -> Usage.catName(v.substring(2))
+            v == "big" -> "큰 파일"; v == "old" -> "오래된 큰 파일"; v == "dup" -> "중복 파일"
+            v.startsWith("d:") -> v.substring(2).let { if (it == b.path) "폴더별 용량" else it.substringAfterLast('/') }
+            else -> "분석"
+        }
+    }
+
+    private fun usageUp(l: Loc) {
+        val b = Loc.parse(l.root) ?: return; val v = l.path
+        if (v.isEmpty()) { navigate(b); return }
+        if (v.startsWith("d:")) {
+            val d = v.substring(2)
+            if (d != b.path) { val p = d.substringBeforeLast('/', ""); navigate(l.copy(path = "d:" + (if (p.length < b.path.length) b.path else p))); return }
+        }
+        navigate(l.copy(path = ""))
+    }
+
+    private val usageRun = Executors.newSingleThreadExecutor()
+    private val usageBusy = HashSet<String>()       // 분석 중인 저장소 (dup 은 "|dup")
+    private val usageErr = HashMap<String, String>()
+    private val usageMsg = HashMap<String, String>()
+
+    private fun usageStatus(l: Loc): String {
+        val bk = l.root
+        usageMsg[bk]?.takeIf { usageBusy.contains(bk) || usageBusy.contains("$bk|dup") }?.let { return it }
+        val r = Loc.parse(bk)?.let { Usage.get(it) } ?: return "분석 전"
+        val its = items
+        return (if (its.isNotEmpty()) "파일 %,d개 (%s) · ".format(its.size, Fmt.size(its.sumOf { it.size })) else "") + "분석한 때 " + Fmt.time(r.at * 1_000_000).substring(11)
+    }
+
+    private fun onUsageTab(bk: String) = !isFinishing && tab.loc.kind == "usage" && tab.loc.root == bk
+
+    /** 오래 걸리는 분석은 따로 (다른 탭을 쓰는 동안에도 계속). 끝나면 그 화면이면 다시 그림 */
+    private fun usageJob(key: String, bk: String, work: ((String) -> Unit) -> Unit) {
+        if (!usageBusy.add(key)) return
+        usageErr.remove(key)
+        usageRun.execute {
+            val err = try { work { m -> runOnUiThread { usageMsg[bk] = m; if (onUsageTab(bk)) statusText.text = m } }; null } catch (e: Exception) { e.message ?: e.javaClass.simpleName }
+            runOnUiThread { usageBusy.remove(key); usageMsg.remove(bk); if (err != null) usageErr[key] = err; if (onUsageTab(bk)) load() }
+        }
+    }
+
+    private fun loadUsage(l: Loc, seq: Int) {
+        val base = Loc.parse(l.root) ?: return; val bk = l.root; val view = l.path
+        val r = Usage.get(base)
+        fun wait(title: String, sub: String) { items = emptyList(); rows = listOf(Row(1, title, sub, icon = g("chart", ui.accent))); showList() }
+        if (r == null) {
+            usageErr[bk]?.let { e -> items = emptyList(); rows = listOf(Row(1, "분석하지 못했습니다", e + " — 눌러서 다시", icon = g("info", ui.red), act = { usageErr.remove(bk); load() })); showList(); return }
+            usageJob(bk, bk) { say -> say("분석 중…"); Usage.scan(fs, api, base, { n -> say("분석 중… 파일 %,d개".format(n)) }) { isFinishing } }
+            wait("분석하는 중…", if (base.kind == "nas") "NAS 목록 전체를 받아 셉니다. 다른 탭을 써도 계속합니다." else "파일이 많으면 1~2분 걸립니다. 다른 탭을 써도 계속합니다.")
+            return
+        }
+        if (view == "dup" && r.dups == null) {
+            usageErr["$bk|dup"]?.let { e -> items = emptyList(); rows = listOf(Row(1, "중복 파일을 찾지 못했습니다", e + " — 눌러서 다시", icon = g("info", ui.red), act = { usageErr.remove("$bk|dup"); load() })); showList(); return }
+            usageJob("$bk|dup", bk) { say -> say("중복 파일 찾는 중…"); Usage.findDups(api, r, say) { isFinishing } }
+            wait("중복 파일 찾는 중…", "크기가 같은 파일끼리 내용을 비교합니다" + (if (base.kind == "nas") " (NAS 가 계산)" else "") + ". 큰 파일이 많으면 몇 분 걸립니다.")
+            return
+        }
+        statusText.text = "정리하는 중…"
+        net.execute {
+            val built = try { synchronized(Usage) { usageRows(base, r, view) } } catch (e: Exception) { null }
+            runOnUiThread {
+                if (seq != loadSeq || isFinishing) return@runOnUiThread
+                if (built == null) { items = emptyList(); rows = emptyList(); showList("보여 주지 못했습니다"); return@runOnUiThread }
+                items = built.second; rows = built.first; showList()
+            }
+        }
+    }
+
+    private fun usageRows(base: Loc, r: Usage.Result, view: String): Pair<List<Row>, List<Item>> {
+        val out = mutableListOf<Row>(); val its = mutableListOf<Item>()
+        val bk = base.key()
+        fun go(v: String) = Loc("usage", bk, v)
+        fun files(l: List<Usage.F>) { for (f in l) { val it = Item(f.name, false, f.size, f.mtimeMs, f.path); its += it; out += Row(2, item = it) } }
+        val total = r.total.coerceAtLeast(1)
+        when {
+            view.isEmpty() -> {
+                val cats = Usage.byCat(r)
+                val vol = if (base.kind == "local" && base.path.isEmpty()) fs.volumes().firstOrNull { it.root.path == base.root } else null
+                val used = vol?.let { it.total - it.free } ?: 0L
+                val trash = vol?.let { fs.trashBytes(it.root) } ?: 0L
+                val other = if (vol != null) (used - r.total - trash).coerceAtLeast(0) else 0L
+                val denom = maxOf(r.total + other + trash, 1L).toFloat()
+                val segs = cats.map { (k, sz, _) -> Triple(Usage.catColor(k), sz / denom, Usage.catName(k) + " " + Fmt.size(sz)) } +
+                    (if (other > 0) listOf(Triple(ui.sub, other / denom, "앱·시스템 " + Fmt.size(other))) else emptyList()) +
+                    (if (trash > 0) listOf(Triple(ui.line, trash / denom, "휴지통 " + Fmt.size(trash))) else emptyList())
+                out += Row(3, Fmt.size(r.total), "파일 %,d개 · 폴더 %,d개".format(r.fileCount, r.dirs.size - 1) +
+                    (vol?.let { " · 저장소 ${Fmt.size(used)} 사용 / ${Fmt.size(it.total)}" } ?: "") +
+                    (if (r.blocked > 0) "\n읽을 수 없는 폴더 ${r.blocked}개는 빠졌습니다" else ""), segs = segs)
+                out += Row(0, "종류별")
+                for ((k, sz, n) in cats) out += Row(1, Usage.catName(k), "파일 %,d개".format(n), Fmt.size(sz), (sz * 1000 / total).toInt(),
+                    FileIcon(false, Usage.cats.first { it.first == k }.third), act = { navigate(go("t:$k")) })
+                if (other > 0) out += Row(1, "앱·시스템", "휴대폰이 보여 주지 않는 앱 자료·시스템 (셀 수 없음)", Fmt.size(other), (other * 1000 / denom).toInt(), g("phone", ui.sub))
+                if (trash > 0) out += Row(1, "휴지통", "Mydrive 에서 지운 파일 — 비우면 줄어듦", Fmt.size(trash), (trash * 1000 / denom).toInt(), g("trash", ui.sub), Loc.TRASH)
+                val (ds, fl) = Usage.children(r, base.path)
+                if (ds.isNotEmpty()) {
+                    out += Row(0, "큰 폴더")
+                    ds.take(6).forEach { (p, d) -> out += dirCard(base, p, d, total) }
+                    out += Row(1, "폴더별 용량 모두 보기", "폴더 ${ds.size}개" + (if (fl.isNotEmpty()) " · 이 자리 파일 ${fl.size}개" else "") + " — 눌러서 안으로 들어가며 봅니다", icon = g("grid", ui.sub), act = { navigate(go("d:" + base.path)) })
+                }
+                out += Row(0, "정리하기")
+                val b = Usage.big(r, 200)
+                out += Row(1, "큰 파일", "가장 큰 ${b.size}개 · 합계 ${Fmt.size(b.sumOf { it.size })}", icon = g("sort", ui.accent), act = { navigate(go("big")) })
+                val o = Usage.old(r)
+                out += Row(1, "오래된 큰 파일", "1년 넘게 그대로인 10 MB 이상 · ${o.size}개 · ${Fmt.size(o.sumOf { it.size })}", icon = g("history", ui.accent), act = { navigate(go("old")) })
+                val d = r.dups
+                out += Row(1, "중복 파일", when { d == null -> "내용이 똑같은 파일 찾기 (눌러서 시작)"; d.isEmpty() -> "찾지 못했습니다"
+                    else -> "${d.size}묶음 · 하나씩만 남기면 ${Fmt.size(d.sumOf { it[0].size * (it.size - 1) })} 줄어듦" }, icon = g("copy", ui.accent), act = { navigate(go("dup")) })
+            }
+            view.startsWith("t:") -> files(Usage.ofCat(r, view.substring(2)))
+            view == "big" -> files(Usage.big(r))
+            view == "old" -> files(Usage.old(r))
+            view.startsWith("d:") -> {
+                val dir = view.substring(2); val (ds, fl) = Usage.children(r, dir); val t = (r.dirs[dir]?.size ?: 0L).coerceAtLeast(1)
+                if (ds.isNotEmpty()) { out += Row(0, "폴더 (용량 큰 순)"); ds.forEach { (p, d) -> out += dirCard(base, p, d, t) } }
+                if (fl.isNotEmpty()) { out += Row(0, "이 폴더의 파일"); files(fl) }
+            }
+            view == "dup" -> {
+                val ds = r.dups ?: emptyList()
+                if (ds.isNotEmpty()) out += Row(0, "${ds.size}묶음 — ⋮ › ‘하나씩만 남기고 고르기’ 로 한꺼번에 고를 수 있습니다")
+                for (gp in ds) { out += Row(0, "같은 파일 ${gp.size}개 · 각 ${Fmt.size(gp[0].size)} · ${Fmt.size(gp[0].size * (gp.size - 1))} 줄일 수 있음"); files(gp) }
+                if (r.dupMore) out += Row(0, "NAS 는 크기가 같은 파일 800개까지만 비교했습니다 — 지운 뒤 ⋮ › ‘중복 다시 찾기’")
+            }
+        }
+        return out to its
+    }
+
+    private fun dirCard(base: Loc, p: String, d: Usage.D, total: Long): Row {
+        val name = p.substringAfterLast('/'); val loc = base.copy(path = p)
+        return Row(1, name, "파일 %,d개".format(d.files), Fmt.size(d.size), (d.size * 1000 / total).toInt(), FileIcon(true, name),
+            act = { navigate(Loc("usage", base.key(), "d:$p")) },
+            long = { AlertDialog.Builder(this).setTitle(name).setItems(arrayOf("폴더 열기", "새 탭에서 열기")) { _, w -> if (w == 0) navigate(loc) else newTab(loc) }.show() })
+    }
+
+    private fun usageMenu(opts: MutableList<Pair<String, () -> Unit>>) {
+        val l = tab.loc; val base = Loc.parse(l.root) ?: return
+        if (l.path == "dup") {
+            opts.add(0, "하나씩만 남기고 고르기 (가장 오래된 것 남김)" to {
+                val ds = Usage.get(base)?.dups ?: emptyList()
+                sel.clear(); ds.forEach { gp -> gp.drop(1).forEach { sel.add(it.path) } }
+                adapter.notifyDataSetChanged(); refreshChrome()
+                if (sel.isNotEmpty()) toast("${sel.size}개를 골랐습니다 — 확인하고 [삭제]를 누르세요")
+            })
+            opts.add(1, "중복 다시 찾기" to { Usage.get(base)?.dups = null; load() })
+        }
+        if (l.path.startsWith("d:")) { val p = l.path.substring(2); opts.add(0, "이 폴더 열기" to { navigate(base.copy(path = p)) }) }
+        opts.add(0, "다시 분석" to { Usage.forget(base); usageErr.remove(l.root); load() })
+    }
+
+    /** 분석 첫 칸: 큰 글씨 합계 + 종류별 색 막대 + 범례 */
+    private fun segCard(convert: View?, r: Row): View {
+        val v = (convert as? FrameLayout) ?: run {
+            val big = ui.label("", 26f, ui.text, bold = true)
+            val sub = ui.label("", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 2) }
+            val bar = SegBar().apply { layoutParams = ui.lp(h = ui.dp(14), top = 12) }
+            val legend = ui.label("", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 10); setLineSpacing(ui.dpf(3f), 1f) }
+            val inner = ui.col(big, sub, bar, legend).apply { setPadding(ui.dp(16), ui.dp(14), ui.dp(16), ui.dp(14)); background = ui.round(ui.panel2, 8) }
+            FrameLayout(this).apply { setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(4)); addView(inner) }
+        }
+        val inner = v.getChildAt(0) as LinearLayout
+        (inner.getChildAt(0) as TextView).text = r.title
+        (inner.getChildAt(1) as TextView).text = r.sub
+        (inner.getChildAt(2) as SegBar).apply { segs = r.segs; invalidate() }
+        val sb = android.text.SpannableStringBuilder()
+        r.segs.forEachIndexed { i, (c, _, t) ->
+            if (i > 0) sb.append("    ")
+            val s0 = sb.length; sb.append("● "); sb.setSpan(android.text.style.ForegroundColorSpan(c), s0, s0 + 1, 0)
+            sb.append(t.replace(" ", " "))
+        }
+        (inner.getChildAt(3) as TextView).text = sb
+        return v
+    }
+
+    private inner class SegBar : View(this@MainActivity) {
+        var segs: List<Triple<Int, Float, String>> = emptyList()
+        private val p = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+        private val clip = android.graphics.Path()
+        override fun onDraw(c: android.graphics.Canvas) {
+            val w = width.toFloat(); val h = height.toFloat()
+            clip.reset(); clip.addRoundRect(0f, 0f, w, h, h / 2, h / 2, android.graphics.Path.Direction.CW)
+            c.save(); c.clipPath(clip)
+            p.color = ui.line; c.drawRect(0f, 0f, w, h, p)
+            var x = 0f
+            for ((col, f, _) in segs) { val ww = f * w; if (ww <= 0f) continue; p.color = col; c.drawRect(x, 0f, x + ww, h, p); x += ww
+                p.color = ui.panel2; c.drawRect(x - ui.dpf(1f), 0f, x, h, p) }
+            c.restore()
+        }
+    }
+
     // ================= 작은 도구 =================
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
@@ -993,7 +1211,7 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun thumb(iv: ImageView, it: Item) {
         val l = tab.loc
-        val base = when (l.kind) { "local" -> l; "search" -> Loc.parse(l.root)?.takeIf { b -> b.kind == "local" }; else -> null } ?: run { iv.tag = null; return }
+        val base = baseOf(l).takeIf { b -> b.kind == "local" } ?: run { iv.tag = null; return }
         val k = FileIcon.kindOf(it.name)
         if (it.dir || (k != "image" && k != "video")) { iv.tag = null; return }
         val f = File(base.root, it.path); val key = f.path + ":" + it.mtimeMs
@@ -1026,15 +1244,16 @@ class MainActivity : Activity(), Transfers.Listener {
         override fun getCount() = rows.size
         override fun getItem(p: Int): Any = rows[p]
         override fun getItemId(p: Int) = p.toLong()
-        override fun getViewTypeCount() = 3
+        override fun getViewTypeCount() = 4
         override fun getItemViewType(p: Int) = rows[p].type
-        override fun isEnabled(p: Int) = rows[p].type != 0
+        override fun isEnabled(p: Int) = rows[p].type == 1 || rows[p].type == 2
 
         override fun getView(p: Int, convert: View?, parent: ViewGroup?): View {
             val r = rows[p]
             return when (r.type) {
                 0 -> ((convert as? TextView) ?: ui.label("", 12.5f, ui.sub, bold = true).apply { setPadding(ui.dp(18), ui.dp(16), ui.dp(16), ui.dp(6)) }).apply { text = r.title }
                 1 -> card(convert, r)
+                3 -> segCard(convert, r)
                 else -> fileRow(convert, r.item!!)
             }
         }
@@ -1087,6 +1306,7 @@ class MainActivity : Activity(), Transfers.Listener {
             (box.getChildAt(1) as TextView).text = when {
                 l.kind == "trash" -> prettyAbs(it.extra.substringBeforeLast('/')) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000)
                 l.kind == "search" -> "/" + it.path.substringBeforeLast('/', "") + "  ·  " + (if (it.dir) "폴더" else Fmt.size(it.size))
+                l.kind == "usage" -> Fmt.size(it.size) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000).take(10) + "  ·  /" + it.path.substringBeforeLast('/', "")
                 it.dir -> Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
                 else -> Fmt.time(it.mtimeMs * 1_000_000) + "  ·  " + Fmt.size(it.size)
             }

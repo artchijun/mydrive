@@ -18,8 +18,8 @@ android {
         applicationId = "kr.artchijun.mydrive"
         minSdk = 29          // 안드로이드 10 이상 (다운로드 폴더에 바로 저장)
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.4.0"
     }
     signingConfigs {
         if (ks.getProperty("storeFile") != null) create("release") {

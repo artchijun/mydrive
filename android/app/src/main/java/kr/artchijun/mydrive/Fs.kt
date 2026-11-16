@@ -175,6 +175,8 @@ class Fs(private val ctx: Context, private val api: Api) {
 
     fun emptyTrash() { for (d in trashDirs()) d.listFiles()?.forEach { if (it.name != ".nomedia") it.deleteRecursively() } }
 
+    /** 그 저장소 휴지통이 차지한 용량 */
+    fun trashBytes(vol: File): Long = File(vol, TRASH_DIR).walkTopDown().filter { it.isFile }.sumOf { it.length() }
     fun trashSize(): Pair<Int, Long> { val l = trashList(); return l.size to l.sumOf { it.size } }
 
     private fun sizeOf(f: File): Long = if (f.isFile) f.length() else f.walkTopDown().filter { it.isFile }.sumOf { it.length() }
