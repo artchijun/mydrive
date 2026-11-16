@@ -59,6 +59,7 @@ class TransferService : Service() {
         val line = listOfNotNull(if (j.files > 1) "${j.filesDone}/${j.files}개" else null, Fmt.size(j.done) + " / " + Fmt.size(j.total),
             j.speed().takeIf { it > 0 }?.let { Fmt.speed(it) }, j.eta().takeIf { it >= 0 }?.let { Fmt.dur(it) + " 남음" }).joinToString(" · ") + more
         b.setContentTitle("$what: ${j.title}").setContentText(line)
+        Transfers.asking?.let { q -> return b.setContentTitle("이름이 같은 파일이 있습니다 — 눌러서 고르기").setContentText(q.src.name).setStyle(null).setProgress(0, 0, false).build() }
         if (j.file.isNotEmpty()) b.setStyle(Notification.BigTextStyle().bigText(line + "\n" + j.file.substringAfterLast('/')))
         if (j.total > 0) b.setProgress(1000, (j.done * 1000 / j.total).toInt(), false) else b.setProgress(0, 0, true)
         return b.build()

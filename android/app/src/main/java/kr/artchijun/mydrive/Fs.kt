@@ -53,6 +53,8 @@ class Fs(private val ctx: Context, private val api: Api) {
         const val SKIP = 0; const val OVERWRITE = 1; const val RENAME = 2
         /** 같은 파일일 때만 (옮기기): 받는 쪽 것을 그대로 두고 원본을 지움 = 옮긴 것으로 침 */
         const val DROP_SOURCE = 3
+        /** 정해 둔 방식이 없음 → 겹치는 파일마다 물음 (다른 모든 항목에 적용 가능) */
+        const val ASK = -1
         const val TRASH_DIR = ".Mydrive-trash"
         private val skipLocal = setOf(TRASH_DIR)
     }
@@ -315,6 +317,22 @@ class Fs(private val ctx: Context, private val api: Api) {
      */
     fun transfer(job: Transfers.Job, src: Loc, items: List<Item>, dst: Loc, move: Boolean, policy: Int = RENAME, samePolicy: Int = SKIP): String? {
         if (!dst.writable) throw IOException("여기에는 붙여 넣을 수 없습니다")
+        // 겹칠 때 어떻게 할지: 설정에서 정해 둔 방식, 없으면 파일마다 물어봄 ('다른 모든 항목에 적용'을 고르면 그 뒤로는 묻지 않음)
+        var allPick = ASK
+        val pick: (Item, Item, Loc) -> Int = { it, ex, at ->
+            val same = sameFile(ex, it)
+            val fixed = if (same) samePolicy else policy
+            when {
+                fixed >= 0 -> if (fixed == DROP_SOURCE && !move) SKIP else fixed
+                allPick >= 0 -> allPick
+                else -> {
+                    val q = Transfers.Ask(job, it, ex, same, move, at.path)
+                    Transfers.ask(q)
+                    if (q.all) allPick = q.answer
+                    q.answer
+                }
+            }
+        }
         if (src.kind == dst.kind && src.root == dst.root && items.any { dst.path == it.path || dst.path.startsWith(it.path + "/") })
             throw IOException("폴더를 자기 안으로 옮길 수 없습니다")
         val rep = Report()
@@ -331,12 +349,14 @@ class Fs(private val ctx: Context, private val api: Api) {
                 var n = it.name
                 if (ex != null) {
                     if (ex.dir && it.dir) { slow += it; continue }
-                    val same = sameFile(ex, it); val pol = if (same) samePolicy else policy
-                    if (same && pol == SKIP) { rep.same++; job.skipped++; continue }
-                    if (same && pol == DROP_SOURCE) { deleteSource(src, it); rep.dropped++; continue }
-                    if (ex.dir != it.dir || pol == RENAME) { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                    else if (pol == SKIP) { rep.skipped++; job.skipped++; continue }
-                    else { delete(dst, listOf(ex)); rep.overwritten++ }
+                    val same = sameFile(ex, it)
+                    val pol = if (ex.dir != it.dir) RENAME else pick(it, ex, dst)
+                    when (pol) {
+                        SKIP -> { if (same) rep.same++ else rep.skipped++; job.skipped++; continue }
+                        DROP_SOURCE -> { deleteSource(src, it); rep.dropped++; continue }
+                        RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
+                        else -> { delete(dst, listOf(ex)); rep.overwritten++ }
+                    }
                 }
                 moveSame(src, it, dst, n)
                 here[n.lowercase()] = it.copy(name = n)
@@ -350,7 +370,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             for (it in slow) {
                 if (job.cancel) throw Canceled()
                 val moved = ArrayList<Item>()
-                val all = put(job, src, it, dst, here, policy, samePolicy, rep, moved)
+                val all = put(job, src, it, dst, here, pick, rep, moved)
                 if (move) {
                     if (all) deleteSource(src, it)               // 다 옮겼으면 통째로
                     else moved.forEach { f -> deleteSource(src, f) }   // 일부 건너뛰었으면 옮긴 파일만
@@ -388,7 +408,7 @@ class Fs(private val ctx: Context, private val api: Api) {
     }
 
     /** 하나(파일이나 폴더)를 dst 폴더에 넣음. here = dst 안 이름들. 건너뛴 것이 없으면 true. moved = 넣은 파일들(옮기기용) */
-    private fun put(job: Transfers.Job, src: Loc, it: Item, dst: Loc, here: MutableMap<String, Item>, policy: Int, samePolicy: Int, rep: Report, moved: MutableList<Item>): Boolean {
+    private fun put(job: Transfers.Job, src: Loc, it: Item, dst: Loc, here: MutableMap<String, Item>, pick: (Item, Item, Loc) -> Int, rep: Report, moved: MutableList<Item>): Boolean {
         if (job.cancel) throw Canceled()
         val ex = here[it.name.lowercase()]
         if (it.dir) {
@@ -397,7 +417,7 @@ class Fs(private val ctx: Context, private val api: Api) {
                 val into = dst.child(ex.name)
                 val inner = list(into, true).associateBy { c -> c.name.lowercase() }.toMutableMap()
                 var all = true
-                for (c in list(src.copy(path = it.path), true)) if (!put(job, src, c, into, inner, policy, samePolicy, rep, moved)) all = false
+                for (c in list(src.copy(path = it.path), true)) if (!put(job, src, c, into, inner, pick, rep, moved)) all = false
                 return all
             }
             val n = if (ex == null) it.name else { rep.renamed++; Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) } }
@@ -408,12 +428,13 @@ class Fs(private val ctx: Context, private val api: Api) {
         }
         var n = it.name
         if (ex != null) {
-            when {
-                sameFile(ex, it) && samePolicy == SKIP -> { rep.same++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
-                sameFile(ex, it) && samePolicy == DROP_SOURCE -> {   // 받는 쪽에 같은 파일이 있으니 옮긴 것으로 침 → 원본은 지움
-                    rep.dropped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; moved += it; return true }
-                ex.dir || (if (sameFile(ex, it)) samePolicy else policy) == RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
-                !sameFile(ex, it) && policy == SKIP -> { rep.skipped++; job.done += it.size; job.skipped++; job.filesDone++; job.file = it.path; return false }
+            val same = sameFile(ex, it)
+            job.file = it.path
+            when (if (ex.dir) RENAME else pick(it, ex, dst)) {
+                SKIP -> { if (same) rep.same++ else rep.skipped++; job.done += it.size; job.skipped++; job.filesDone++; return false }
+                DROP_SOURCE -> {   // 받는 쪽에 같은 파일이 있으니 옮긴 것으로 침 → 원본은 지움
+                    rep.dropped++; job.done += it.size; job.skipped++; job.filesDone++; moved += it; return true }
+                RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
                 else -> {   // 덮어쓰기: NAS 는 덮는 판을 이전 버전으로 남김, 휴대폰·클라우드는 덮이는 파일을 휴지통으로
                     if (dst.kind != "nas") delete(dst, listOf(ex))
                     rep.overwritten++

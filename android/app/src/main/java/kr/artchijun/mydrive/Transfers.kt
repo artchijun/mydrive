@@ -48,7 +48,23 @@ object Transfers {
         fun eta(): Long { val v = speed(); return if (v <= 0 || total <= 0 || done >= total) -1 else (total - done) / v }
     }
 
-    interface Listener { fun onTransfers() ; fun onFinished(job: Job, error: String?, result: String?) }
+    interface Listener { fun onTransfers() ; fun onFinished(job: Job, error: String?, result: String?); fun onAsk(q: Ask) }
+
+    /** 받는 폴더에 같은 이름이 있음 → 화면에서 고를 때까지 작업이 기다림 */
+    class Ask(val job: Job, val src: Item, val dst: Item, val same: Boolean, val move: Boolean, val folder: String) {
+        @Volatile var answer = -1   // Fs.SKIP · OVERWRITE · RENAME
+        @Volatile var all = false   // 다른 모든 항목에 적용
+    }
+    @Volatile var asking: Ask? = null
+        private set
+    /** 일하는 쪽(백그라운드)에서 부름: 화면이 답할 때까지 기다림. 앱 화면이 없으면 알림으로 알리고 화면이 열릴 때 물음 */
+    fun ask(q: Ask) {
+        asking = q
+        changed()
+        main.post { listener?.onAsk(q) }
+        try { while (q.answer < 0) { if (q.job.cancel) throw Canceled(); Thread.sleep(100) } }
+        finally { asking = null; changed() }
+    }
 
     private val main = Handler(Looper.getMainLooper())
     private val pool = Executors.newSingleThreadExecutor()
