@@ -1042,48 +1042,33 @@ class MainActivity : Activity(), Transfers.Listener {
         if (::title.isInitialized) { refreshChrome(); list.postDelayed({ pickSaveDest() }, 700) }   // NAS 목록이 올 틈을 조금 둠
     }
 
-    // ---------- 받은 파일을 저장할 곳 고르기 ----------
-    //   처음 목록: 지난번 저장한 곳 · 지금 폴더 · 즐겨찾기 · 최근 · 휴대폰 · NAS · 웹 폴더 · 클라우드 → 폴더를 골라 들어가며 [여기에 저장]
-    private fun pickSaveDest() {
+    // ---------- 받은 파일을 저장할 곳 고르기 (SavePick: 아래에서 올라오는 판) ----------
+    //   NAS 가 맨 위 → 자주 쓰는 곳(지난번·지금 폴더·즐겨찾기·최근) → 휴대폰 → 클라우드
+    private fun pickSaveDest(tries: Int = 0) {
         if (pending.isEmpty() || isFinishing) return
+        if (pf.paired && nasRoots.isEmpty() && nasErr == null && tries < 8) { list.postDelayed({ pickSaveDest(tries + 1) }, 400); return }   // NAS 목록을 조금 기다림
         val seen = HashSet<String>()
-        val places = mutableListOf<Pair<String, Loc>>()
-        fun add(label: String, l: Loc?) { if (l != null && l.writable && seen.add(l.key())) places += label to l }
-        Loc.parse(pf.str("lastSave", ""))?.let { add("지난번 저장한 곳 · " + placeText(it), it) }
-        if (tab.loc.writable) add("지금 폴더 · " + placeText(tab.loc), tab.loc)
-        favList().forEach { add("★ " + placeText(it), it) }
-        recentList().filter { it.writable }.take(5).forEach { add("최근 · " + placeText(it), it) }
+        fun P(title: String, l: Loc?, sub: String = ""): SavePick.Place? = if (l != null && l.writable && seen.add(l.key())) SavePick.Place(title, sub, l) else null
+        val nas = (nasRoots.filter { it.name !in nasHidden() }.map { P(it.name, Loc("nas", it.name), "NAS 동기화 폴더 · %,d개".format(it.items)) } +
+            webRoots.map { P(it.name, Loc("nas", "~" + it.name), "NAS 웹 폴더") }).filterNotNull()
+        val often = (listOfNotNull(Loc.parse(pf.str("lastSave", ""))?.let { P(tabTitle(it), it, "지난번 저장한 곳 · " + placeText(it)) },
+            if (tab.loc.writable) P(tabTitle(tab.loc), tab.loc, "지금 폴더 · " + placeText(tab.loc)) else null) +
+            favList().map { P(tabTitle(it), it, "즐겨찾기 · " + placeText(it)) } +
+            recentList().filter { it.writable }.take(4).map { P(tabTitle(it), it, "최근 · " + placeText(it)) }).filterNotNull()
         val prim = fs.volumes().first().root.path
-        add("휴대폰 · 다운로드", Loc("local", prim, "Download"))
-        fs.volumes().forEach { v -> add("휴대폰 · " + v.title, Loc("local", v.root.path)) }
-        nasRoots.filter { it.name !in nasHidden() }.forEach { add("NAS · " + it.name, Loc("nas", it.name)) }
-        webRoots.forEach { add("NAS 웹 폴더 · " + it.name, Loc("nas", "~" + it.name)) }
-        CloudDrive.all(this).forEach { c -> add(c.title + " · " + c.account, Loc("cloud", c.id)) }
-        AlertDialog.Builder(this).setTitle("받은 파일 ${pending.size}개 — 저장할 곳")
-            .setItems(places.map { it.first }.toTypedArray()) { _, w -> browseSaveDest(places[w].second) }
-            .setNegativeButton("나중에", null).show()
-    }
-
-    private fun browseSaveDest(l: Loc) {
-        bg({ fs.list(l, false) }) { kids ->
-            if (isFinishing || pending.isEmpty()) return@bg
-            val dirs = kids.filter { it.dir }.sortedWith { a, b -> coll.compare(a.name, b.name) }
-            val names = listOf((if (l.path.isEmpty()) "◀  처음 목록" else "⬆  위 폴더로")) + dirs.map { "📁  " + it.name }
-            AlertDialog.Builder(this).setTitle(placeText(l))
-                .setItems(names.toTypedArray()) { _, w ->
-                    if (w == 0) { if (l.path.isEmpty()) pickSaveDest() else browseSaveDest(l.parent()!!) }
-                    else browseSaveDest(l.copy(path = dirs[w - 1].path))
-                }
-                .setPositiveButton("여기에 저장") { _, _ ->
-                    val u = pending; pending = emptyList()
-                    pf.putStr("lastSave", l.key()); addRecent(l)
-                    importUris(u, l, kids); refreshChrome()
-                    toast("${u.size}개를 ‘${placeText(l)}’ 에 저장합니다")
-                }
-                .setNeutralButton("새 폴더") { _, _ ->
-                    ask("새 폴더", "") { n -> bg({ fs.mkdir(l, n.trim()) }) { browseSaveDest(l.child(n.trim())) } }
-                }.show()
-        }
+        val phone = (listOf(P("다운로드", Loc("local", prim, "Download"), volTitle(prim) + "/Download")) + fs.volumes().map { v -> P(v.title, Loc("local", v.root.path)) }).filterNotNull()
+        val cloud = CloudDrive.all(this).mapNotNull { c -> P(c.title, Loc("cloud", c.id), c.account) }
+        val names = pending.map { u -> describe(u).name }
+        SavePick(this, ui, fs, net, "받은 파일 ${pending.size}개 저장", names,
+            listOf("NAS" to nas, "자주 쓰는 곳" to often, "휴대폰" to phone, "클라우드" to cloud),
+            iconOf = { tabIcon(it) }, textOf = { placeText(it) },
+            askName = { done -> ask("새 폴더", "") { n -> if (n.isNotBlank()) done(n.trim()) } },
+            onPick = { l, kids ->
+                val u = pending; pending = emptyList()
+                pf.putStr("lastSave", l.key()); addRecent(l)
+                importUris(u, l, kids); refreshChrome()
+                toast("${u.size}개를 ‘${placeText(l)}’ 에 저장합니다")
+            }).show()
     }
 
     private class Src(val uri: Uri, val name: String, val size: Long, val mtimeNs: Long)
