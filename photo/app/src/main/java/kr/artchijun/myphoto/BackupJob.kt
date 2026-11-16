@@ -32,10 +32,14 @@ object BackupSchedule {
 
     private fun net(ctx: Context) = if (Backup.Settings(ctx).wifiOnly) JobInfo.NETWORK_TYPE_UNMETERED else JobInfo.NETWORK_TYPE_ANY
 
+    /** 지금 돌고 있는 일 번호 — 같은 번호로 다시 예약하면 안드로이드가 돌고 있던 백업을 멈춰 버림 (백업이 중간에 '멈춤'이 되던 까닭) */
+    @Volatile var runningJob = 0
+
     fun schedule(ctx: Context) {
         val js = ctx.getSystemService(JobScheduler::class.java)
         val st = Backup.Settings(ctx)
         if (!st.on) { js.cancel(JOB_CONTENT); js.cancel(JOB_PERIODIC); js.cancel(JOB_NOW); return }
+        if (runningJob == JOB_CONTENT) return   // 그 일이 끝날 때 스스로 다시 예약함
         val cn = ComponentName(ctx, BackupJob::class.java)
         // 새 사진 감시 (한 번 불리면 끝나므로 돌 때마다 다시 예약)
         js.schedule(JobInfo.Builder(JOB_CONTENT, cn)
@@ -51,6 +55,7 @@ object BackupSchedule {
     /** 조건(와이파이·충전)이 맞으면 곧 돌리기 — 망이 끊겨 멈췄을 때 다시 잇기용 (규칙을 바꿨을 때는 latency 를 짧게) */
     fun soon(ctx: Context, latency: Long = 30_000) {
         if (!Backup.Settings(ctx).on) return
+        if (runningJob == JOB_NOW) return       // 돌고 있는 것을 멈추지 않게 (끝날 때 필요하면 다시 예약)
         ctx.getSystemService(JobScheduler::class.java).schedule(JobInfo.Builder(JOB_NOW, ComponentName(ctx, BackupJob::class.java))
             .setRequiredNetworkType(net(ctx)).setRequiresCharging(Backup.Settings(ctx).chargingOnly)
             .setMinimumLatency(latency).setBackoffCriteria(60_000, JobInfo.BACKOFF_POLICY_EXPONENTIAL).build())
@@ -63,8 +68,15 @@ class BackupJob : JobService() {
 
     override fun onStartJob(p: JobParameters): Boolean {
         stop = false
+        if (Backup.running) {   // 이미 다른 쪽이 올리는 중 → 이번 것은 끝내고, 새 사진 감시만 조금 뒤 다시 걸어 둠
+            val app = applicationContext
+            android.os.Handler(mainLooper).postDelayed({ BackupSchedule.schedule(app) }, 1000)
+            return false
+        }
         worker = Thread {
+            BackupSchedule.runningJob = p.jobId
             val done = try { Backup.run(this, { stop }) { pr -> Notes.progress(this, pr) } } catch (e: Exception) { false }
+            BackupSchedule.runningJob = 0
             BackupSchedule.schedule(this)   // 새 사진 감시 다시 걸기
             if (!done && !stop && !Backup.stopAsked) BackupSchedule.soon(this)
             Notes.summary(this)
@@ -93,6 +105,7 @@ class BackupService : Service() {
         Thread {
             val done = try { Backup.run(this, { stopAsked }) { pr -> Notes.update(this, pr) } } catch (e: Exception) { false }
             if (!done && !stopAsked && !Backup.stopAsked) BackupSchedule.soon(this)
+            BackupSchedule.schedule(this)   // 새 사진 감시 다시 걸기
             stopForeground(STOP_FOREGROUND_REMOVE)
             Notes.summary(this)
             stopSelf()

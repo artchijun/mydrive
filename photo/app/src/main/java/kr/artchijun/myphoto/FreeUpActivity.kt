@@ -167,7 +167,13 @@ class FreeUpActivity : Activity() {
         rows = emptyList(); buildSeg(); refresh()
         bg.execute {
             var err: String? = null
-            if (force || !Library.hasServer(this, sc)) {
+            // 백업이 같은 목록을 읽는 중이면 기다렸다가 그 목록을 씀 (백업 도중에도 공간 확보·지우기를 할 수 있게)
+            if (Library.isRefreshing(sc)) {
+                runOnUiThread { if (my == loadSeq) status.text = "백업이 서버 목록을 읽는 중 — 다 읽으면 그 목록으로 대조합니다" }
+                while (Library.isRefreshing(sc) && !stop && my == loadSeq) Thread.sleep(300)
+                if (my != loadSeq) return@execute
+            }
+            else if (force || !Library.hasServer(this, sc)) {
                 var last = 0L
                 val ok = try { Library.refreshServer(this, sc, { stop || my != loadSeq }) { n, t ->
                     val now = System.currentTimeMillis(); if (now - last < 300) return@refreshServer; last = now

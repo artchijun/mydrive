@@ -298,7 +298,10 @@ object Backup {
                             if (have == r.size) { Library.addServer(ctx, ph1, fid); done(d, r.key, fid, 2, path); skN.incrementAndGet(); continue }   // ② 올릴 폴더에 같은 이름·크기
                             // 밖(터널)에서 큰 파일은 Syno.upload 가 알아서 나눠 올림
                             val uri = ContentUris.withAppendedId(if (r.video) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI, r.key / 2)
-                            ph.syno.upload(ns, fid, r.name, r.mtime, r.size, { openOriginal(ctx, uri) },
+                            // 시놀로지는 확장자가 없는 이름을 받지 않음(오류 620) → 파일 종류로 확장자를 붙여 올림. 바뀐 때가 없으면 찍은 때로
+                            val upName = withExt(ctx, r.name, uri, r.video)
+                            val mt = if (r.mtime > 0) r.mtime else maxOf(r.taken / 1000, 1)
+                            ph.syno.upload(ns, fid, upName, mt, r.size, { openOriginal(ctx, uri) },
                                 duplicate = if (have != null) "rename" else "ignore",   // 같은 이름인데 다른 파일이면 이름을 바꿔서
                                 progress = { b -> prog(b) },
                                 canceled = { halt() || quit() || st.rules != rules0 })
@@ -311,7 +314,14 @@ object Backup {
                         } catch (e: SynoError) {
                             // 서버가 거절: 이 파일만 실패로 두고 다음 파일 (세션 문제면 전체를 멈춤)
                             if (e.code in setOf(105, 106, 107, 119)) abort.compareAndSet(null, "로그인이 끊겼습니다 — 앱에서 다시 로그인해 주세요")
+                            else if (e.code == 620) {   // 시놀로지가 이 파일 자체를 받지 않음 → 다시 해도 같으니 바로 실패로 (되풀이하지 않음)
+                                val why = "시놀로지 포토가 받지 않는 파일 (오류 620: 파일 이름·형식) — ${r.name}, ${r.rel.trimEnd('/')}, ${r.size} 바이트"
+                                fail(d, r, why, final = true); flN.incrementAndGet(); log(ctx, "실패: $why")
+                            }
                             else { fail(d, r, e.message ?: "오류 ${e.code}"); flN.incrementAndGet(); log(ctx, "실패: ${r.name} — ${e.message}") }
+                        } catch (e: java.io.FileNotFoundException) {
+                            // 백업 도중에 휴대폰에서 지운 파일 (공간 확보 등) → 실패가 아니라 목록에서 뺌
+                            d.delete("media", "id=?", arrayOf(r.key.toString()))
                         } catch (e: IOException) {
                             // 망이 끊김: 전체를 멈추고 나중에 이어서 (이 파일은 시도 횟수만 셈)
                             if (quit()) { /* 다른 일꾼 때문에 멈춘 것 */ }
@@ -332,7 +342,7 @@ object Backup {
                 threads.forEach { it.join() }
                 if (changed.get() && abort.get() == null) { rules = st.rules; continue@outer }
                 abort.get()?.let { why ->
-                    val left = rows.size - finished.get()
+                    val left = try { counts(ctx).waiting } catch (e: Exception) { rows.size - finished.get() }
                     st.lastMsg = (if (why == "멈춤") "멈춤" else why) + " — ${left}개 남음"; log(ctx, "멈춤: $why"); return false
                 }
                 break
@@ -415,7 +425,17 @@ object Backup {
         val now = System.currentTimeMillis()
         d.update("media", ContentValues().apply { put("state", DONE); put("err", null as String?); put("at", now); put("srv_folder", folder); put("srv_at", now); put("how", how); put("srv_path", path) }, "id=?", arrayOf(key.toString()))
     }
-    private fun fail(d: SQLiteDatabase, r: Row, err: String) {
-        d.update("media", ContentValues().apply { put("state", FAIL); put("err", err); put("tries", r.tries + 1); put("at", System.currentTimeMillis()) }, "id=?", arrayOf(r.key.toString()))
+    /** final: 다시 해도 같은 실패 (자동으로 되풀이하지 않음 — '실패한 것 다시 시도' 로만) */
+    private fun fail(d: SQLiteDatabase, r: Row, err: String, final: Boolean = false) {
+        d.update("media", ContentValues().apply { put("state", FAIL); put("err", err); put("tries", if (final) MAX_TRIES else r.tries + 1); put("at", System.currentTimeMillis()) }, "id=?", arrayOf(r.key.toString()))
+    }
+
+    /** 이름에 확장자가 없으면 파일 종류(MIME)로 붙임: IMG_0001 → IMG_0001.jpg */
+    private fun withExt(ctx: Context, name: String, uri: Uri, video: Boolean): String {
+        val dot = name.lastIndexOf('.')
+        if (dot > 0 && dot < name.length - 1 && name.length - dot <= 6) return name
+        val mime = try { ctx.contentResolver.getType(uri) } catch (e: Exception) { null }
+        val ext = mime?.let { android.webkit.MimeTypeMap.getSingleton().getExtensionFromMimeType(it) } ?: if (video) "mp4" else "jpg"
+        return name.trimEnd('.') + "." + ext
     }
 }

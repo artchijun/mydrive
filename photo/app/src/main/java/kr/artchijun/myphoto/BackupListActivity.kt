@@ -109,7 +109,7 @@ class BackupListActivity : Activity() {
     override fun onActivityResult(code: Int, result: Int, data: android.content.Intent?) {
         @Suppress("DEPRECATION") super.onActivityResult(code, result, data)
         if (code != 42) return
-        if (result != RESULT_OK) { Toast.makeText(this, "지우지 않았습니다", Toast.LENGTH_SHORT).show(); return }
+        if (result != RESULT_OK) { pending = emptyList(); Toast.makeText(this, "지우지 않았습니다", Toast.LENGTH_SHORT).show(); return }
         val bytes = pending.sumOf { it.size }
         Backup.forget(this, pending.map { it.key })
         Backup.log(this, "백업 기록에서 휴대폰 사진 ${pending.size}개 지움 (${Fmt.size(bytes)})")
@@ -144,8 +144,10 @@ class BackupListActivity : Activity() {
             }
         }
         // 백업 중이면 1초마다 새로
-        h.postDelayed({ if (sel.isEmpty()) load() else h.postDelayed({ load() }, 3000) }, if (Backup.running) 1500 else 5000)
+        // 고르는 동안에는 목록을 새로 고치지 않음 (백업 중에도 고른 것이 흐트러지지 않고 지울 수 있게) — 고르기가 끝나면 다시
+        h.postDelayed({ if (sel.isEmpty() && pending.isEmpty()) load() else waitSel() }, if (Backup.running) 1500 else 5000)
     }
+    private fun waitSel() { h.postDelayed({ if (sel.isEmpty() && pending.isEmpty()) load() else waitSel() }, 1000) }
 
     private fun paintSeg(c: Backup.Counts?) {
         seg.removeAllViews()
