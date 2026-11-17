@@ -255,17 +255,31 @@ class DupActivity : Activity() {
         var counts = places()
         val saved = Dups.preferred(this)
         // 순서: 저장해 둔 순서 → 나머지 줄 → 중복 많은 곳부터
-        fun initial(): MutableList<String> {
-            val known = counts.keys
+        var order: MutableList<String> = ArrayList()
+        /**
+         * 단계를 바꿀 때 지금 정한 순서를 이어 감: 맨 위에서 정한 순서대로 그 안의 하위 폴더들이 줄 섬
+         * (하위 폴더끼리의 순서는 정해 둔 것이 있으면 그대로, 없으면 중복 많은 것부터). 위로 묶을 때는 하위 중 가장 앞선 자리로.
+         * 하위 단계에서 따로 순서를 안 바꾸면 위 단계의 순서만으로 충분 — 아래까지 정할 필요 없음
+         */
+        fun regroup(cur: List<String>): MutableList<String> {
+            val r = cur.indexOf(Dups.REST).let { if (it < 0) cur.size else it }
+            val savedPos = Dups.preferred(this).withIndex().associate { it.value to it.index }
+            fun anchor(k: String): Double {
+                var best = -1; var len = -1   // 이 위치를 품는(더 얕은) 것 중 가장 자세한 것
+                cur.forEachIndexed { i, p -> if (p != Dups.REST && (k == p || k.startsWith("$p/")) && p.length > len) { best = i; len = p.length } }
+                if (best >= 0) return best.toDouble()
+                val under = cur.withIndex().filter { (_, p) -> p != Dups.REST && p.startsWith("$k/") }.minOfOrNull { it.index }   // 이 위치 아래에 있던 것들
+                return under?.toDouble() ?: (r + 0.5)   // 순서를 모르는 위치는 '정하지 않은 위치' 줄 바로 아래
+            }
+            val keys = counts.keys.sortedWith(compareBy<String>({ anchor(it) }, { savedPos[it] ?: Int.MAX_VALUE }, { -(counts[it] ?: 0) }))
             val out = ArrayList<String>()
-            for (p in saved) if (p == Dups.REST || p in known) out += p
-            val rest = known.filter { it !in out }.sortedByDescending { counts[it] ?: 0 }
-            val at = out.indexOf(Dups.REST)
-            if (at >= 0) out.addAll(at + 1, rest) else { out += rest }   // 새 위치는 '나머지' 줄 아래로
-            if (Dups.REST !in out) out += Dups.REST
+            var restPut = false
+            for (k in keys) { if (!restPut && anchor(k) > r) { out += Dups.REST; restPut = true }; out += k }
+            if (!restPut) out += Dups.REST
             return out
         }
-        var order = initial()
+        // 처음 열 때: 저장해 둔 순서(어느 단계에서 정했든)를 지금 단계에 맞춰 이어 붙임
+        order = regroup(saved.let { if (Dups.REST in it) it else it + Dups.REST })
         val box = ui.col().apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(14), 0) }
         // 고친 순서로 미리 셈: 위치마다 남김/지움
         fun preview(): Map<String, Pair<Int, Int>> {
@@ -279,14 +293,14 @@ class DupActivity : Activity() {
         fun draw() {
             box.removeAllViews()
             box.addView(ui.label(if (groups.isEmpty()) "맨 위 폴더들입니다. 중복을 찾은 뒤 열면 중복이 있는 위치만 모두 나옵니다." else
-                "중복이 있는 위치 ${counts.size}곳. 위에 있을수록 그곳의 것을 남깁니다. 다른 규칙보다 먼저 쓰려면 규칙에서 '위치 순위'를 맨 위로.", 12.5f, ui.sub))
+                "중복이 있는 위치 ${counts.size}곳. 위에 있을수록 그곳의 것을 남깁니다.\n맨 위 단계에서 정하면 그 안의 하위 폴더 모두에 적용됩니다. 하위 폴더끼리 순서가 필요할 때만 2·3단계로 들어가 고치세요 (위 단계 순서는 그대로 이어집니다).", 12.5f, ui.sub))
             // 묶어 보기 단계
             val seg = ui.row().apply { layoutParams = ui.lp(top = 8) }
             listOf(1 to "맨 위", 2 to "2단계", 3 to "3단계", 0 to "끝까지").forEach { (d, n) ->
                 seg.addView(ui.label(n, 12.5f, if (d == depth) ui.onAccent else ui.text).apply {
                     gravity = Gravity.CENTER; background = ui.press(ui.round(if (d == depth) ui.accent else ui.panel2, 14), 14)
                     layoutParams = LinearLayout.LayoutParams(0, ui.dp(30), 1f).apply { rightMargin = ui.dp(4) }
-                    setOnClickListener { if (depth != d) { depth = d; pf.putInt("dup_depth", d); counts = places(); order = initial(); draw() } }
+                    setOnClickListener { if (depth != d) { depth = d; pf.putInt("dup_depth", d); counts = places(); order = regroup(order); draw() } }
                 })
             }
             if (groups.isNotEmpty()) box.addView(seg)   // 묶어 보기는 찾은 중복이 있을 때만
