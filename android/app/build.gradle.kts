@@ -24,8 +24,8 @@ android {
         applicationId = "kr.artchijun.mydrive"
         minSdk = 29          // 안드로이드 10 이상 (다운로드 폴더에 바로 저장)
         targetSdk = 35
-        versionCode = 26
-        versionName = "0.7.3"
+        versionCode = 27
+        versionName = "0.7.4"
         buildConfigField("String", "GD_CLIENT_ID", "\"" + cloud.getProperty("gdClientId", "") + "\"")
         buildConfigField("String", "GD_CLIENT_SECRET", "\"" + cloud.getProperty("gdClientSecret", "") + "\"")
         buildConfigField("String", "OD_CLIENT_ID", "\"" + cloud.getProperty("odClientId", "") + "\"")

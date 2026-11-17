@@ -136,7 +136,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (!ui.dark) window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         build()
         if (Sync.pairs(this).isNotEmpty()) SyncService.refresh(this)   // 동기화 예약·감시 다시 걸기 (앱을 새로 깔았을 때 등)
-        restoreTabs()
+        restoreTabs(fresh = savedInstanceState == null)
         if (!takeGo(intent)) takeShare(intent)
         renderTabs(); load()
         loadNas(); loadCloud()
@@ -467,13 +467,27 @@ class MainActivity : Activity(), Transfers.Listener {
         pf.putStr("tabs", a.toString()); pf.putInt("tabCur", cur)
     }
 
-    private fun restoreTabs() {
+    /** fresh: 앱을 새로 켬 → 홈 탭 하나로 시작 (고정한 탭만 남김).
+     *  아니면(설정을 바꾸고 돌아옴·화면 회전·시스템이 앱을 잠시 내렸다 되살림) 보던 탭 그대로 */
+    private fun restoreTabs(fresh: Boolean) {
         try {
             val a = JSONArray(pf.str("tabs", "[]"))
             for (i in 0 until a.length()) { val o = a.getJSONObject(i); Loc.parse(o.getString("loc"))?.let { l -> tabs += Tab(if (l.kind == "search") Loc.HOME else l, o.optBoolean("pin")).apply { scroll = o.optInt("s") } } }
         } catch (e: Exception) { }
+        if (fresh) {
+            val keep = tabs.filter { it.pinned && it.loc.kind != "home" }.onEach { it.scroll = 0 }
+            tabs.clear(); tabs += Tab(Loc.HOME); tabs += keep
+            cur = 0; saveTabs0()
+            return
+        }
         if (tabs.isEmpty()) tabs += Tab(Loc.HOME)
         cur = pf.int("tabCur", 0).coerceIn(0, tabs.size - 1)
+    }
+
+    /** 목록을 아직 그리기 전에 탭만 저장 */
+    private fun saveTabs0() {
+        val a = JSONArray(); tabs.forEach { a.put(JSONObject().put("loc", it.loc.key()).put("pin", it.pinned).put("s", 0)) }
+        pf.putStr("tabs", a.toString()); pf.putInt("tabCur", cur)
     }
 
     private fun rememberScroll() { if (tabs.isEmpty()) return; tab.scroll = list.firstVisiblePosition; tab.scrollTop = list.getChildAt(0)?.top ?: 0 }
