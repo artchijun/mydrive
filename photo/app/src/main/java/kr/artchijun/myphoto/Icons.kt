@@ -43,7 +43,11 @@ class Glyph(private val kind: String, private val color: Int) : Drawable() {
             "pin" -> { poly(9f, 4f, 15f, 4f); poly(10f, 4f, 10f, 10f, 7f, 14f, 17f, 14f, 14f, 10f, 14f, 4f); ln(12f, 14f, 12f, 20f) }
             "check" -> poly(5f, 12.5f, 10f, 17.5f, 19f, 7f)
             "sort" -> { ln(4f, 7f, 20f, 7f); ln(4f, 12f, 15f, 12f); ln(4f, 17f, 10f, 17f) }
-            "refresh" -> { cv.drawArc(RectF(5f, 5f, 19f, 19f), -60f, 300f, false, p); poly(17f, 3.5f, 18.8f, 7.6f, 14.6f, 8.6f) }
+            "refresh" -> {   // 시계 방향으로 도는 원 + 끝에 채운 화살촉 (오른쪽 위에서 아래로 향함)
+                cv.drawArc(RectF(5f, 5f, 19f, 19f), 60f, 260f, false, p)
+                path.reset(); path.moveTo(18.78f, 9.19f); path.lineTo(14.04f, 8.2f); path.lineTo(18.63f, 4.35f); path.close()
+                p.style = Paint.Style.FILL; cv.drawPath(path, p); p.style = Paint.Style.STROKE
+            }
             "trash" -> { ln(4f, 6.5f, 20f, 6.5f); poly(9f, 6.5f, 9f, 4f, 15f, 4f, 15f, 6.5f); poly(6f, 6.5f, 7f, 20f, 17f, 20f, 18f, 6.5f); ln(10f, 10f, 10f, 16.5f); ln(14f, 10f, 14f, 16.5f) }
             "copy" -> { rr(8f, 8f, 20f, 20f, 2f); poly(16f, 8f, 16f, 4f, 4f, 4f, 4f, 16f, 8f, 16f) }
             "move" -> { rr(3.5f, 6f, 15f, 18f, 2f); ln(11f, 12f, 21f, 12f); poly(17.5f, 8.5f, 21f, 12f, 17.5f, 15.5f) }
