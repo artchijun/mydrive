@@ -68,13 +68,13 @@ class DupActivity : Activity() {
     private fun intro() {
         showing = false
         bottomBar().visibility = View.GONE
-        val small = CheckBox(this).apply { text = "작게 줄인 사본도 찾기 (찍은 시각이 같고 해상도만 작은 것)"; setTextColor(ui.text); isChecked = pf.bool("dup_small", true)
+        val small = CheckBox(this).apply { text = "작게 줄인 사본도 찾기 (찍은 시각과 그림이 같고 해상도만 작은 것)"; setTextColor(ui.text); isChecked = pf.bool("dup_small", true)
             setOnCheckedChangeListener { _, b -> pf.putBool("dup_small", b) } }
         val rules = Dups.rules(this).filter { it.on }.mapIndexed { i, r -> "${i + 1}. " + Dups.ruleNames[r.key] + (if (r.key == "folder") " (" + Dups.preferred(this).filter { it != Dups.REST }.take(3).joinToString(" > ") { it.trimStart('/') }.ifEmpty { "아직 안 정함" } + (if (Dups.preferred(this).count { it != Dups.REST } > 3) " …" else "") + ")" else "") }
         val col = ui.col(
             ui.label("시놀로지 공유 공간에서 중복을 찾습니다", 16f, ui.text, bold = true),
             scopeBox(),
-            ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 내용(앞·가운데·뒤 일부)까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
+            ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 내용(앞·가운데·뒤 일부)까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것 (작은 미리보기를 견줘 그림이 같은 것만)\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
             small.apply { layoutParams = ui.lp(top = 14) },
             ui.label("남길 것 고르는 규칙 (위에서부터)", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 18) },
             ui.label(rules.joinToString("\n"), 13.5f, ui.text).apply { layoutParams = ui.lp(top = 6) },

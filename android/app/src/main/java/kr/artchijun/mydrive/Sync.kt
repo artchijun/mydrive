@@ -78,13 +78,15 @@ object Sync {
     val busy get() = running.get()
     /** 이번에 지우기를 허락받은 짝 (많이 지우게 되어 멈췄던 것) */
     private val allowDelete = ConcurrentHashMap.newKeySet<String>()
+    /** 이번에 '되살리기'를 고른 짝: 한쪽에서 지운 것을 다른 쪽에서 다시 가져옴 */
+    private val restoreSet = ConcurrentHashMap.newKeySet<String>()
     private fun pendingMap(ctx: Context): JSONObject = try { JSONObject(Prefs(ctx).str("sync_pending", "{}")) } catch (e: Exception) { JSONObject() }
     /** 돌릴 짝 넣기. manual = 사용자가 눌렀음 (와이파이만·꺼 둠을 따지지 않음) */
-    fun request(ctx: Context, ids: Collection<String>, manual: Boolean, allowDel: Boolean = false) = synchronized(pf) {
+    fun request(ctx: Context, ids: Collection<String>, manual: Boolean, allowDel: Boolean = false, restore: Boolean = false) = synchronized(pf) {
         if (ids.isEmpty()) return@synchronized
         android.util.Log.i("MydriveSync", "요청 ${ids.size}개 manual=$manual · " + Throwable().stackTrace.getOrNull(1)?.let { "${it.fileName}:${it.lineNumber}" })
         val m = pendingMap(ctx)
-        for (id in ids) { m.put(id, manual || m.optBoolean(id)); if (allowDel) allowDelete += id }
+        for (id in ids) { m.put(id, manual || m.optBoolean(id)); if (allowDel) allowDelete += id; if (restore) restoreSet += id }
         Prefs(ctx).putStr("sync_pending", m.toString())
     }
     fun pendingIds(ctx: Context): Set<String> = synchronized(pf) { pendingMap(ctx).keys().asSequence().toSet() }
@@ -137,7 +139,7 @@ object Sync {
         var epoch = ""; var seq = -1L
         if (!p.web) try { api.roots().firstOrNull { it.name == p.root }?.let { epoch = it.epoch; seq = it.seq } } catch (e: Exception) { }
         return try {
-            val r = Engine(ctx, p, api, Fs(ctx, api), stop, pr, allowDelete.remove(p.id)).run()
+            val r = Engine(ctx, p, api, Fs(ctx, api), stop, pr, allowDelete.remove(p.id), restoreSet.remove(p.id)).run()
             if (stop()) { setStatus(ctx, p.id) { it.msg = "멈춤 — 다음에 이어서"; it.err = false }; return false }
             setStatus(ctx, p.id) { it.time = System.currentTimeMillis(); it.msg = r.text; it.err = r.failed > 0; it.held = r.held; if (seq >= 0) { it.epoch = epoch; it.seq = seq } }
             if (r.failed > 0) { SyncNote.problem(ctx, p, r.text); if (!stop()) SyncSchedule.soon(ctx, 10 * 60_000L) }
@@ -160,7 +162,7 @@ object Sync {
     /** 기준: 지난번에 맞췄을 때 휴대폰 (크기·시각 ms) · NAS (크기·시각 ns) */
     private class Rec(var ls: Long, var lm: Long, var rs: Long, var rm: Long, val d: Boolean = false)
 
-    private class Engine(val ctx: Context, val p: Link, val api: Api, val fs: Fs, val stop: () -> Boolean, val pr: Progress, val allowDel: Boolean) {
+    private class Engine(val ctx: Context, val p: Link, val api: Api, val fs: Fs, val stop: () -> Boolean, val pr: Progress, val allowDel: Boolean, val restore: Boolean = false) {
         val top = File(p.local)
         val stateFile = File(ctx.filesDir, "sync/${p.id}.json")
         val base = HashMap<String, Rec>()
@@ -270,6 +272,8 @@ object Sync {
             pr.phase = "휴대폰 폴더 읽는 중"; walkLocal()
             pr.phase = "NAS 폴더 읽는 중"; listRemote()
             pr.phase = "비교 중"
+            // 되살리기: 한쪽에만 남은 것의 기준을 잊음 → '새로 생긴 것'으로 보고 없는 쪽에 다시 만듦 (지우지 않음)
+            if (restore) base.keys.removeAll { k -> val b = base[k]!!; if (b.d) (k in ld) != (k in rd) else (k in lf) != (k in rf) }
             val both = p.dir == BOTH; val up = p.dir == BOTH || p.dir == UP; val down = p.dir == BOTH || p.dir == DOWN
             fun lChanged(rel: String) = lf[rel]?.let { l -> base[rel]?.let { it.d || it.ls != l.size || it.lm != l.m } ?: true } ?: false
             fun rChanged(rel: String) = rf[rel]?.let { r -> base[rel]?.let { it.d || it.rs != r.size || it.rm != r.mtimeNs } ?: true } ?: false

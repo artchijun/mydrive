@@ -130,7 +130,7 @@ class SyncActivity : Activity() {
         box.addView(status); box.addView(bar)
         val btns = ui.row().apply { layoutParams = ui.lp(top = 10) }
         btns.addView(ui.button("지금 동기화") { now(p) }.apply { layoutParams = LinearLayout.LayoutParams(0, ui.dp(42), 1f).apply { rightMargin = ui.dp(8) } })
-        val held = ui.button("확인하고 지우기", primary = false) { confirmHeld(p) }.apply { setTextColor(ui.red); layoutParams = LinearLayout.LayoutParams(0, ui.dp(42), 1f).apply { rightMargin = ui.dp(8) } }
+        val held = ui.button("지울 것 확인", primary = false) { confirmHeld(p) }.apply { setTextColor(ui.red); layoutParams = LinearLayout.LayoutParams(0, ui.dp(42), 1f).apply { rightMargin = ui.dp(8) } }
         btns.addView(held)
         btns.addView(ui.button("편집", primary = false) { edit(p) }.apply { layoutParams = LinearLayout.LayoutParams(ui.dp(84), ui.dp(42)) })
         box.addView(btns)
@@ -189,9 +189,13 @@ class SyncActivity : Activity() {
     private fun confirmHeld(p: Sync.Link) {
         val n = Sync.status(this, p.id).held
         AlertDialog.Builder(this).setTitle("지울 것이 많습니다 (${n}개)")
-            .setMessage("지난 동기화에서 한쪽에서 지운 것을 다른 쪽에서도 ${n}개 지우게 되어, 지우지 않고 멈췄습니다.\n\n휴대폰 폴더를 잘못 비웠거나 메모리 카드가 빠진 것이면 [그대로 두기]를 누르고 폴더를 살펴 주세요.\n\n정말 지운 것이면 [지우기] — 휴대폰 것은 앱 휴지통, NAS 것은 NAS 휴지통으로 가서 되살릴 수 있습니다.")
+            .setMessage("지난 동기화에서 한쪽에서 지운 것을 다른 쪽에서도 ${n}개 지우게 되어, 지우지 않고 멈췄습니다.\n\n" +
+                "[되살리기] 잘못 지운 것이면 — 남아 있는 쪽에서 다시 가져와 양쪽을 채웁니다.\n\n" +
+                "[지우기] 정말 지운 것이면 — 다른 쪽에서도 지웁니다. 휴대폰 것은 앱 휴지통, NAS 것은 NAS 휴지통으로 가서 되살릴 수 있습니다.\n\n" +
+                "[나중에] 지금은 아무것도 하지 않습니다.")
             .setPositiveButton("지우기") { _, _ -> if (ready()) { Sync.setStatus(this, p.id) { it.held = 0 }; SyncService.now(this, listOf(p.id), allowDel = true) } }
-            .setNegativeButton("그대로 두기", null).show()
+            .setNeutralButton("되살리기") { _, _ -> if (ready()) { Sync.setStatus(this, p.id) { it.held = 0 }; SyncService.now(this, listOf(p.id), restore = true) } }
+            .setNegativeButton("나중에", null).show()
     }
 
     // ---------- 편집 ----------

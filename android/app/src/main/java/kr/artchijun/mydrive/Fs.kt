@@ -428,6 +428,7 @@ class Fs(private val ctx: Context, private val api: Api) {
             return true
         }
         var n = it.name
+        var over = false
         if (ex != null) {
             val same = sameFile(ex, it)
             job.file = it.path
@@ -438,11 +439,12 @@ class Fs(private val ctx: Context, private val api: Api) {
                 RENAME -> { n = Fmt.uniqueName(it.name) { here.containsKey(it.lowercase()) }; rep.renamed++ }
                 else -> {   // 덮어쓰기: NAS 는 덮는 판을 이전 버전으로 남김, 휴대폰·클라우드는 덮이는 파일을 휴지통으로
                     if (dst.kind != "nas") delete(dst, listOf(ex))
+                    over = true
                     rep.overwritten++
                 }
             }
         }
-        copyFile(job, src, it.path, Node(n, false, it.size, it.mtimeMs), dst, dst.child(n))
+        copyFile(job, src, it.path, Node(n, false, it.size, it.mtimeMs), dst, dst.child(n), overwrite = over)
         here[n.lowercase()] = it.copy(name = n)
         moved += it
         return true
@@ -459,7 +461,8 @@ class Fs(private val ctx: Context, private val api: Api) {
         }
     }
 
-    private fun copyFile(job: Transfers.Job, src: Loc, sp: String, nd: Node, dst: Loc, to: Loc) {
+    /** overwrite: NAS 에 같은 이름이 있어도 덮음 (서버가 덮이는 판을 이전 버전으로 남김). 아니면 없을 때만 */
+    private fun copyFile(job: Transfers.Job, src: Loc, sp: String, nd: Node, dst: Loc, to: Loc, overwrite: Boolean = false) {
         val base = job.done
         val sn = where(src.kind); val dn = where(dst.kind)
         job.startFile(sp, nd.size, when {
@@ -496,7 +499,7 @@ class Fs(private val ctx: Context, private val api: Api) {
                 }
                 tmp?.let { size = it.length(); job.stage = "${dn}(으)로 올리는 중 (받아 둔 것)" }   // 구글 문서는 받으면서 크기가 정해짐
                 try {
-                    if (dst.kind == "nas") api.upload(dst.root, to.path, size, maxOf(nd.mtimeMs, 1) * 1_000_000, open, prog, { job.cancel })
+                    if (dst.kind == "nas") api.upload(dst.root, to.path, size, maxOf(nd.mtimeMs, 1) * 1_000_000, open, prog, { job.cancel }, if (overwrite) "" else "none")
                     else cloud(dst).upload(to.path.substringBeforeLast('/', ""), to.name, size, open, prog) { job.cancel }
                 } finally { tmp?.delete() }
             }

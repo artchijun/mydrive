@@ -9,6 +9,7 @@ import java.security.MessageDigest
  * 서버(공유 공간)의 중복 사진 찾기 — 지우는 것은 화면(DupActivity)에서 사람이 확인한 뒤.
  *   1) 정확한 중복: 크기와 찍은 시각이 같고, 파일 앞부분(큰 파일은 가운데·뒷부분도) 64KB 내용까지 같은 것 (내용 비교는 후보만 조금 받아서)
  *   2) 작게 줄인 사본: 찍은 시각이 같고 가로세로 비율이 같은데 해상도가 다른 것 (카톡 등으로 줄어든 사본)
+ *      — 같은 초에 찍은 다른 사진(연속 촬영)이 섞이지 않게 작은 미리보기의 그림 지문(dHash)까지 같은 것만
  *   남길 것 고르기: 사람이 순서를 정한 규칙을 차례로 적용 (선호 폴더 · 해상도 · 파일 크기 · 이름 · 날짜)
  */
 object Dups {
@@ -182,13 +183,28 @@ object Dups {
         } finally { pool.shutdownNow(); SampleCache.save(ctx, fresh) }   // 멈춰도 받은 만큼은 저장
         // 3) 줄인 사본: 찍은 시각이 같고 비율이 같고 해상도가 다른 것
         if (small) {
+            // 후보: 찍은 시각(초)이 같고 비율이 같은데 해상도가 작은 것
             val inSame = groups.flatMap { g -> g.entries.map { it.it.id } }.toHashSet()
+            val cands = ArrayList<Pair<Item, List<Item>>>()
             for (c in all.filter { it.time > 0 && it.w > 0 && it.h > 0 && !it.video }.groupBy { it.time }.values.filter { it.size > 1 }) {
                 val big = c.maxBy { it.w.toLong() * it.h }
                 val ratio = { i: Item -> maxOf(i.w, i.h).toDouble() / minOf(i.w, i.h) }
                 val copies = c.filter { it.id != big.id && it.id !in inSame && Math.abs(ratio(it) - ratio(big)) < 0.02 && maxOf(it.w, it.h) < maxOf(big.w, big.h) * 0.85 }
-                if (copies.isNotEmpty()) groups += Group("small", (listOf(big) + copies).map { Entry(it) })
+                if (copies.isNotEmpty()) cands += big to copies
             }
+            // 같은 초에 찍은 다른 사진(연속 촬영 등)을 빼려고: 작은 미리보기로 그림이 같은지 확인 (samePic)
+            val pool2 = java.util.concurrent.Executors.newFixedThreadPool(8)
+            val done2 = java.util.concurrent.atomic.AtomicInteger()
+            try {
+                val fs = cands.map { (big, copies) -> pool2.submit<Group?> {
+                    if (stop()) return@submit null
+                    val gb = picGrid(ctx, ns, big)
+                    val same = if (gb == null) emptyList() else copies.filter { c -> picGrid(ctx, ns, c)?.let { samePic(gb, it) } ?: false }
+                    progress(Progress("줄인 사본: 그림이 같은지 확인 중", done2.incrementAndGet(), cands.size))
+                    if (same.isEmpty()) null else Group("small", (listOf(big) + same).map { Entry(it) })
+                } }
+                for (f in fs) { if (stop()) return emptyList(); f.get()?.let { groups += it } }
+            } finally { pool2.shutdownNow() }
         }
         // 고른 폴더 + 다른 곳: 고른 폴더의 사진이 하나라도 든 묶음만
         if (inFolders != null && sc.outside) groups.retainAll { g -> g.entries.any { it.it.folderId in inFolders } }
@@ -206,6 +222,34 @@ object Dups {
     }
 
     /** 파일 앞 64KB (8MB 넘으면 가운데·뒤 64KB 도) 의 해시 (원본 받기를 Range 로 조금만) */
+    /** 그림 비교용: 시놀로지의 작은 미리보기를 32×32 흑백(밝기 0~255)으로. 받지 못하면 null */
+    private fun picGrid(ctx: Context, ns: String, it: Item): IntArray? = try {
+        val b = Thumbs.get(ctx, ns, it.unitId, it.cacheKey, "sm") ?: throw java.io.IOException()
+        val s = android.graphics.Bitmap.createScaledBitmap(b, 32, 32, true)
+        val px = IntArray(32 * 32); s.getPixels(px, 0, 32, 0, 0, 32, 32)
+        if (s !== b) s.recycle()
+        IntArray(px.size) { i -> val c = px[i]; ((c shr 16 and 255) * 299 + (c shr 8 and 255) * 587 + (c and 255) * 114) / 1000 }
+    } catch (e: Exception) { null }
+
+    /**
+     * 같은 그림인지: 밝기 평균을 맞춘 뒤 4×4칸(64곳)마다 평균 차이를 재서
+     *   전체 평균 차이가 작고(줄이면서 생기는 흐림·압축 정도) 크게 다른 곳이 한 군데도 없을 때만 같음
+     *   → 같은 초에 이어 찍은 다른 사진(사람이 움직임 등)은 그 부분 칸이 크게 달라 빠짐
+     */
+    private fun samePic(a: IntArray, b: IntArray): Boolean {
+        val shift = (b.sum() - a.sum()) / a.size   // 밝기가 조금 달라진 사본도 같게 보도록
+        var tot = 0; var worst = 0
+        for (by in 0 until 8) for (bx in 0 until 8) {
+            var d = 0
+            for (y in by * 4 until by * 4 + 4) for (x in bx * 4 until bx * 4 + 4) { val i = y * 32 + x; d += Math.abs(a[i] + shift - b[i]) }
+            tot += d; worst = maxOf(worst, d / 16)
+        }
+        val mean = tot / a.size
+        return mean <= 10 && worst <= 35
+        // 기준: 실제 02.OLD 102쌍을 재 보니 같은 사진(크기만 줄인 것)은 평균 1~7 · 가장 다른 곳 3~20,
+        //       같은 초에 찍은 다른 사진은 평균 15 이상 · 가장 다른 곳 40 이상 (예: 이어 찍은 DSC_9241 ↔ 9242 = 23 · 83)
+    }
+
     private fun sample(syno: Syno, ns: String, it: Item): String {
         val md = MessageDigest.getInstance("SHA-256")
         val k = 64L * 1024

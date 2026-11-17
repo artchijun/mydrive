@@ -106,13 +106,14 @@ class SyncJob : JobService() {
                     31 -> changedPairs(params)
                     else -> emptyList()
                 }
+                android.util.Log.i("MydriveSync", "예약 작업 ${params.jobId}: 돌릴 짝 ${ids.size}개")
                 Sync.request(this, ids, manual = false)
                 if (Sync.pendingIds(this).isNotEmpty()) {
                     val svc = SyncService.self
                     if (svc != null) svc.kick()
                     else if (Sync.drain(this, { stop }) && stop) SyncSchedule.soon(this)
                 }
-            } catch (e: Exception) { }
+            } catch (e: Exception) { android.util.Log.w("MydriveSync", "예약 작업 오류", e) }
             SyncSchedule.runningJob = 0
             SyncSchedule.schedule(this)   // 휴대폰 변경 감시 다시 걸기 (한 번 불리면 끝나므로)
             jobFinished(params, false)
@@ -153,8 +154,8 @@ class SyncService : Service() {
         fun watchWanted(ctx: Context) = Prefs(ctx).bool("sync_watch", true) && Sync.pairs(ctx).any { it.on && it.mode == Sync.REALTIME && !it.web && it.dir != Sync.UP }
 
         /** [지금 동기화] */
-        fun now(ctx: Context, ids: List<String>, allowDel: Boolean = false) {
-            Sync.request(ctx, ids, manual = true, allowDel = allowDel)
+        fun now(ctx: Context, ids: List<String>, allowDel: Boolean = false, restore: Boolean = false) {
+            Sync.request(ctx, ids, manual = true, allowDel = allowDel, restore = restore)
             start(ctx)
         }
         fun start(ctx: Context) {

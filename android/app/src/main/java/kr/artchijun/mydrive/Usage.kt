@@ -186,16 +186,20 @@ object Usage {
     // ---------- 남길 것 고르는 규칙 (위에서부터 차례로 비교) ----------
     val ruleNames = linkedMapOf(
         "pref" to "선호 폴더에 있는 것",
-        "clean" to "이름이 깔끔한 것 ('(2)'·'복사본'·'copy' 가 없는 것)",
+        "clean" to "이름이 깔끔한 것 ('(1)'·'_1'·'복사본'·'copy' 가 없는 것)",
+        "short" to "이름이 짧은 것 (확장자를 뺀 글자 수)",
+        "path" to "경로가 짧은 것 (폴더 경로 글자 수)",
         "old" to "먼저 만든 것 (바뀐 때가 이른 것)",
         "new" to "나중에 바뀐 것",
-        "shallow" to "얕은 폴더에 있는 것 (경로가 짧은 것)",
+        "shallow" to "얕은 폴더에 있는 것 (폴더 단계가 적은 것)",
         "deep" to "깊은 폴더에 있는 것",
     )
     data class Rule(val key: String, val on: Boolean)
     fun rules(pf: android.content.SharedPreferences): List<Rule> {
-        val s = pf.getString("dup_rules", "pref:1,clean:1,old:1,shallow:1,new:0,deep:0") ?: ""
+        val s = pf.getString("dup_rules", "pref:1,clean:1,path:1,short:1,old:1,shallow:1,new:0,deep:0") ?: ""
         val out = s.split(',').mapNotNull { p -> p.split(':').takeIf { it.size == 2 && it[0] in ruleNames }?.let { Rule(it[0], it[1] == "1") } }.toMutableList()
+        // 예전에 저장한 규칙에 없던 '경로가 짧은 것'·'이름이 짧은 것'은 '이름이 깔끔한 것' 바로 뒤에 켜서 넣음
+        for (k in listOf("short", "path")) if (out.none { it.key == k }) out.add(out.indexOfFirst { it.key == "clean" }.let { if (it >= 0) it + 1 else out.size }, Rule(k, true))
         ruleNames.keys.filter { k -> out.none { it.key == k } }.forEach { out += Rule(it, false) }
         return out
     }
@@ -203,18 +207,23 @@ object Usage {
     fun preferred(pf: android.content.SharedPreferences): List<String> = (pf.getString("dup_pref", "") ?: "").split('\n').filter { it.isNotEmpty() }
     fun savePreferred(pf: android.content.SharedPreferences, l: List<String>) = pf.edit().putString("dup_pref", l.joinToString("\n")).apply()
 
-    private val copyMark = Regex("""(\(\d+\)|복사본|사본|copy|\s-\s\d+)(\.[^.]+)?$""", RegexOption.IGNORE_CASE)
+    // 사본 표시: '(1)' · '복사본' · 'copy' · ' - 2' · '_1'~'_99' (끝에 붙은 것만 — 찍은 시각 '_110617' 같은 긴 숫자는 아님)
+    private val copyMark = Regex("""(\(\d+\)|복사본|사본|copy|\s-\s\d+|_\d{1,2})(\.[^.]+)?$""", RegexOption.IGNORE_CASE)
     /** 묶음마다 규칙으로 하나를 남김 → 지울 것들 */
     fun pickToDelete(pf: android.content.SharedPreferences, groups: List<List<F>>): List<F> {
         val rs = rules(pf).filter { it.on }; val pref = preferred(pf)
         fun prefRank(f: F): Int { val d = f.path.substringBeforeLast('/', ""); val i = pref.indexOfFirst { d == it || d.startsWith("$it/") }; return if (i < 0) pref.size else i }
         fun messy(f: F) = if (copyMark.containsMatchIn(f.name)) 1 else 0
         fun depth(f: F) = f.path.count { it == '/' }
+        fun dirLen(f: F) = f.path.substringBeforeLast('/', "").length
+        fun stem(f: F) = f.name.substringBeforeLast('.').length
         val cmp = Comparator<F> { a, b ->
             for (r in rs) {
                 val c = when (r.key) {
                     "pref" -> prefRank(a).compareTo(prefRank(b))
                     "clean" -> messy(a).compareTo(messy(b))
+                    "short" -> stem(a).compareTo(stem(b))
+                    "path" -> dirLen(a).compareTo(dirLen(b))
                     "old" -> a.mtimeMs.compareTo(b.mtimeMs)
                     "new" -> b.mtimeMs.compareTo(a.mtimeMs)
                     "shallow" -> depth(a).compareTo(depth(b))
