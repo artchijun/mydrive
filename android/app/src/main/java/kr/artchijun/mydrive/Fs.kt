@@ -167,7 +167,8 @@ class Fs(private val ctx: Context, private val api: Api) {
     // ---------- 휴지통 (저장소마다 맨 위 .Mydrive-trash, 원래 자리는 옆에 .json 으로) ----------
     private fun volOf(f: File): File = volumes().map { it.root }.filter { f.path.startsWith(it.path + "/") || f.path == it.path }.maxByOrNull { it.path.length } ?: Environment.getExternalStorageDirectory()
 
-    private fun toTrash(f: File) {
+    /** 휴대폰 파일·폴더를 앱 휴지통으로 (동기화가 지울 때도) */
+    fun toTrash(f: File) {
         if (!f.exists()) return
         val dir = File(volOf(f), TRASH_DIR).apply { mkdirs() }
         File(dir, ".nomedia").let { if (!it.exists()) it.createNewFile() }

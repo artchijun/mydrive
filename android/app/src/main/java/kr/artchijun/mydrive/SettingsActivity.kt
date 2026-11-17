@@ -74,6 +74,9 @@ class SettingsActivity : Activity() {
 
     private fun render() {
         body.removeAllViews()
+        // ===== 동기화 =====
+        head("동기화")
+        item("refresh", "폴더 동기화", "휴대폰 폴더와 NAS 폴더를 짝지어 실시간·주기적·원할 때 맞춥니다", Sync.summary(this)) { startActivity(Intent(this, SyncActivity::class.java)) }
         // ===== 화면 =====
         head("화면")
         val themes = arrayOf("어두운 화면 (Myplorer 기본)", "밝은 화면", "휴대폰 설정 따름")

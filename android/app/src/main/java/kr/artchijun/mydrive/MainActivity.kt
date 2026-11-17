@@ -125,6 +125,7 @@ class MainActivity : Activity(), Transfers.Listener {
         window.statusBarColor = ui.panel; window.navigationBarColor = ui.panel
         if (!ui.dark) window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         build()
+        if (Sync.pairs(this).isNotEmpty()) SyncService.refresh(this)   // 동기화 예약·감시 다시 걸기 (앱을 새로 깔았을 때 등)
         restoreTabs()
         if (!takeGo(intent)) takeShare(intent)
         renderTabs(); load()
@@ -562,6 +563,7 @@ class MainActivity : Activity(), Transfers.Listener {
         return listOf(Triple("phone", "휴대폰", phone), Triple("nas", "NAS", nas), Triple("cloud", "클라우드", cloud),
             Triple("fav", "즐겨찾기", favList().map { l -> Row(1, tabTitle(l), placeText(l).substringBeforeLast('/').substringAfterLast('/'), icon = tabIcon(l), go = l) }),
             Triple("tools", "도구", listOf(Row(1, "저장소 분석", "큰 파일 · 중복", icon = g("chart", ui.accent), act = { pickAnalyze() }),
+                Row(1, "폴더 동기화", Sync.summary(this), icon = g("refresh", ui.accent), act = { SyncActivity.open(this) }),
                 Row(1, "휴지통", tr?.let { if (it.first == 0) "비어 있음" else sz(it.second) } ?: "", icon = g("trash", ui.sub), go = Loc.TRASH),
                 Row(1, "설정", "화면 · 연결", icon = g("settings", ui.sub), act = { openSettings() }))))
     }
@@ -940,6 +942,8 @@ class MainActivity : Activity(), Transfers.Listener {
             opts += Triple("star", if (favList().contains(fl)) "즐겨찾기 빼기" else "즐겨찾기 추가") { toggleFav(fl); clearSel() }
             opts += Triple("pin", "홈 화면에 추가") { pinShortcut(fl, null, one.name) }
             opts += Triple("plus", "새 탭에서 열기") { clearSel(); newTab(fl) }
+            if (l.kind == "local") opts += Triple("refresh", "동기화 폴더로 (NAS와 맞춤)") { clearSel(); SyncActivity.open(this, local = File(l.root, one.path).path) }
+            if (l.kind == "nas") opts += Triple("refresh", "동기화 폴더로 (휴대폰과 맞춤)") { clearSel(); SyncActivity.open(this, root = l.root, rpath = one.path) }
         }
         if (one != null && !one.dir && (l.kind == "local" || l.kind == "nas")) opts += Triple("pin", "홈 화면에 추가") { pinShortcut(l.copy(path = one.path.substringBeforeLast('/', "")), one.name, one.name) }
         if (one != null && !one.dir && one.name.endsWith(".zip", true) && l.kind == "local") opts += Triple("zip", "압축 풀기") { clearSel(); extractZip(File(l.root, one.path)) }
@@ -1215,6 +1219,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (tab.loc.kind == "local" || tab.loc.kind == "nas") {
             opts += "이 폴더에서 중복 파일 찾기 (하위 폴더까지)" to { navigate(Loc("usage", tab.loc.key(), "dup")) }
             opts += "이 폴더 용량 분석" to { analyze(tab.loc) }
+            opts += "이 폴더를 동기화 폴더로" to { if (tab.loc.kind == "local") SyncActivity.open(this, local = fs.file(tab.loc).path) else SyncActivity.open(this, root = tab.loc.root, rpath = tab.loc.path) }
         }
         if (tab.loc.kind == "home" && pf.paired) opts += "홈에 보일 NAS 폴더 고르기" to { pickNasShown() }
         if (tab.loc.kind == "usage") usageMenu(opts)
@@ -1270,6 +1275,7 @@ class MainActivity : Activity(), Transfers.Listener {
         webRoots.forEach { r -> item(g("globe", ui.accent), r.name, "웹 폴더 · NAS ${r.share}") { openInTab(Loc("nas", "~" + r.name)) } }
         item(g("trash", ui.sub), "휴지통") { openInTab(Loc.TRASH) }
         item(g("chart", ui.sub), "저장소 분석", "휴대폰 · 큰 파일 · 중복 파일") { pickAnalyze() }
+        item(g("refresh", ui.sub), "폴더 동기화", Sync.summary(this)) { SyncActivity.open(this) }
         val rec = recentList().filter { !favs.contains(it) }.take(8)
         if (rec.isNotEmpty()) { head("최근 위치"); rec.forEach { l -> item(g("history", ui.sub), tabTitle(l), placeText(l)) { openInTab(l) } } }
         head("")

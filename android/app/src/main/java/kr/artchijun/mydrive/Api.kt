@@ -17,7 +17,7 @@ import java.security.SecureRandom
 class ApiException(val status: Int, val kind: String, message: String, val have: Long = -1) : IOException(message)
 class Canceled : IOException("취소함")
 
-data class RootInfo(val name: String, val items: Int, val share: String, val total: Long, val free: Long)
+data class RootInfo(val name: String, val items: Int, val share: String, val total: Long, val free: Long, val epoch: String = "", val seq: Long = 0)
 
 data class Entry(val path: String, val dir: Boolean, val size: Long, val mtimeNs: Long) {
     val name: String get() = path.substringAfterLast('/')
@@ -94,8 +94,15 @@ class Api(servers: List<String>, var token: String) {
         val a = JSONArray(readBody(open("GET", "/v1/roots", emptyMap())))
         (0 until a.length()).map { i ->
             val o = a.getJSONObject(i)
-            RootInfo(o.getString("name"), o.optInt("items"), o.optString("share"), o.optLong("total"), o.optLong("free"))
+            RootInfo(o.getString("name"), o.optInt("items"), o.optString("share"), o.optLong("total"), o.optLong("free"), o.optString("epoch"), o.optLong("seq"))
         }
+    }
+
+    /** NAS 쪽 변경 (동기화 연결 폴더만). wait 초 동안 기다렸다가 생기면 바로 → (처음부터 다시 봐야 함, 지금 번호, 바뀐 경로들) */
+    fun changes(root: String, epoch: String, since: Long, wait: Int): Triple<Boolean, Long, List<String>> = retry {
+        val j = JSONObject(readBody(open("GET", "/v1/changes", mapOf("root" to root, "epoch" to epoch, "since" to since.toString(), "wait" to wait.toString()), (wait + 20) * 1000)))
+        val a = j.optJSONArray("changes") ?: JSONArray()
+        Triple(j.optBoolean("reset"), j.optLong("seq"), (0 until a.length()).map { a.getJSONObject(it).getJSONObject("e").getString("p") })
     }
 
     fun list(root: String, path: String): List<Entry> = retry {
@@ -119,7 +126,7 @@ class Api(servers: List<String>, var token: String) {
     }
 
     /** 지우기 → NAS 휴지통(#recycle)으로 */
-    fun delete(root: String, path: String) { retry { readBody(open("DELETE", "/v1/file", mapOf("root" to root, "path" to path))) } }
+    fun delete(root: String, path: String, cond: String = "") { retry { readBody(open("DELETE", "/v1/file", mapOf("root" to root, "path" to path) + (if (cond.isEmpty()) emptyMap() else mapOf("if" to cond)))) } }
 
     /** 이름 검색 (서버 0.6.11 이상) → (결과, 더 있음) */
     fun search(root: String, under: String, q: String, ext: String, limit: Int = 500): Pair<List<Entry>, Boolean> = retry {
@@ -201,9 +208,12 @@ class Api(servers: List<String>, var token: String) {
     /**
      * 올리기: 그 자리에 같은 이름이 없을 때만 (if=none — NAS 파일을 덮지 않음). 같은 이름이 있으면 ApiException(409).
      * 큰 파일은 나눠서 (끊기면 받은 데부터 이어서).
+     *   cond: "none" = 없을 때만, "" = 덮어쓰기, "크기:시각" = NAS 것이 그대로일 때만 덮기 (아니면 409 conflict)
+     *   id: 나눠 올리기 번호 — 같은 번호로 다시 부르면 서버가 받아 둔 데부터 이어 감 (동기화가 중간에 끊겼을 때)
      */
-    fun upload(root: String, path: String, size: Long, mtimeNs: Long, input: () -> InputStream, progress: (Long, Long) -> Unit, canceled: () -> Boolean): Entry {
-        val q = mapOf("root" to root, "path" to path, "mtime" to mtimeNs.toString(), "if" to "none")
+    fun upload(root: String, path: String, size: Long, mtimeNs: Long, input: () -> InputStream, progress: (Long, Long) -> Unit, canceled: () -> Boolean,
+               cond: String = "none", uploadId: String = newId()): Entry {
+        val q = mapOf("root" to root, "path" to path, "mtime" to mtimeNs.toString()) + (if (cond.isEmpty()) emptyMap() else mapOf("if" to cond))
         if (size in 0 until partSize) return retry {
             val c = open("PUT", "/v1/file", q, 120000)
             c.doOutput = true; c.setFixedLengthStreamingMode(size)
@@ -211,7 +221,7 @@ class Api(servers: List<String>, var token: String) {
             entry(JSONObject(readBody(c)))
         }
         if (size < 0) throw IOException("파일 크기를 알 수 없음")
-        val id = newId()
+        val id = uploadId
         var off = 0L; var tries = 0
         while (off < size) {
             try {
