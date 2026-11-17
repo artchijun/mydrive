@@ -179,6 +179,10 @@ class Photos(ctx: Context) {
         return null
     }
 
+    /** 즐겨찾기한 사진 (찍은 때 새것부터) — 시놀로지 포토 웹의 '즐겨찾기' 거르기와 같은 list_with_filter */
+    fun favorites(ns: String, offset: Int, limit: Int): List<Item> =
+        items(syno.call("$ns.Browse.Item", "list_with_filter", 7, linkedMapOf<String, Any?>("offset" to offset, "limit" to limit, "sort_by" to "takentime", "sort_direction" to "desc", "additional" to ADD, "favorite" to true)))
+
     fun setFavorite(ns: String, ids: List<Long>, on: Boolean) {
         syno.call("$ns.Browse.Item", "set_favorite", 7, mapOf("id" to JSONArray(ids), "favorite" to on))
     }

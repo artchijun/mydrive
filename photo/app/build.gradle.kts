@@ -18,8 +18,8 @@ android {
         applicationId = "kr.artchijun.myphoto"
         minSdk = 29          // 안드로이드 10 이상
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.2.15"
+        versionCode = 18
+        versionName = "0.2.16"
     }
     signingConfigs {
         if (ks.getProperty("storeFile") != null) create("release") {

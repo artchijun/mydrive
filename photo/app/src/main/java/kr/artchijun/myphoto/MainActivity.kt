@@ -24,6 +24,7 @@ import java.util.concurrent.Executors
  * 첫 화면: 아래 탭 [사진 · 폴더 · 인물 · 장소 · 백업]. 위 줄은 제목 + 설정.
  *   사진: 공유 공간 전체를 날짜별 격자로 (새것부터).  폴더: 시놀로지 포토의 폴더 그대로.
  *   인물·장소: 시놀로지가 묶어 둔 것.  사진을 길게 누르면 고르기 → 즐겨찾기·지우기
+ *   사진 탭 위 칩 [♥ 즐겨찾기]: 즐겨찾기한 사진만 모아 봄
  */
 class MainActivity : Activity() {
     override fun attachBaseContext(base: android.content.Context) { super.attachBaseContext(Ui.wrap(base)) }
@@ -153,8 +154,8 @@ class MainActivity : Activity() {
         selCount.text = "${n}장 고름"
     }
 
-    private fun photoGrid(grouped: Boolean, filter: Map<String, Any>): PhotoGrid =
-        PhotoGrid(this, ui, net, ns, grouped, { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }).apply { onPull = { refresh() } }
+    private fun photoGrid(grouped: Boolean, filter: Map<String, Any>, load: ((Int, Int) -> List<Item>)? = null): PhotoGrid =
+        PhotoGrid(this, ui, net, ns, grouped, load ?: { off, lim -> ph.list(ns, off, lim, filter) }, { list, i -> ViewerActivity.open(this, list, i, ns) }, { n -> onSel(n) }).apply { onPull = { refresh() } }
 
     /** 인물·장소·폴더의 사진: 전체 사진과 같은 격자 (오른쪽 막대로 어느 해든 바로 · 연도/월/일) */
     private fun timelineFor(filter: Map<String, Any>): View {
@@ -221,7 +222,9 @@ class MainActivity : Activity() {
         // 위: 백업 상태로 거르기 [모두 | 백업됨 | 서버에만 | 백업 안 됨] + 대조 진행 줄
         val chips = ui.row().apply { setPadding(ui.dp(10), ui.dp(6), ui.dp(10), ui.dp(6)) }
         val note = ui.label("", 12.5f, ui.sub).apply { setPadding(ui.dp(16), 0, ui.dp(16), ui.dp(6)); visibility = View.GONE }
-        val kinds = listOf(0 to "모두") + StatusBadge.legend.map { (k, _) -> k to when (k) { Library.BOTH -> "백업됨"; Library.SERVER_ONLY -> "서버에만"; else -> "백업 안 됨" } }
+        val FAV = -1   // 즐겨찾기 칩
+        val kinds = listOf(0 to "모두", FAV to "즐겨찾기") + StatusBadge.legend.map { (k, _) -> k to when (k) { Library.BOTH -> "백업됨"; Library.SERVER_ONLY -> "서버에만"; else -> "백업 안 됨" } }
+        var favGrid: PhotoGrid? = null
         var status = 0
         fun paintChips() {
             for (i in 0 until chips.childCount) {
@@ -234,13 +237,19 @@ class MainActivity : Activity() {
         kinds.forEach { (k, name) ->
             val c = ui.row().apply { setPadding(ui.dp(if (k == 0) 14 else 8), 0, ui.dp(14), 0); minimumHeight = ui.dp(34)
                 layoutParams = LinearLayout.LayoutParams(-2, ui.dp(34)).apply { rightMargin = ui.dp(6) } }
-            if (k != 0) c.addView(StatusBadge.view(this, ui).also { StatusBadge.set(it, k) }, LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)).apply { rightMargin = ui.dp(6) })
+            if (k == FAV) c.addView(ImageView(this).apply { setImageDrawable(Glyph("heart", 0xFFE5484D.toInt())) }, LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(6) })
+            else if (k != 0) c.addView(StatusBadge.view(this, ui).also { StatusBadge.set(it, k) }, LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)).apply { rightMargin = ui.dp(6) })
             c.addView(ui.label(name, 13.5f, ui.text))
             c.setOnClickListener {
                 if (status == k) return@setOnClickListener
                 page.grid.clearSelection(); status = k; paintChips()
                 holder.removeAllViews()
                 if (k == 0) { holder.addView(tg, FrameLayout.LayoutParams(-1, -1)); page.grid = tg }
+                else if (k == FAV) {   // 즐겨찾기한 사진만 (시놀로지 포토의 즐겨찾기 거르기 그대로)
+                    val g = favGrid ?: photoGrid(true, emptyMap()) { off, lim -> ph.favorites(ns, off, lim) }.apply { setBottomSpace(ui.dp(76)) }.also { favGrid = it }
+                    g.unit = tg.unit
+                    holder.addView(g, FrameLayout.LayoutParams(-1, -1)); page.grid = g
+                }
                 else {
                     val g = filtered ?: photoGrid(true, emptyMap()).apply { mergePhone = true; setBottomSpace(ui.dp(76))
                         net.execute { val l = Library.phoneOnly(this@MainActivity)?.map { it.toItem() }; runOnUiThread { phoneChanged(l) } } }.also { filtered = it }
@@ -255,7 +264,7 @@ class MainActivity : Activity() {
         val strip = android.widget.HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false; addView(chips); setBackgroundColor(ui.bg) }
         page = GridPage(this, ui.col(strip, note, holder.apply { layoutParams = ui.lp(h = 0, weight = 1f) }), tg, pill)
         paint()
-        val views = { listOfNotNull<PhotoView>(tg, filtered) }
+        val views = { listOfNotNull<PhotoView>(tg, filtered, favGrid) }
         loadStatus(views, note)
         page.onRefresh = { loadStatus(views, note) }
         return page
@@ -460,23 +469,76 @@ class MainActivity : Activity() {
         }
     }
 
+    /** 고른 사진 지우기. 휴대폰에도 같은 사진이 있으면 '휴대폰에서도 지우기'를 고를 수 있음 (고른 것은 기억) */
     private fun deleteSelected() {
         val g = grid() ?: return
         val all = g.selectedItems()
         val sel = all.filter { it.local == null }   // 휴대폰에만 있는 것(백업 안 됨)은 여기서 지우지 않음
         if (sel.isEmpty()) { Toast.makeText(this, "고른 것은 모두 휴대폰에만 있는 사진입니다 — 여기서는 지우지 않습니다", Toast.LENGTH_LONG).show(); return }
-        AlertDialog.Builder(this).setTitle("${sel.size}장을 지울까요?")
-            .setMessage("시놀로지에서 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다." +
-                (if (all.size > sel.size) "\n\n휴대폰에만 있는(백업 안 된) ${all.size - sel.size}장은 지우지 않습니다." else ""))
+        net.execute {
+            Library.phone(this)   // 휴대폰 목록 (30초 안에 읽었으면 그대로)
+            val copies = sel.flatMap { Library.phoneCopies(it) }.distinctBy { it.key }
+            runOnUiThread { askDelete(g, sel, all.size - sel.size, copies) }
+        }
+    }
+
+    private var phoneDel: List<Library.Phone> = emptyList()   // 안드로이드 확인 창이 끝나면 정리할 것
+
+    private fun askDelete(g: PhotoView, sel: List<Item>, skipped: Int, copies: List<Library.Phone>) {
+        val pf = Prefs(this)
+        val box = android.widget.CheckBox(this).apply {
+            text = "휴대폰에서도 지우기 (같은 사진 ${copies.size}개)"; textSize = 15f; setTextColor(ui.text)
+            isChecked = pf.bool("del_phone_too", false)
+        }
+        val hint = ui.label("켜면 시놀로지에서 지운 다음, 안드로이드가 휴대폰 사진을 지울지 한 번 더 묻습니다. 휴대폰에서 지운 사진은 되살릴 수 없습니다 (시놀로지 쪽은 휴지통이 켜져 있으면 되살릴 수 있음).", 12.5f, ui.sub)
+            .apply { setPadding(ui.dp(32), 0, 0, 0) }
+        val msg = ui.label("시놀로지에서 지웁니다. 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다." +
+            (if (skipped > 0) "\n\n휴대폰에만 있는(백업 안 된) ${skipped}장은 지우지 않습니다." else "") +
+            (if (copies.isEmpty()) "\n\n휴대폰에는 같은 사진이 없습니다." else ""), 14.5f, ui.text)
+        val body = ui.col(msg).apply { setPadding(ui.dp(24), ui.dp(8), ui.dp(24), 0) }
+        if (copies.isNotEmpty()) { body.addView(box, ui.lp(top = 14)); body.addView(hint) }
+        AlertDialog.Builder(this).setTitle("${sel.size}장을 지울까요?").setView(body)
             .setPositiveButton("지우기") { _, _ ->
+                val phoneToo = copies.isNotEmpty() && box.isChecked
+                if (copies.isNotEmpty()) pf.putBool("del_phone_too", box.isChecked)
                 net.execute {
                     val err = try { sel.chunked(100).forEach { c -> ph.delete(ns, c.map { it.id }) }; null } catch (e: Exception) { e.message }
                     runOnUiThread {
-                        if (err != null) Toast.makeText(this, "지우지 못했습니다: $err", Toast.LENGTH_SHORT).show()
-                        else g.removeItems(sel.map { it.id }.toSet())
+                        if (err != null) { Toast.makeText(this, "지우지 못했습니다: $err", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
+                        g.removeItems(sel.map { it.id }.toSet())
+                        if (phoneToo) deletePhone(copies)
                     }
                 }
             }.setNegativeButton("그만", null).show()
+    }
+
+    /** 휴대폰 파일 지우기 — 안드로이드의 '지울까요?' 확인 창을 거침 */
+    private fun deletePhone(list: List<Library.Phone>) {
+        phoneDel = list
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 30) {
+                val req = android.provider.MediaStore.createDeleteRequest(contentResolver, list.map { it.uri })
+                @Suppress("DEPRECATION") startIntentSenderForResult(req.intentSender, 46, null, 0, 0, 0)
+            } else {   // 안드로이드 10: 하나씩 (이 앱이 만든 것이 아니면 실패할 수 있음)
+                var n = 0
+                list.forEach { p -> try { n += contentResolver.delete(p.uri, null, null) } catch (e: Exception) { } }
+                phoneDeleted(n > 0)
+            }
+        } catch (e: Exception) { Toast.makeText(this, "휴대폰에서 지우지 못했습니다: ${e.message}", Toast.LENGTH_LONG).show() }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(code: Int, result: Int, data: Intent?) {
+        @Suppress("DEPRECATION") super.onActivityResult(code, result, data)
+        if (code == 46) phoneDeleted(result == RESULT_OK)
+    }
+
+    private fun phoneDeleted(ok: Boolean) {
+        val list = phoneDel; phoneDel = emptyList()
+        if (!ok) { Toast.makeText(this, "시놀로지에서만 지웠습니다 (휴대폰 사진은 그대로)", Toast.LENGTH_LONG).show(); return }
+        Backup.forget(this, list.map { it.key })   // 백업 기록에서도 빼기
+        Toast.makeText(this, "휴대폰에서도 ${list.size}개를 지웠습니다", Toast.LENGTH_SHORT).show()
+        net.execute { Library.phone(this, force = true); runOnUiThread { stacks.forEach { st -> st.forEach { (_, v) -> ((v as? PhotoView) ?: (v as? GridPage)?.grid)?.phoneChanged(null) } } } }
     }
 }
 

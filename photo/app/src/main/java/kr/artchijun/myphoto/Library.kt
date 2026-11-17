@@ -269,6 +269,12 @@ object Library {
     }
     val phoneLoaded get() = phone != null
 
+    /** 서버의 이 사진과 같은 휴대폰 파일들 (이름·크기가 같거나, 크기가 같고 찍은 때가 같은 것) — 지울 때 함께 지우기용 */
+    fun phoneCopies(it: Item): List<Phone> {
+        val l = synchronized(this) { phBySize[it.size] } ?: return emptyList()
+        return l.filter { p -> p.name.equals(it.name, ignoreCase = true) || (it.size >= 50_000 && sameMoment(p.srvTime, it.time)) }
+    }
+
     /** 백업 기록에 '올림·이미 있음' 으로 적힌 휴대폰 파일 번호 */
     private fun doneKeys(ctx: Context): Set<Long> = try {
         Backup.db(ctx).rawQuery("SELECT id FROM media WHERE state=1", null).use { c -> HashSet<Long>(c.count).apply { while (c.moveToNext()) add(c.getLong(0)) } }
