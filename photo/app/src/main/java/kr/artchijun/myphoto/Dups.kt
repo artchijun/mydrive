@@ -85,19 +85,67 @@ object Dups {
     // ---------- 찾기 ----------
     class Progress(val stage: String, val done: Int, val total: Int)
 
+    /** 찾을 범위: folders 가 비면 서버 전체. outside = 고른 폴더의 사진과 같은 것이 서버 다른 곳에 있어도 찾음 */
+    class Scope(val folders: List<String> = emptyList(), val outside: Boolean = false)
+    fun scope(ctx: Context): Scope {
+        val pf = Prefs(ctx)
+        if (!pf.bool("dup_scope_folders", false)) return Scope()
+        return Scope(pf.str("dup_folders", "").split('\n').filter { it.isNotEmpty() }, pf.bool("dup_outside", false))
+    }
+
+    /** 고른 폴더들과 그 하위 폴더 모두: 폴더 번호 → 경로 (6개씩 함께 읽음) */
+    private fun subtree(ph: Photos, ns: String, roots: List<String>, stop: () -> Boolean): Map<Long, String> {
+        val out = java.util.concurrent.ConcurrentHashMap<Long, String>()
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(6)
+        val pending = java.util.concurrent.atomic.AtomicInteger()
+        val err = java.util.concurrent.atomic.AtomicReference<Exception?>(null)
+        fun visit(id: Long, path: String) {
+            out[id] = path; pending.incrementAndGet()
+            pool.execute {
+                try { if (!stop() && err.get() == null) for (f in ph.folders(ns, id)) visit(f.id, f.path) }
+                catch (e: Exception) { err.compareAndSet(null, e) } finally { pending.decrementAndGet() }
+            }
+        }
+        for (r in roots) { val id = ph.folderByPath(ns, r, false) ?: continue; visit(id, r) }
+        while (pending.get() > 0 && !stop()) Thread.sleep(50)
+        pool.shutdownNow(); err.get()?.let { throw it }
+        return out
+    }
+
     fun scan(ctx: Context, small: Boolean, stop: () -> Boolean, progress: (Progress) -> Unit): List<Group> {
         val ph = Photos(ctx)
         val ns = Photos.TEAM
-        // 1) 모든 사진 목록 (가벼운 정보만)
+        val sc = scope(ctx)
         val all = ArrayList<Item>()
-        val total = try { ph.syno.call("$ns.Browse.Item", "count", 7).optInt("count") } catch (e: Exception) { 0 }
-        var off = 0
-        while (true) {
-            if (stop()) return emptyList()
-            val page = ph.list(ns, off, 5000)
-            all += page; off += page.size
-            progress(Progress("사진 목록 읽는 중", all.size, maxOf(total, all.size)))
-            if (page.size < 5000) break
+        // 고른 폴더만이면: 그 폴더들(하위 포함)의 번호·경로
+        val inFolders: Map<Long, String>? = if (sc.folders.isEmpty()) null else {
+            progress(Progress("고른 폴더의 하위 폴더 확인 중", 0, 0))
+            subtree(ph, ns, sc.folders, stop).also { if (it.isEmpty()) throw java.io.IOException("고른 폴더를 서버에서 찾지 못했습니다") }
+        }
+        if (inFolders != null && !sc.outside) {
+            // 1) 고른 폴더 안의 사진만 (폴더마다 4개씩 함께)
+            val ids = inFolders.keys.toList()
+            val pool = java.util.concurrent.Executors.newFixedThreadPool(4)
+            val done = java.util.concurrent.atomic.AtomicInteger()
+            try {
+                val fs = ids.map { fid -> pool.submit<List<Item>> {
+                    val l = ArrayList<Item>(); var off = 0
+                    while (!stop()) { val page = ph.list(ns, off, 5000, mapOf("folder_id" to fid)); l += page; off += page.size; if (page.size < 5000) break }
+                    progress(Progress("고른 폴더의 사진 목록 읽는 중 (폴더)", done.incrementAndGet(), ids.size)); l
+                } }
+                for (f in fs) { if (stop()) return emptyList(); all += f.get() }
+            } finally { pool.shutdownNow() }
+        } else {
+            // 1) 모든 사진 목록 (가벼운 정보만)
+            val total = try { ph.syno.call("$ns.Browse.Item", "count", 7).optInt("count") } catch (e: Exception) { 0 }
+            var off = 0
+            while (true) {
+                if (stop()) return emptyList()
+                val page = ph.list(ns, off, 5000)
+                all += page; off += page.size
+                progress(Progress("사진 목록 읽는 중", all.size, maxOf(total, all.size)))
+                if (page.size < 5000) break
+            }
         }
         val uniq = all.distinctBy { it.id }; all.clear(); all.addAll(uniq)
         val groups = ArrayList<Group>()
@@ -132,9 +180,11 @@ object Dups {
                 if (copies.isNotEmpty()) groups += Group("small", (listOf(big) + copies).map { Entry(it) })
             }
         }
-        // 4) 폴더 경로
-        val paths = HashMap<Long, String>()
-        val folderIds = groups.flatMap { g -> g.entries.map { it.it.folderId } }.distinct()
+        // 고른 폴더 + 다른 곳: 고른 폴더의 사진이 하나라도 든 묶음만
+        if (inFolders != null && sc.outside) groups.retainAll { g -> g.entries.any { it.it.folderId in inFolders } }
+        // 4) 폴더 경로 (고른 폴더 안의 것은 이미 앎)
+        val paths = HashMap<Long, String>(inFolders ?: emptyMap())
+        val folderIds = groups.flatMap { g -> g.entries.map { it.it.folderId } }.distinct().filter { it !in paths }
         folderIds.forEachIndexed { i, f ->
             if (stop()) return emptyList()
             progress(Progress("폴더 확인 중", i + 1, folderIds.size))

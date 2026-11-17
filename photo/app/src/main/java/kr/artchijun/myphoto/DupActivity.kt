@@ -72,7 +72,8 @@ class DupActivity : Activity() {
             setOnCheckedChangeListener { _, b -> pf.putBool("dup_small", b) } }
         val rules = Dups.rules(this).filter { it.on }.mapIndexed { i, r -> "${i + 1}. " + Dups.ruleNames[r.key] + (if (r.key == "folder") " (" + Dups.preferred(this).filter { it != Dups.REST }.take(3).joinToString(" > ") { it.trimStart('/') }.ifEmpty { "아직 안 정함" } + (if (Dups.preferred(this).count { it != Dups.REST } > 3) " …" else "") + ")" else "") }
         val col = ui.col(
-            ui.label("시놀로지 공유 공간 전체에서 중복을 찾습니다", 16f, ui.text, bold = true),
+            ui.label("시놀로지 공유 공간에서 중복을 찾습니다", 16f, ui.text, bold = true),
+            scopeBox(),
             ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 내용(앞·가운데·뒤 일부)까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
             small.apply { layoutParams = ui.lp(top = 14) },
             ui.label("남길 것 고르는 규칙 (위에서부터)", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 18) },
@@ -87,6 +88,70 @@ class DupActivity : Activity() {
             col.addView(ui.button("지난 결과 다시 보기 (${l.size}묶음 · $t 에 찾음)", primary = false) { groups = l; results() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 12) }, col.childCount)
         }
         body.removeAllViews(); body.addView(ScrollView(this).apply { addView(col) })
+    }
+
+    // ---------- 찾을 범위: 서버 전체 · 고른 폴더 ----------
+    private fun scopeBox(): View {
+        val box = ui.col().apply { layoutParams = ui.lp(top = 12); setPadding(ui.dp(12), ui.dp(10), ui.dp(12), ui.dp(10)); background = ui.round(ui.panel, 12) }
+        val folders = pf.str("dup_folders", "").split('\n').filter { it.isNotEmpty() }
+        val onFolders = pf.bool("dup_scope_folders", false) && folders.isNotEmpty()
+        box.addView(ui.label("찾을 범위", 13f, ui.accent, bold = true))
+        val seg = ui.row().apply { layoutParams = ui.lp(top = 8) }
+        listOf(false to "서버 전체", true to "고른 폴더").forEach { (v, n) ->
+            seg.addView(ui.label(n, 14f, if (v == onFolders) ui.onAccent else ui.text).apply {
+                gravity = Gravity.CENTER; background = ui.press(ui.round(if (v == onFolders) ui.accent else ui.panel2, 17), 17)
+                layoutParams = LinearLayout.LayoutParams(0, ui.dp(36), 1f).apply { if (!v) rightMargin = ui.dp(6) }
+                setOnClickListener { if (v && folders.isEmpty()) pickServerFolder() else { pf.putBool("dup_scope_folders", v); intro() } }
+            })
+        }
+        box.addView(seg)
+        if (onFolders) {
+            folders.forEach { f ->
+                box.addView(ui.row(ImageView(this).apply { setImageDrawable(Glyph("folder", ui.sub)); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(8) } },
+                    ui.label(f.trimStart('/') + " (하위 폴더까지)", 13.5f, ui.text).apply { layoutParams = ui.lp(0, weight = 1f) },
+                    ui.label("빼기", 13f, ui.red).apply { setPadding(ui.dp(10), ui.dp(6), ui.dp(4), ui.dp(6)); setOnClickListener {
+                        val rest = folders - f; pf.putStr("dup_folders", rest.joinToString("\n")); if (rest.isEmpty()) pf.putBool("dup_scope_folders", false); intro() } }
+                ).apply { layoutParams = ui.lp(top = 8); gravity = Gravity.CENTER_VERTICAL })
+            }
+            box.addView(ui.label("+ 폴더 더하기", 13.5f, ui.accent, bold = true).apply { setPadding(0, ui.dp(10), 0, ui.dp(4)); setOnClickListener { pickServerFolder() } })
+            box.addView(CheckBox(this).apply {
+                text = "고른 폴더의 사진과 같은 것이 서버 다른 곳에 있어도 찾기 (서버 전체를 읽어서 비교 — 더 오래 걸림)"; setTextColor(ui.text); textSize = 13f
+                isChecked = pf.bool("dup_outside", false); setOnCheckedChangeListener { _, b -> pf.putBool("dup_outside", b) }; layoutParams = ui.lp(top = 4) })
+        }
+        return box
+    }
+
+    /** 서버 폴더 고르기: 눌러서 들어가고 [이 폴더 고르기] */
+    private fun pickServerFolder() {
+        var cur = 1L to "/"
+        val stack = ArrayList<Pair<Long, String>>()
+        val list = ListView(this)
+        val head = ui.label("", 13.5f, ui.sub).apply { setPadding(ui.dp(20), ui.dp(4), ui.dp(20), ui.dp(4)) }
+        lateinit var dlg: AlertDialog
+        var subs: List<Folder> = emptyList()
+        fun load() {
+            head.text = "지금: " + (if (cur.second == "/") "맨 위" else cur.second.trimStart('/')) + "  (누르면 들어감)"
+            list.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, listOf("불러오는 중…"))
+            bg.execute {
+                val r = try { Photos(this).folders(ns, cur.first) } catch (e: Exception) { emptyList() }
+                runOnUiThread { subs = r; list.adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1,
+                    (if (stack.isNotEmpty()) listOf("⬑  위 폴더로") else emptyList()) + r.map { "📁  " + it.name.substringAfterLast('/') }.ifEmpty { listOf("(하위 폴더 없음)") }) }
+            }
+        }
+        list.setOnItemClickListener { _, _, pos, _ ->
+            var p = pos
+            if (stack.isNotEmpty()) { if (p == 0) { cur = stack.removeAt(stack.size - 1); load(); return@setOnItemClickListener }; p-- }
+            val f = subs.getOrNull(p) ?: return@setOnItemClickListener
+            stack += cur; cur = f.id to f.path; load()
+        }
+        dlg = AlertDialog.Builder(this).setTitle("중복을 찾을 폴더").setView(ui.col(head, list.apply { layoutParams = ui.lp(h = ui.dp(380)) }))
+            .setPositiveButton("이 폴더 고르기") { _, _ ->
+                if (cur.second == "/") { Toast.makeText(this, "폴더에 들어간 뒤 고르세요 (맨 위는 서버 전체와 같음)", Toast.LENGTH_SHORT).show(); return@setPositiveButton }
+                val l = pf.str("dup_folders", "").split('\n').filter { it.isNotEmpty() }.toMutableList()
+                if (cur.second !in l) l += cur.second
+                pf.putStr("dup_folders", l.joinToString("\n")); pf.putBool("dup_scope_folders", true); intro()
+            }.setNegativeButton("그만", null).create()
+        dlg.show(); load()
     }
 
     private fun scan() {
@@ -160,9 +225,12 @@ class DupActivity : Activity() {
 
     private fun card(g: Dups.Group, e: Dups.Entry): View {
         val keep = e.it.id in g.keep
-        val w = ui.dp(132)
+        // 칸 크기: 화면 폭을 묶음의 장수(최대 4)로 나눠 크게 — 좁은 휴대폰에서는 최소 160dp 로 옆으로 밀어 보기, 태블릿에서는 화면을 채움
+        val screen = resources.displayMetrics.widthPixels - ui.dp(20)
+        val n = minOf(maxOf(g.entries.size, 2), 4)
+        val w = (screen / n - ui.dp(8)).coerceIn(ui.dp(160), ui.dp(420))
         val iv = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP; setBackgroundColor(ui.panel2) }
-        Thumbs.load(iv, ns, e.it.unitId, e.it.cacheKey, "sm")
+        Thumbs.load(iv, ns, e.it.unitId, e.it.cacheKey, if (w > ui.dp(240)) "m" else "sm")
         val badge = ui.label(if (keep) "남김" else "지움", 12f, if (keep) ui.onAccent else 0xFFFFFFFF.toInt(), bold = true).apply {
             background = ui.round(if (keep) ui.accent else ui.red, 10); setPadding(ui.dp(8), ui.dp(2), ui.dp(8), ui.dp(2)) }
         val pic = FrameLayout(this).apply {
@@ -175,9 +243,10 @@ class DupActivity : Activity() {
         }
         return ui.col(
             pic.apply { layoutParams = LinearLayout.LayoutParams(w, w) },
-            ui.label(e.path.trimStart('/'), 11.5f, ui.text).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.START; layoutParams = LinearLayout.LayoutParams(w, -2).apply { topMargin = ui.dp(4) } },
-            ui.label(e.it.name, 11f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE; layoutParams = LinearLayout.LayoutParams(w, -2) },
-            ui.label(Fmt.size(e.it.size) + (if (e.it.w > 0) " · ${e.it.w}×${e.it.h}" else ""), 11f, ui.sub).apply { layoutParams = LinearLayout.LayoutParams(w, -2) },
+            // 폴더 경로는 두 줄까지 (넘치면 앞을 줄임) — 어느 폴더인지 잘 보이게
+            ui.label(e.path.trimStart('/'), 13f, ui.text).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.START; layoutParams = LinearLayout.LayoutParams(w, -2).apply { topMargin = ui.dp(6) } },
+            ui.label(e.it.name, 12.5f, ui.sub).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.MIDDLE; layoutParams = LinearLayout.LayoutParams(w, -2).apply { topMargin = ui.dp(2) } },
+            ui.label(Fmt.size(e.it.size) + (if (e.it.w > 0) " · ${e.it.w}×${e.it.h}" else ""), 12f, ui.sub).apply { layoutParams = LinearLayout.LayoutParams(w, -2) },
         ).apply {
             setPadding(ui.dp(4), 0, ui.dp(4), ui.dp(6)); background = ui.press(null)
             setOnClickListener {
