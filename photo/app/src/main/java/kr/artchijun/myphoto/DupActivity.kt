@@ -48,6 +48,7 @@ class DupActivity : Activity() {
         ui = Ui(this); pf = Prefs(this)
         window.statusBarColor = ui.panel; window.navigationBarColor = ui.panel
         val top = ui.row(ui.iconBtn(Glyph("back", ui.text), "뒤로") { finish() }, ui.label("중복 정리", 19f, ui.text, bold = true).apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(4) } },
+            ui.iconBtn(Glyph("folder", ui.text), "위치 순위 (중복이 있는 위치를 나열해 순서 정하기)") { editPreferred() },
             ui.iconBtn(Glyph("sort", ui.text), "남길 것 고르는 규칙") { editRules() })
             .apply { setBackgroundColor(ui.panel); setPadding(ui.dp(4), ui.dp(4), ui.dp(8), ui.dp(4)) }
         body = FrameLayout(this).apply { setBackgroundColor(ui.bg) }
@@ -69,7 +70,7 @@ class DupActivity : Activity() {
         bottomBar().visibility = View.GONE
         val small = CheckBox(this).apply { text = "작게 줄인 사본도 찾기 (찍은 시각이 같고 해상도만 작은 것)"; setTextColor(ui.text); isChecked = pf.bool("dup_small", true)
             setOnCheckedChangeListener { _, b -> pf.putBool("dup_small", b) } }
-        val rules = Dups.rules(this).filter { it.on }.mapIndexed { i, r -> "${i + 1}. " + Dups.ruleNames[r.key] + (if (r.key == "folder") " (" + Dups.preferred(this).joinToString(" > ").ifEmpty { "아직 안 정함" } + ")" else "") }
+        val rules = Dups.rules(this).filter { it.on }.mapIndexed { i, r -> "${i + 1}. " + Dups.ruleNames[r.key] + (if (r.key == "folder") " (" + Dups.preferred(this).filter { it != Dups.REST }.take(3).joinToString(" > ") { it.trimStart('/') }.ifEmpty { "아직 안 정함" } + (if (Dups.preferred(this).count { it != Dups.REST } > 3) " …" else "") + ")" else "") }
         val col = ui.col(
             ui.label("시놀로지 공유 공간 전체에서 중복을 찾습니다", 16f, ui.text, bold = true),
             ui.label("• 정확한 중복: 크기·찍은 시각이 같고 파일 내용(앞·가운데·뒤 일부)까지 같은 것\n• 줄인 사본: 같은 사진을 메신저 등으로 줄여 저장한 것\n찾기만 하고 바로 지우지 않습니다. 묶음마다 남길 것을 보여 드리고, 바꾼 뒤 [지우기]를 누를 때 지웁니다.", 13.5f, ui.sub).apply { layoutParams = ui.lp(top = 8) },
@@ -77,6 +78,7 @@ class DupActivity : Activity() {
             ui.label("남길 것 고르는 규칙 (위에서부터)", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(top = 18) },
             ui.label(rules.joinToString("\n"), 13.5f, ui.text).apply { layoutParams = ui.lp(top = 6) },
             ui.button("규칙 바꾸기", primary = false) { editRules() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 10) },
+            ui.button("위치 순위 정하기", primary = false) { editPreferred() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 8) },
             ui.button("중복 찾기") { scan() }.apply { layoutParams = ui.lp(h = ui.dp(50), top = 20) },
             ui.label("처음에는 사진이 많으면 10분 넘게 걸립니다. 비교한 것은 기억해 두므로 다음부터는 새로 들어온 것만 비교합니다.", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 6); gravity = Gravity.CENTER },
         ).apply { setPadding(ui.dp(18), ui.dp(18), ui.dp(18), ui.dp(24)) }
@@ -223,7 +225,7 @@ class DupActivity : Activity() {
                     ui.iconBtn(Glyph("up", ui.text), "위로", 36) { if (i > 0) { rs.add(i - 1, rs.removeAt(i)); draw() } },
                     ui.iconBtn(Glyph("down", ui.text), "아래로", 36) { if (i < rs.size - 1) { rs.add(i + 1, rs.removeAt(i)); draw() } }))
             }
-            box.addView(ui.button("선호 폴더 순서 정하기", primary = false) { editPreferred() }.apply { layoutParams = ui.lp(h = ui.dp(42), top = 10) })
+            box.addView(ui.button("위치 순위 정하기 (중복이 있는 위치를 모두 나열)", primary = false) { editPreferred() }.apply { layoutParams = ui.lp(h = ui.dp(42), top = 10) })
         }
         draw()
         AlertDialog.Builder(this).setTitle("남길 것 고르는 규칙").setView(ScrollView(this).apply { addView(box) })
@@ -231,27 +233,93 @@ class DupActivity : Activity() {
             .setNegativeButton("그만", null).show()
     }
 
+    /**
+     * 위치 순위 정하기: 중복이 있는 위치(폴더)를 모두 나열하고 그 안에서 순서를 정함.
+     * 위에 있을수록 그곳의 것을 남김. 폴더 단계(맨 위 · 2단계 · 3단계 · 끝까지)로 묶어 볼 수 있고,
+     * 고치는 동안 위치마다 '남김 · 지움' 개수를 바로 다시 셈. '순위를 정하지 않은 위치' 줄도 옮길 수 있음.
+     */
     private fun editPreferred() {
         bg.execute {
-            val tops = try { Photos(this).folders(ns, 1).map { it.path } } catch (e: Exception) { emptyList() }
-            runOnUiThread {
-                val order = (Dups.preferred(this) + tops).distinct().toMutableList()
-                val on = Dups.preferred(this).toMutableSet()
-                val box = ui.col().apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), 0) }
-                fun draw() {
-                    box.removeAllViews()
-                    box.addView(ui.label("체크한 폴더가 위에서부터 우선. 중복이 여러 폴더에 있으면 위 폴더의 것을 남김", 12.5f, ui.sub))
-                    order.forEachIndexed { i, f ->
-                        val cb = CheckBox(this).apply { text = f.trimStart('/'); setTextColor(ui.text); isChecked = f in on; setOnCheckedChangeListener { _, b -> if (b) on += f else on -= f } }
-                        box.addView(ui.row(cb.apply { layoutParams = ui.lp(0, weight = 1f) },
-                            ui.iconBtn(Glyph("up", ui.text), "위로", 36) { if (i > 0) { order.add(i - 1, order.removeAt(i)); draw() } }))
-                    }
+            // 찾은 중복이 없으면 맨 위 폴더들로
+            val tops = if (groups.isEmpty()) try { Photos(this).folders(ns, 1).map { it.path } } catch (e: Exception) { emptyList() } else emptyList()
+            runOnUiThread { showRanking(tops) }
+        }
+    }
+
+    private fun showRanking(tops: List<String>) {
+        val all = groups.flatMap { it.entries }
+        var depth = pf.int("dup_depth", 0)   // 0 = 끝까지, 1·2·3 = 그 단계까지
+        fun cut(path: String): String { if (depth <= 0) return path; val parts = path.trim('/').split('/'); return "/" + parts.take(depth).joinToString("/") }
+        // 위치마다 중복 장수
+        fun places(): Map<String, Int> = if (all.isNotEmpty()) all.groupingBy { cut(it.path) }.eachCount() else tops.associateWith { 0 }
+        var counts = places()
+        val saved = Dups.preferred(this)
+        // 순서: 저장해 둔 순서 → 나머지 줄 → 중복 많은 곳부터
+        fun initial(): MutableList<String> {
+            val known = counts.keys
+            val out = ArrayList<String>()
+            for (p in saved) if (p == Dups.REST || p in known) out += p
+            val rest = known.filter { it !in out }.sortedByDescending { counts[it] ?: 0 }
+            val at = out.indexOf(Dups.REST)
+            if (at >= 0) out.addAll(at + 1, rest) else { out += rest }   // 새 위치는 '나머지' 줄 아래로
+            if (Dups.REST !in out) out += Dups.REST
+            return out
+        }
+        var order = initial()
+        val box = ui.col().apply { setPadding(ui.dp(14), ui.dp(6), ui.dp(14), 0) }
+        // 고친 순서로 미리 셈: 위치마다 남김/지움
+        fun preview(): Map<String, Pair<Int, Int>> {
+            if (groups.isEmpty()) return emptyMap()
+            val tmp = groups.map { g -> Dups.Group(g.kind, g.entries) }
+            Dups.decide(this, tmp, order)
+            val m = HashMap<String, IntArray>()
+            for (g in tmp) for (e in g.entries) { val k = cut(e.path); val a = m.getOrPut(k) { IntArray(2) }; if (e.it.id in g.keep) a[0]++ else a[1]++ }
+            return m.mapValues { it.value[0] to it.value[1] }
+        }
+        fun draw() {
+            box.removeAllViews()
+            box.addView(ui.label(if (groups.isEmpty()) "맨 위 폴더들입니다. 중복을 찾은 뒤 열면 중복이 있는 위치만 모두 나옵니다." else
+                "중복이 있는 위치 ${counts.size}곳. 위에 있을수록 그곳의 것을 남깁니다. 다른 규칙보다 먼저 쓰려면 규칙에서 '위치 순위'를 맨 위로.", 12.5f, ui.sub))
+            // 묶어 보기 단계
+            val seg = ui.row().apply { layoutParams = ui.lp(top = 8) }
+            listOf(1 to "맨 위", 2 to "2단계", 3 to "3단계", 0 to "끝까지").forEach { (d, n) ->
+                seg.addView(ui.label(n, 12.5f, if (d == depth) ui.onAccent else ui.text).apply {
+                    gravity = Gravity.CENTER; background = ui.press(ui.round(if (d == depth) ui.accent else ui.panel2, 14), 14)
+                    layoutParams = LinearLayout.LayoutParams(0, ui.dp(30), 1f).apply { rightMargin = ui.dp(4) }
+                    setOnClickListener { if (depth != d) { depth = d; pf.putInt("dup_depth", d); counts = places(); order = initial(); draw() } }
+                })
+            }
+            if (groups.isNotEmpty()) box.addView(seg)   // 묶어 보기는 찾은 중복이 있을 때만
+            val pv = preview()
+            order.forEachIndexed { i, f ->
+                val isRest = f == Dups.REST
+                val title = if (isRest) "— 순위를 정하지 않은 위치 (새로 생긴 위치도 여기) —" else f.trimStart('/').ifEmpty { "/" }
+                val sub = when {
+                    isRest -> "이 줄보다 아래 위치는 정하지 않은 위치보다도 나중 (먼저 지움)"
+                    pv[f] != null -> "중복 ${counts[f] ?: 0}장 · 남김 ${pv[f]!!.first} · 지움 ${pv[f]!!.second}"
+                    (counts[f] ?: 0) > 0 -> "중복 ${counts[f]}장"
+                    else -> ""
                 }
-                draw()
-                AlertDialog.Builder(this).setTitle("선호 폴더").setView(ScrollView(this).apply { addView(box) })
-                    .setPositiveButton("확인") { _, _ -> Dups.savePreferred(this, order.filter { it in on }); if (groups.isNotEmpty()) { Dups.decide(this, groups); update() } }
-                    .setNegativeButton("그만", null).show()
+                val rank = ui.label(if (isRest) "" else "${order.take(i + 1).count { it != Dups.REST }}", 13f, ui.accent, bold = true).apply {
+                    layoutParams = LinearLayout.LayoutParams(ui.dp(26), -2); gravity = Gravity.CENTER }
+                val text = ui.col(ui.label(title, 13.5f, if (isRest) ui.sub else ui.text).apply { if (!isRest) { maxLines = 2; ellipsize = TextUtils.TruncateAt.START } },
+                    ui.label(sub, 11.5f, if (pv[f]?.second ?: 0 > 0) ui.red else ui.sub).apply { visibility = if (sub.isEmpty()) View.GONE else View.VISIBLE }).apply { layoutParams = ui.lp(0, weight = 1f) }
+                fun move(to: Int) { val t = to.coerceIn(0, order.size - 1); if (t != i) { order.add(t, order.removeAt(i)); draw() } }
+                box.addView(ui.row(rank, text,
+                    ui.label("맨 위", 12f, if (i == 0) ui.sub else ui.accent, bold = true).apply { setPadding(ui.dp(8), ui.dp(8), ui.dp(6), ui.dp(8)); background = ui.press(null, 8); setOnClickListener { move(0) } },
+                    ui.iconBtn(Glyph("up", ui.text), "위로", 34) { move(i - 1) },
+                    ui.iconBtn(Glyph("down", ui.text), "아래로", 34) { move(i + 1) }
+                ).apply { setPadding(0, ui.dp(6), 0, ui.dp(6)); gravity = Gravity.CENTER_VERTICAL; if (isRest) setBackgroundColor(ui.panel2) })
             }
         }
+        draw()
+        AlertDialog.Builder(this).setTitle("위치 순위").setView(ScrollView(this).apply { addView(box) })
+            .setPositiveButton("확인") { _, _ ->
+                Dups.savePreferred(this, order)
+                // 순위를 정했으면 규칙에서 위치 순위를 켬
+                val rs = Dups.rules(this).map { if (it.key == "folder") it.copy(on = true) else it }; Dups.saveRules(this, rs)
+                if (groups.isNotEmpty()) { Dups.decide(this, groups); update() } else intro()
+            }
+            .setNegativeButton("그만", null).show()
     }
 }

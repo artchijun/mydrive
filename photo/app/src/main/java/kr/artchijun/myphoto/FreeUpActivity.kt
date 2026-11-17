@@ -57,6 +57,22 @@ class FreeUpActivity : Activity() {
     private lateinit var summary: TextView
     private lateinit var go: android.widget.Button
     private lateinit var grid: GridView
+    private lateinit var controls: LinearLayout
+    private lateinit var foldText: TextView
+    private lateinit var foldIcon: ImageView
+    private var folded = false
+    private fun setFolded(f: Boolean) {
+        folded = f; controls.visibility = if (f) View.GONE else View.VISIBLE
+        foldIcon.setImageDrawable(Glyph(if (f) "down" else "up", ui.sub)); updateFold()
+    }
+    /** 접힌 줄에 지금 설정을 한 줄로 */
+    private fun updateFold() {
+        if (!::foldText.isInitialized) return
+        val f = when { tab == 1 -> null; !custom -> "모든 항목"
+            else -> listOfNotNull(ages.firstOrNull { it.first == ageDays }?.second?.takeIf { ageDays > 0 }, sizes.firstOrNull { it.first == minMb }?.second?.takeIf { minMb > 0 }).joinToString(" · ").ifEmpty { "전체" } }
+        foldText.text = (if (folded) "" else "설정 접기 — ") + listOfNotNull(if (scope == Library.BACKUP) "백업 폴더" else "서버 전체", if (phoneAll) "휴대폰 모든 폴더" else "고른 폴더",
+            if (tab == 0) "서버에 있음" else "서버에 없음", f, query.takeIf { it.isNotEmpty() }?.let { "'$it'" }).joinToString(" · ")
+    }
     private lateinit var preview: CheckBox
     private val thumbs = object : LruCache<Long, Bitmap>(16 * 1024 * 1024) { override fun sizeOf(k: Long, v: Bitmap) = v.byteCount }
     private var pending: List<Row> = emptyList()
@@ -64,7 +80,7 @@ class FreeUpActivity : Activity() {
     @Volatile private var stop = false
 
     private val ages = listOf(0 to "전체", 30 to "1개월 초과", 90 to "3개월 초과", 180 to "6개월 초과", 365 to "1년 초과", 730 to "2년 초과")
-    private val sizes = listOf(0L to "전체", 10L to "10MB 초과", 50L to "50MB 초과", 100L to "100MB 초과", 1024L to "1GB 초과")
+    private val sizes = listOf(0L to "전체", 10L to "10MB 초과", 50L to "50MB 초과", 100L to "100MB 초과", 500L to "500MB 초과", 1024L to "1GB 초과")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -98,10 +114,24 @@ class FreeUpActivity : Activity() {
         go = ui.button("지울 항목 없음") { start() }
         val bottom = ui.col(ui.row(preview).apply { gravity = Gravity.CENTER }, go.apply { layoutParams = ui.lp(h = ui.dp(52), top = 8) })
             .apply { setPadding(ui.dp(16), ui.dp(8), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel); tag = "bottom" }
-        val root = ui.col(top, scopeRow, phoneRow, statusRow, seg, filters, search, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
+        // 설정들은 접을 수 있게: 접으면 한 줄 요약만 남고 사진 칸이 화면 대부분을 씀 (사진을 내려 보기 시작하면 저절로 접힘)
+        controls = ui.col(scopeRow, phoneRow, statusRow, seg, filters, search)
+        foldText = ui.label("", 13.5f, ui.text).apply { setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END; layoutParams = ui.lp(0, weight = 1f) }
+        foldIcon = ImageView(this).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(20), ui.dp(20)) }
+        val foldBar = ui.row(ImageView(this).apply { setImageDrawable(Glyph("sort", ui.accent)); layoutParams = LinearLayout.LayoutParams(ui.dp(18), ui.dp(18)).apply { rightMargin = ui.dp(10) } }, foldText, foldIcon).apply {
+            setPadding(ui.dp(16), ui.dp(10), ui.dp(14), ui.dp(10)); background = ui.press(android.graphics.drawable.ColorDrawable(ui.panel))
+            setOnClickListener { setFolded(!folded) }
+        }
+        grid.setOnScrollListener(object : android.widget.AbsListView.OnScrollListener {
+            private var touching = false
+            override fun onScrollStateChanged(v: android.widget.AbsListView, st: Int) { touching = st == android.widget.AbsListView.OnScrollListener.SCROLL_STATE_TOUCH_SCROLL }
+            override fun onScroll(v: android.widget.AbsListView, first: Int, vis: Int, total: Int) { if (touching && first > 0 && !folded) setFolded(true) }
+        })
+        val root = ui.col(top, foldBar, controls, summary, grid.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom).apply { setBackgroundColor(ui.bg) }
         ui.insets(root)
         setContentView(root)
         buildScope(); buildPhone(); buildSeg(); buildFilters()
+        setFolded(false)
         // 고른 범위의 서버 목록이 1시간보다 오래됐으면(또는 그 뒤 백업으로 올린 것이 있으면) 새로 읽고 대조
         load(force = Library.stale(this, 3_600_000L, scope))
     }
@@ -260,6 +290,7 @@ class FreeUpActivity : Activity() {
 
     /** 지금 조건에 맞는 것 */
     private fun refresh() {
+        updateFold()
         val now = System.currentTimeMillis()
         val q = query.lowercase()
         val ps = phoneSet()

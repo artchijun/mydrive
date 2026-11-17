@@ -23,7 +23,7 @@ object Dups {
     // ---------- 규칙 ----------
     data class Rule(val key: String, val on: Boolean)
     val ruleNames = mapOf(
-        "folder" to "선호 폴더에 있는 것",
+        "folder" to "위치 순위가 높은 것 (위치 순위 정하기)",
         "res" to "해상도가 높은 것",
         "size" to "파일이 큰 것",
         "name" to "이름이 깔끔한 것 ('(1)'·'복사본'·'copy' 가 없고 경로가 짧은 것)",
@@ -37,17 +37,27 @@ object Dups {
         return out
     }
     fun saveRules(ctx: Context, r: List<Rule>) = Prefs(ctx).putStr("dup_rules", r.joinToString(",") { it.key + ":" + (if (it.on) "1" else "0") })
-    /** 선호 폴더 (앞일수록 먼저) — 경로 앞부분 */
+    /** 위치 순위 (앞일수록 남김) — 폴더 경로. "*" 는 '순위를 정하지 않은 위치'의 자리 (없으면 맨 끝) */
+    const val REST = "*"
     fun preferred(ctx: Context): List<String> = Prefs(ctx).str("dup_pref", "").split('\n').filter { it.isNotEmpty() }
     fun savePreferred(ctx: Context, l: List<String>) = Prefs(ctx).putStr("dup_pref", l.joinToString("\n"))
 
     private val copyMark = Regex("""(\(\d+\)|복사본|사본|copy|\s-\s\d+|_\d)(\.[^.]+)?$""", RegexOption.IGNORE_CASE)
 
-    /** a 가 b 보다 남길 만하면 음수 */
-    fun comparator(ctx: Context): Comparator<Entry> {
+    /** 이 위치의 순위: 순위 목록에서 가장 자세히 맞는 경로(가장 긴 앞부분)의 자리. 없으면 '나머지' 자리 */
+    fun rankOf(pref: List<String>, path: String): Int {
+        var best = -1; var len = -1
+        pref.forEachIndexed { i, p -> if (p != REST && (path == p || path.startsWith("$p/")) && p.length > len) { best = i; len = p.length } }
+        if (best >= 0) return best
+        val rest = pref.indexOf(REST)
+        return if (rest >= 0) rest else pref.size
+    }
+
+    /** a 가 b 보다 남길 만하면 음수 (prefOverride: 순위를 바꾸는 중에 미리 보기) */
+    fun comparator(ctx: Context, prefOverride: List<String>? = null): Comparator<Entry> {
         val rs = rules(ctx).filter { it.on }
-        val pref = preferred(ctx)
-        fun prefRank(e: Entry): Int { val i = pref.indexOfFirst { e.path == it || e.path.startsWith("$it/") }; return if (i < 0) pref.size else i }
+        val pref = prefOverride ?: preferred(ctx)
+        fun prefRank(e: Entry): Int = rankOf(pref, e.path)
         fun messy(e: Entry) = (if (copyMark.containsMatchIn(e.it.name)) 1000 else 0) + e.full.length
         return Comparator { a, b ->
             for (r in rs) {
@@ -67,8 +77,8 @@ object Dups {
     }
 
     /** 규칙대로 묶음마다 하나만 남김 */
-    fun decide(ctx: Context, groups: List<Group>) {
-        val cmp = comparator(ctx)
+    fun decide(ctx: Context, groups: List<Group>, prefOverride: List<String>? = null) {
+        val cmp = comparator(ctx, prefOverride)
         for (g in groups) { g.keep.clear(); g.keep += g.entries.minWith(cmp).it.id }
     }
 
