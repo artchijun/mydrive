@@ -48,6 +48,7 @@ struct Config {
     bool onDemand = false;                   // 받는 방식: true = 필요할 때 받기 (새 파일은 자리만) / false = 모두 받아 두기. 탐색기 연동은 늘 켬
     std::vector<std::string> keepDirs;       // 항상 이 PC에 둘 폴더 (내용까지 늘 받아 둠) — 나머지는 요청 시 받기
     int autoFreeDays = 0;                    // 이만큼 안 연 파일은 온라인 전용으로 (0 = 끔)
+    int everyHours = 0;                      // 언제 맞출지: 0 실시간(바뀌면 바로) · N 시간마다 · -1 원할 때만 ([지금 동기화]). 바뀐 것은 계속 알아 두고 때가 되면 맞춤
 };
 
 struct Stats {
@@ -100,6 +101,10 @@ public:
     bool LookupKey(const std::string& k, std::string* rel) { std::lock_guard<std::mutex> g(rkMu_); auto it = rkIdx_.find(k); if (it == rkIdx_.end()) return false; if (rel) *rel = it->second; return true; }
     static std::string MoveKey(const std::string& leaf, int64_t size, int64_t mtimeNs) { return leaf + "|" + std::to_string(size) + "|" + std::to_string(mtimeNs / 1000000000LL); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
     void Kick() { SetEvent(wake_); }
+    // [지금 동기화]: 'N시간마다'·'원할 때만' 작업도 지금 맞춤
+    void RunNow() { runNow_ = true; SetEvent(wake_); }
+    int64_t LastPassMs() const { return lastPassMs_; }   // 'N시간마다'·'원할 때만': 마지막으로 맞추기 시작한 때 (1970년부터 ms, 0 = 아직)
+    int64_t NextPassMs() const { return cfg_.everyHours > 0 && lastPassMs_ ? lastPassMs_ + (int64_t)cfg_.everyHours * 3600000LL : 0; }
     // NAS 전체 목록을 새로 받아 PC 가 들고 있는 목록을 바로잡음 ([NAS 다시 확인], 올리기가 'NAS에도 다른 판'으로 거절될 때)
     void ResyncRemote() { resync_ = true; scanAll_ = true; Kick(); }
     bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
@@ -177,6 +182,11 @@ private:
     std::atomic<int64_t> polledSeq_{0};
     std::atomic<bool> stop_{false}, confirmDelete_{false}, restoreDelete_{false};
     std::atomic<uint64_t> pausedUntil_{0};
+    std::atomic<bool> runNow_{false};
+    std::atomic<int64_t> lastPassMs_{0};
+    bool chain_ = false;           // 'N시간마다'·'원할 때만': 맞추기 차례가 이어지는 중 (바뀐 게 있어 한 번 더)
+    uint64_t lastPing_ = 0;
+    bool WaitTurn();               // 'N시간마다'·'원할 때만': 때가 아니면 기다리고 false
     HANDLE wake_ = nullptr;
     // 상태(local_/remote_/base_)를 여러 통로가 함께 쓰므로 잠금
     std::recursive_mutex mu_;

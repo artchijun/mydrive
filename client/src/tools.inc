@@ -259,7 +259,7 @@ static void StatusDialog(std::shared_ptr<Engine> e, std::wstring where, std::str
     tc.nDefaultButton = IDCLOSE;
     int btn = 0;
     TaskDialogIndirect(&tc, &btn, nullptr, nullptr);
-    if (btn == 100) { if (e->Paused()) e->Pause(0); e->Kick(); }
+    if (btn == 100) { if (e->Paused()) e->Pause(0); e->RunNow(); }
 }
 
 // ---------- 다른 동기화 작업으로 옮기기 ----------
@@ -356,7 +356,7 @@ static void ShellCmd(const std::wstring& cmd, const std::wstring& path) {
         if (!e) return;
         bool was = AnyPaused();
         if (was) PauseAll(0);
-        e->Kick();
+        e->RunNow();
         TrayBalloon(L"지금 동기화", ShowRel(cp.conn, cp.rel) + L"\n" + (was ? L"일시 중지를 풀고 NAS와 맞춥니다." : L"NAS와 바로 맞춥니다."), NIIF_INFO);
         return;
     }

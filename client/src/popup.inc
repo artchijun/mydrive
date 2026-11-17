@@ -276,7 +276,7 @@ static void PauseAll(int minutes) {
 }
 static void SyncNow() {
     if (AnyPaused()) PauseAll(0);
-    for (auto& e : g_engines) { e->ClearCanceled(); e->Kick(); }
+    for (auto& e : g_engines) { e->ClearCanceled(); e->RunNow(); }   // 'N시간마다'·'원할 때만' 작업도 지금
 }
 // 왼쪽 위 Mydrive 아이콘: NAS 다시 확인
 //   NAS 서버는 바뀐 것을 실시간(inotify)으로 알지만, 폴더가 아주 많으면 일부 폴더는 감시하지 못해 15분마다 비교로만 알게 됨.

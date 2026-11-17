@@ -26,16 +26,19 @@ object Dups {
         "folder" to "위치 순위가 높은 것 (위치 순위 정하기)",
         "res" to "해상도가 높은 것",
         "size" to "파일이 큰 것",
-        "name" to "이름이 깔끔한 것 ('(1)'·'_1'·'복사본'·'copy' 가 없고 경로가 짧은 것)",
+        "name" to "이름이 깔끔한 것 ('(1)'·'_1'·'복사본'·'copy' 가 없는 것)",
+        "path" to "경로가 짧은 것 (폴더 경로 글자 수)",
         "short" to "이름이 짧은 것 (확장자를 뺀 글자 수)",
         "old" to "먼저 들어온 것 (시놀로지에 올라온 때)",
         "new" to "나중에 들어온 것",
     )
     fun rules(ctx: Context): List<Rule> {
-        val s = Prefs(ctx).str("dup_rules", "folder:1,res:1,size:1,name:1,short:1,old:1,new:0")
+        val s = Prefs(ctx).str("dup_rules", "folder:1,res:1,size:1,name:1,path:1,short:1,old:1,new:0")
         val out = s.split(',').mapNotNull { p -> p.split(':').takeIf { it.size == 2 && it[0] in ruleNames }?.let { Rule(it[0], it[1] == "1") } }.toMutableList()
         // 예전에 저장한 규칙에 없던 '이름이 짧은 것'은 '이름이 깔끔한 것' 바로 뒤에 켜서 넣음 (나머지 새 규칙은 끈 채로 끝에)
         if (out.none { it.key == "short" }) out.add(out.indexOfFirst { it.key == "name" }.let { if (it >= 0) it + 1 else out.size }, Rule("short", true))
+        // '경로가 짧은 것'은 예전에 '이름이 깔끔한 것' 안에 들어 있던 것 → 그 바로 뒤에, 그 규칙과 같은 켜짐으로
+        if (out.none { it.key == "path" }) out.indexOfFirst { it.key == "name" }.let { i -> out.add(if (i >= 0) i + 1 else out.size, Rule("path", if (i >= 0) out[i].on else true)) }
         ruleNames.keys.filter { k -> out.none { it.key == k } }.forEach { out += Rule(it, false) }
         return out
     }
@@ -62,7 +65,7 @@ object Dups {
         val rs = rules(ctx).filter { it.on }
         val pref = prefOverride ?: preferred(ctx)
         fun prefRank(e: Entry): Int = rankOf(pref, e.path)
-        fun messy(e: Entry) = (if (copyMark.containsMatchIn(e.it.name)) 1000 else 0) + e.full.length
+        fun messy(e: Entry) = if (copyMark.containsMatchIn(e.it.name)) 1 else 0
         fun stem(e: Entry) = e.it.name.substringBeforeLast('.').length
         return Comparator { a, b ->
             for (r in rs) {
@@ -71,6 +74,7 @@ object Dups {
                     "res" -> (b.it.w.toLong() * b.it.h).compareTo(a.it.w.toLong() * a.it.h)
                     "size" -> b.it.size.compareTo(a.it.size)
                     "name" -> messy(a).compareTo(messy(b))
+                    "path" -> a.path.length.compareTo(b.path.length)
                     "short" -> stem(a).compareTo(stem(b))
                     "old" -> a.it.indexed.compareTo(b.it.indexed)
                     "new" -> b.it.indexed.compareTo(a.it.indexed)
