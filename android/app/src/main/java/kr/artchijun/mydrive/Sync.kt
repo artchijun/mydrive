@@ -55,7 +55,13 @@ object Sync {
     class Progress(val id: String) {
         @Volatile var phase = "준비 중"; @Volatile var done = 0; @Volatile var total = 0
         @Volatile var file = ""; @Volatile var bytes = 0L; @Volatile var size = 0L
+        /** 지금 함께 옮기는 파일들: 경로 → [옮긴 바이트, 전체 바이트, 1=올림 0=받음] */
+        val active = ConcurrentHashMap<String, LongArray>()
     }
+    /** 한 번에 함께 옮길 파일 수 (설정, 1~8) */
+    fun parallel(ctx: Context) = Prefs(ctx).int("sync_par", 4).coerceIn(1, 8)
+    /** 왜 돌았는지 (화면에 보임) */
+    const val WHY_MANUAL = "지금 동기화"; const val WHY_LOCAL = "휴대폰에서 바뀜"; const val WHY_NAS = "NAS에서 바뀜"; const val WHY_TIME = "정한 시간"
     @Volatile var cur: Progress? = null
 
     // ---------- 짝·상태 저장 ----------
@@ -82,17 +88,29 @@ object Sync {
     private val restoreSet = ConcurrentHashMap.newKeySet<String>()
     private fun pendingMap(ctx: Context): JSONObject = try { JSONObject(Prefs(ctx).str("sync_pending", "{}")) } catch (e: Exception) { JSONObject() }
     /** 돌릴 짝 넣기. manual = 사용자가 눌렀음 (와이파이만·꺼 둠을 따지지 않음) */
-    fun request(ctx: Context, ids: Collection<String>, manual: Boolean, allowDel: Boolean = false, restore: Boolean = false) = synchronized(pf) {
+    /**
+     * 돌릴 짝 넣기. manual = 사용자가 눌렀음 (와이파이만·꺼 둠을 따지지 않음)
+     *   localOnly = 휴대폰 변경 알림으로만 깨어남 → 먼저 휴대폰 폴더만 보고, 바뀐 게 없으면 NAS 는 읽지 않고 끝냄
+     */
+    fun request(ctx: Context, ids: Collection<String>, manual: Boolean, allowDel: Boolean = false, restore: Boolean = false, localOnly: Boolean = false, why: String = "") = synchronized(pf) {
         if (ids.isEmpty()) return@synchronized
         android.util.Log.i("MydriveSync", "요청 ${ids.size}개 manual=$manual · " + Throwable().stackTrace.getOrNull(1)?.let { "${it.fileName}:${it.lineNumber}" })
         val m = pendingMap(ctx)
-        for (id in ids) { m.put(id, manual || m.optBoolean(id)); if (allowDel) allowDelete += id; if (restore) restoreSet += id }
+        val bits = (if (manual) 1 else 0) or (if (localOnly && !manual) 0 else 2)
+        for (id in ids) {
+            val old = m.optJSONObject(id)
+            m.put(id, JSONObject().put("f", (old?.optInt("f") ?: 0) or bits).put("why", old?.optString("why")?.takeIf { it.isNotEmpty() && !manual } ?: why.ifEmpty { if (manual) WHY_MANUAL else "" }))
+            if (allowDel) allowDelete += id; if (restore) restoreSet += id
+        }
         Prefs(ctx).putStr("sync_pending", m.toString())
     }
     fun pendingIds(ctx: Context): Set<String> = synchronized(pf) { pendingMap(ctx).keys().asSequence().toSet() }
-    private fun take(ctx: Context): Pair<String, Boolean>? = synchronized(pf) {
+    private class Want(val id: String, val manual: Boolean, val localOnly: Boolean, val why: String)
+    private fun take(ctx: Context): Want? = synchronized(pf) {
         val m = pendingMap(ctx); val k = m.keys().asSequence().firstOrNull() ?: return@synchronized null
-        val manual = m.optBoolean(k); m.remove(k); Prefs(ctx).putStr("sync_pending", m.toString()); k to manual
+        val o = m.optJSONObject(k); val f = o?.optInt("f", 3) ?: (if (m.optBoolean(k)) 3 else 2)   // 예전 판은 true/false 로 적었음
+        m.remove(k); Prefs(ctx).putStr("sync_pending", m.toString())
+        Want(k, f and 1 != 0, f and 2 == 0, o?.optString("why") ?: "")
     }
 
     /** 동기화가 방금 쓴 경로 — 그 때문에 생긴 변경 알림은 무시 (같은 짝을 또 돌리지 않게) */
@@ -114,11 +132,11 @@ object Sync {
         if (!running.compareAndSet(false, true)) return false
         try {
             while (!stop()) {
-                val (id, manual) = take(ctx) ?: break
-                val p = pairs(ctx).firstOrNull { it.id == id } ?: continue
-                if (!manual && !p.on) continue
-                val finished = runPair(ctx, p, manual, stop)
-                if (!finished) { request(ctx, listOf(id), manual); break }
+                val w = take(ctx) ?: break
+                val p = pairs(ctx).firstOrNull { it.id == w.id } ?: continue
+                if (!w.manual && !p.on) continue
+                val finished = runPair(ctx, p, w.manual, stop, w.localOnly, w.why)
+                if (!finished) { request(ctx, listOf(w.id), w.manual, why = w.why); break }
             }
         } finally { cur = null; running.set(false) }
         return true
@@ -127,7 +145,7 @@ object Sync {
     private fun metered(ctx: Context) = try { ctx.getSystemService(ConnectivityManager::class.java).isActiveNetworkMetered } catch (e: Exception) { false }
 
     /** 짝 하나. 끝까지 했으면 true (실패가 있어도), 멈춰서 덜 했으면 false */
-    private fun runPair(ctx: Context, p: Link, manual: Boolean, stop: () -> Boolean): Boolean {
+    private fun runPair(ctx: Context, p: Link, manual: Boolean, stop: () -> Boolean, localOnly: Boolean = false, why: String = ""): Boolean {
         if (!manual && p.wifiOnly && metered(ctx)) {
             setStatus(ctx, p.id) { it.msg = "와이파이를 기다립니다"; it.err = false }
             return true
@@ -139,9 +157,10 @@ object Sync {
         var epoch = ""; var seq = -1L
         if (!p.web) try { api.roots().firstOrNull { it.name == p.root }?.let { epoch = it.epoch; seq = it.seq } } catch (e: Exception) { }
         return try {
-            val r = Engine(ctx, p, api, Fs(ctx, api), stop, pr, allowDelete.remove(p.id), restoreSet.remove(p.id)).run()
+            val r = Engine(ctx, p, api, Fs(ctx, api), stop, pr, allowDelete.remove(p.id), restoreSet.remove(p.id), localOnly, parallel(ctx)).run()
             if (stop()) { setStatus(ctx, p.id) { it.msg = "멈춤 — 다음에 이어서"; it.err = false }; return false }
-            setStatus(ctx, p.id) { it.time = System.currentTimeMillis(); it.msg = r.text; it.err = r.failed > 0; it.held = r.held; if (seq >= 0) { it.epoch = epoch; it.seq = seq } }
+            if (r.skipped) return true   // 휴대폰에서 바뀐 게 없었음 → 상태도 그대로
+            setStatus(ctx, p.id) { it.time = System.currentTimeMillis(); it.msg = (if (why.isNotEmpty()) "$why → " else "") + r.text; it.err = r.failed > 0; it.held = r.held; if (seq >= 0) { it.epoch = epoch; it.seq = seq } }
             if (r.failed > 0) { SyncNote.problem(ctx, p, r.text); if (!stop()) SyncSchedule.soon(ctx, 10 * 60_000L) }
             if (r.held > 0) SyncNote.problem(ctx, p, "지울 것이 ${r.held}개라 지우지 않고 멈췄습니다. 눌러서 확인해 주세요")
             true
@@ -156,13 +175,14 @@ object Sync {
     }
 
     // ---------- 동기화 한 번 ----------
-    class Result(val text: String, val failed: Int, val held: Int)
+    class Result(val text: String, val failed: Int, val held: Int, val skipped: Boolean = false)
 
     private class L(val size: Long, val m: Long)
     /** 기준: 지난번에 맞췄을 때 휴대폰 (크기·시각 ms) · NAS (크기·시각 ns) */
     private class Rec(var ls: Long, var lm: Long, var rs: Long, var rm: Long, val d: Boolean = false)
 
-    private class Engine(val ctx: Context, val p: Link, val api: Api, val fs: Fs, val stop: () -> Boolean, val pr: Progress, val allowDel: Boolean, val restore: Boolean = false) {
+    private class Engine(val ctx: Context, val p: Link, val api: Api, val fs: Fs, val stop: () -> Boolean, val pr: Progress, val allowDel: Boolean, val restore: Boolean = false,
+                         val localOnly: Boolean = false, val par: Int = 4) {
         val top = File(p.local)
         val stateFile = File(ctx.filesDir, "sync/${p.id}.json")
         val base = HashMap<String, Rec>()
@@ -270,6 +290,10 @@ object Sync {
             if (!top.isDirectory) throw IOException("휴대폰 폴더가 없습니다: ${p.local}")
             load()
             pr.phase = "휴대폰 폴더 읽는 중"; walkLocal()
+            // 휴대폰 변경 알림으로만 깨어났는데 이 폴더는 그대로 → NAS 는 읽지 않고 끝 (다른 폴더나 지워진 파일 때문에 알림이 온 경우)
+            if (localOnly && !restore && lf.all { (k, l) -> base[k]?.let { !it.d && it.ls == l.size && it.lm == l.m } == true } &&
+                base.all { (k, b) -> if (b.d) k in ld else k in lf } && ld.all { base[it]?.d == true })
+                return Result("", 0, 0, skipped = true).also { android.util.Log.i("MydriveSync", "${p.name}: 휴대폰 폴더 그대로 — NAS 는 읽지 않음") }
             pr.phase = "NAS 폴더 읽는 중"; listRemote()
             pr.phase = "비교 중"
             // 되살리기: 한쪽에만 남은 것의 기준을 잊음 → '새로 생긴 것'으로 보고 없는 쪽에 다시 만듦 (지우지 않음)
@@ -340,7 +364,7 @@ object Sync {
                 delDirL.clear(); delDirR.clear()
             }
 
-            // 4) 하기: 폴더 지우기·만들기는 차례로, 파일은 셋씩 함께
+            // 4) 하기: 폴더 지우기·만들기는 차례로, 파일은 설정한 수만큼 함께
             pr.total = acts.size + delDirL.size + delDirR.size + mkL.size + mkR.size
             for (d in delDirL) step(d) { fs.toTrash(File(top, d)); dropUnder(d); nDelL++ }
             for (d in delDirR) step(d) { api.delete(p.root, rp(d)); Sync.mark(p.root + "\u0000" + rp(d)); dropUnder(d); nDelR++ }
@@ -349,7 +373,8 @@ object Sync {
                 try { api.mkdir(p.root, rp(d)) } catch (e: ApiException) { if (e.status != 409) throw e }
                 Sync.mark(p.root + "\u0000" + rp(d)); nMk++; synchronized(base) { base[d] = Rec(0, 0, 0, 0, true) }
             }
-            val pool = Executors.newFixedThreadPool(3)
+            pr.phase = "옮기는 중"
+            val pool = Executors.newFixedThreadPool(par)
             try {
                 val fs2 = acts.map { a -> pool.submit { if (!stop()) step(a.rel) { act(a) } } }
                 for (f in fs2) { if (stop()) break; try { f.get() } catch (e: Exception) { } }
@@ -378,19 +403,23 @@ object Sync {
                 if (e.status == 409 && e.kind == "conflict") { synchronized(errs) { errs += "그사이 NAS에서 바뀜 (다음에 다시): $rel" } }
                 else synchronized(errs) { nFail++; errs += "${e.message}: $rel" }
             } catch (e: Exception) { synchronized(errs) { nFail++; errs += "${e.message ?: e.javaClass.simpleName}: $rel" } }
-            pr.done++
+            finally { pr.active.remove(rel) }
+            synchronized(errs) { pr.done++ }
             if (System.currentTimeMillis() - lastSave > 15_000) save()
         }
 
-        val prog: (Long, Long) -> Unit = { d, t -> pr.bytes = d; pr.size = t }
+        /** 이 파일의 진행 (함께 옮기는 파일마다 따로) */
+        fun progOf(rel: String, up: Boolean): (Long, Long) -> Unit {
+            val a = longArrayOf(0, 0, if (up) 1 else 0); pr.active[rel] = a
+            return { d, t -> a[0] = d; a[1] = t; pr.bytes = d; pr.size = t }
+        }
 
         fun upload(rel: String, cond: String) {
             val f = File(top, rel)
             val len = f.length(); val m = f.lastModified()
-            pr.phase = "올리는 중"
             val id = synchronized(ups) { ups.getOrPut(rel) { Api.newId() } }
             Sync.mark(p.root + "\u0000" + rp(rel))
-            val e = api.upload(p.root, rp(rel), len, m * 1_000_000, { FileInputStream(f) }, prog, stop, cond, id)
+            val e = api.upload(p.root, rp(rel), len, m * 1_000_000, { FileInputStream(f) }, progOf(rel, true), stop, cond, id)
             Sync.mark(p.root + "\u0000" + rp(rel))
             synchronized(ups) { ups.remove(rel) }
             synchronized(base) { base[rel] = Rec(len, lmod(f), e.size, e.mtimeNs) }
@@ -400,11 +429,10 @@ object Sync {
         fun download(rel: String, trashOld: Boolean) {
             val r = rf[rel] ?: return
             val f = File(top, rel)
-            pr.phase = "받는 중"
             f.parentFile?.mkdirs()
             Sync.mark("L\u0000" + f.path)
             if (trashOld && f.exists()) fs.toTrash(f)
-            api.download(p.root, Entry(rp(rel), false, r.size, r.mtimeNs), f, prog, stop)
+            api.download(p.root, Entry(rp(rel), false, r.size, r.mtimeNs), f, progOf(rel, false), stop)
             Sync.mark("L\u0000" + f.path)
             fs.scan(f)
             synchronized(base) { base[rel] = Rec(f.length(), lmod(f), r.size, r.mtimeNs) }

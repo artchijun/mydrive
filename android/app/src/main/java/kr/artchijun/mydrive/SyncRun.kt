@@ -61,9 +61,10 @@ object SyncSchedule {
     }
 
     /** 15분마다: 때가 된 짝 (실시간 짝은 NAS 에서 바뀐 것이 있을 때만) */
-    fun due(ctx: Context): List<String> {
+    /** → (정한 시간이 된 짝, NAS 에서 바뀐 짝) */
+    fun due(ctx: Context): Pair<List<String>, List<String>> {
         val now = System.currentTimeMillis()
-        val out = ArrayList<String>()
+        val out = ArrayList<String>(); val nas = ArrayList<String>()
         val ps = Sync.pairs(ctx).filter { it.on && it.mode != Sync.MANUAL }
         val api = Prefs(ctx).api()
         val roots = if (ps.any { it.mode == Sync.REALTIME && !it.web }) try { api.roots().associateBy { it.name } } catch (e: Exception) { null } else null
@@ -72,19 +73,19 @@ object SyncSchedule {
             when {
                 p.mode == Sync.TIMED -> if (now - st.time >= p.hours * 3600_000L - 5 * 60_000L) out += p.id
                 now - st.time > 6 * 3600_000L || st.err -> out += p.id          // 오래됐거나 지난번에 문제 → 한 번 다 봄
-                p.web -> if (now - st.time > 14 * 60_000L) out += p.id           // 웹 폴더는 변경 기록이 없어 직접 읽어 봄
+                p.web -> if (now - st.time > 14 * 60_000L) nas += p.id           // 웹 폴더는 변경 기록이 없어 직접 읽어 봄
                 else -> {
                     val ri = roots?.get(p.root) ?: continue
-                    if (ri.epoch != st.epoch || st.seq < 0) { out += p.id; continue }
+                    if (ri.epoch != st.epoch || st.seq < 0) { nas += p.id; continue }
                     if (ri.seq == st.seq) continue
                     try {
                         val (reset, seq, paths) = api.changes(p.root, st.epoch, st.seq, 0)
-                        if (reset || hits(p, paths)) out += p.id else Sync.setStatus(ctx, p.id) { it.seq = seq }
+                        if (reset || hits(p, paths)) nas += p.id else Sync.setStatus(ctx, p.id) { it.seq = seq }
                     } catch (e: Exception) { }
                 }
             }
         }
-        return out
+        return out to nas
     }
 
     /** NAS 변경 경로 가운데 이 짝 안의 것 (동기화가 스스로 쓴 것은 빼고) */
@@ -101,13 +102,11 @@ class SyncJob : JobService() {
         Thread {
             SyncSchedule.runningJob = params.jobId
             try {
-                val ids = when (params.jobId) {
-                    32 -> SyncSchedule.due(this)
-                    31 -> changedPairs(params)
-                    else -> emptyList()
+                when (params.jobId) {
+                    32 -> SyncSchedule.due(this).let { (time, nas) ->
+                        Sync.request(this, time, manual = false, why = Sync.WHY_TIME); Sync.request(this, nas, manual = false, why = Sync.WHY_NAS) }
+                    31 -> Sync.request(this, changedPairs(params), manual = false, localOnly = true, why = Sync.WHY_LOCAL)
                 }
-                android.util.Log.i("MydriveSync", "예약 작업 ${params.jobId}: 돌릴 짝 ${ids.size}개")
-                Sync.request(this, ids, manual = false)
                 if (Sync.pendingIds(this).isNotEmpty()) {
                     val svc = SyncService.self
                     if (svc != null) svc.kick()
@@ -239,11 +238,11 @@ class SyncService : Service() {
                 val (reset, s, paths) = api.changes(root, epoch, seq, 50)
                 if (g != gen) return
                 val ps = Sync.pairs(this).filter { it.on && it.mode == Sync.REALTIME && it.root == root && it.dir != Sync.UP }
-                if (reset) { seq = -1; Sync.request(this, ps.map { it.id }, false); kick(); continue }
+                if (reset) { seq = -1; Sync.request(this, ps.map { it.id }, false, why = Sync.WHY_NAS); kick(); continue }
                 seq = s
                 val hit = ps.filter { SyncSchedule.hits(it, paths) }
                 if (paths.isNotEmpty()) android.util.Log.i("MydriveSync", "NAS 변경 $root: ${paths.take(5)} → ${hit.size}개 짝")
-                if (hit.isNotEmpty()) { Thread.sleep(1500); Sync.request(this, hit.map { it.id }, false); kick() }
+                if (hit.isNotEmpty()) { Thread.sleep(1500); Sync.request(this, hit.map { it.id }, false, why = Sync.WHY_NAS); kick() }
             } catch (e: Exception) {
                 seq = -1
                 try { Thread.sleep(20_000) } catch (x: InterruptedException) { }
@@ -264,8 +263,10 @@ class SyncService : Service() {
         val c = Sync.cur
         val p = c?.let { x -> Sync.pairs(this).firstOrNull { it.id == x.id } }
         if (c != null && p != null) {
-            b.setContentTitle("동기화 중 · ${p.name}" + if (c.total > 0) "  ${c.done}/${c.total}" else "")
-                .setContentText(c.phase + if (c.file.isNotEmpty()) " · ${c.file}" else "")
+            val act = c.active.keys.map { it.substringAfterLast('/') }
+            b.setContentTitle("동기화 중 · ${p.name}" + (if (c.total > 0) "  ${c.done}/${c.total}" else "") + (if (act.size > 1) " · ${act.size}개 함께" else ""))
+                .setContentText(if (act.isNotEmpty()) act.joinToString(", ") else c.phase + if (c.file.isNotEmpty()) " · ${c.file}" else "")
+            if (act.size > 1) b.setStyle(Notification.BigTextStyle().bigText(act.joinToString("\n")))
             if (c.size > 0) b.setProgress(1000, (c.bytes * 1000 / c.size).toInt(), false) else if (c.total > 0) b.setProgress(c.total, c.done, false) else b.setProgress(0, 0, true)
         } else {
             val n = Sync.pairs(this).count { it.on && it.mode == Sync.REALTIME }

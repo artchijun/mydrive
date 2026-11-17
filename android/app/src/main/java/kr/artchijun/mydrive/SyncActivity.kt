@@ -103,6 +103,18 @@ class SyncActivity : Activity() {
             setPadding(ui.dp(16), ui.dp(12), ui.dp(12), ui.dp(12)); background = ui.press(ui.round(ui.panel2, 12), 12); layoutParams = ui.lp(top = 10)
             setOnClickListener { pf.putBool("sync_watch", !watch); SyncService.refresh(this@SyncActivity); render() }
         })
+        // 한 번에 옮길 파일 수
+        val par = Sync.parallel(this)
+        body.addView(ui.row(ui.col(ui.label("한 번에 옮길 파일 수", 15.5f, ui.text),
+            ui.label("여러 파일을 함께 올리고 받습니다. 작은 파일이 많을 때 빨라집니다. 연결이 느리면 줄이세요", 12.5f, ui.sub).apply { layoutParams = ui.lp(top = 3) })
+            .apply { layoutParams = ui.lp(0, weight = 1f) }, ui.label("${par}개", 15f, ui.accent, bold = true).apply { setPadding(ui.dp(14), 0, 0, 0) }).apply {
+            setPadding(ui.dp(16), ui.dp(12), ui.dp(16), ui.dp(12)); background = ui.press(ui.round(ui.panel2, 12), 12); layoutParams = ui.lp(top = 8)
+            setOnClickListener {
+                val ns = intArrayOf(1, 2, 3, 4, 6, 8)
+                AlertDialog.Builder(this@SyncActivity).setTitle("한 번에 옮길 파일 수")
+                    .setSingleChoiceItems(ns.map { "${it}개" + if (it == 4) " (기본)" else "" }.toTypedArray(), ns.indexOf(par).coerceAtLeast(0)) { d, w -> d.dismiss(); pf.putInt("sync_par", ns[w]); render() }.show()
+            }
+        })
         if (ps.isEmpty()) {
             body.addView(ui.label("아직 동기화하는 폴더가 없습니다.\n\n휴대폰 폴더 하나와 NAS 폴더 하나를 짝지어 두면, 한쪽에서 바뀐 것을 다른 쪽에 그대로 맞춥니다. 실시간으로 하거나, 몇 시간마다, 또는 원할 때만 할 수 있습니다.\n\n탐색기에서 폴더를 고르고 더 보기 › ‘동기화 폴더로’ 를 눌러도 됩니다.", 14f, ui.sub).apply {
                 setPadding(ui.dp(8), ui.dp(24), ui.dp(8), ui.dp(16)) })
@@ -147,9 +159,13 @@ class SyncActivity : Activity() {
             k.held.visibility = if (st.held > 0 && c?.id != k.id) View.VISIBLE else View.GONE
             if (c != null && c.id == k.id) {
                 k.status.setTextColor(ui.accent)
-                k.status.text = "동기화 중 · " + c.phase + (if (c.total > 0) "  ${c.done}/${c.total}" else "") + (if (c.file.isNotEmpty()) "\n" + c.file else "")
+                val act = c.active.entries.toList().sortedBy { it.key }
+                k.status.text = "동기화 중 · " + c.phase + (if (c.total > 0) "  ${c.done}/${c.total}" else "") + (if (act.size > 1) " · ${act.size}개 함께" else "") +
+                    (if (act.isEmpty()) (if (c.file.isNotEmpty() && c.total == 0) "\n" + c.file else "")
+                     else act.take(8).joinToString("") { (rel, a) -> "\n" + (if (a[2] == 1L) "↑ " else "↓ ") + rel.substringAfterLast('/') + (if (a[1] > 0) "  ${a[0] * 100 / a[1]}%" else "") })
                 k.bar.visibility = View.VISIBLE
-                if (c.size > 0) { k.bar.isIndeterminate = false; k.bar.progress = (c.bytes * 1000 / c.size).toInt() }
+                if (c.total > 0) { k.bar.isIndeterminate = false; k.bar.progress = c.done * 1000 / c.total }
+                else if (c.size > 0) { k.bar.isIndeterminate = false; k.bar.progress = (c.bytes * 1000 / c.size).toInt() }
                 else if (c.total > 0) { k.bar.isIndeterminate = false; k.bar.progress = c.done * 1000 / c.total } else k.bar.isIndeterminate = true
                 continue
             }
