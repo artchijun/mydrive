@@ -112,6 +112,16 @@ class MainActivity : Activity(), Transfers.Listener {
     private lateinit var xferBar: ProgressBar
     private lateinit var drawer: FrameLayout
     private lateinit var drawerBody: LinearLayout
+    // 동기화 폴더(또는 그 안)를 볼 때 경로 막대 아래에 뜨는 줄: ⟳ 이름 · 방향 · 언제 / 지난 결과·진행 / [지금 동기화]
+    private lateinit var syncBar: LinearLayout
+    private lateinit var syncTitle: TextView
+    private lateinit var syncSub: TextView
+    private lateinit var syncProg: ProgressBar
+    private var syncHere: List<Sync.Link> = emptyList()    // 지금 폴더가 들어 있는 짝 (깊은 것부터)
+    private var syncLocalRoots: Set<String> = emptySet()   // 짝의 휴대폰 폴더 (목록에서 ⟳ 표시)
+    private var syncNasRoots: Set<String> = emptySet()     // 짝의 NAS 폴더 "root/rpath"
+    private var syncWasBusy = false
+    private val syncH = android.os.Handler(android.os.Looper.getMainLooper())
     private val adapter = Adapter()
 
     private val PICK = 1
@@ -153,6 +163,8 @@ class MainActivity : Activity(), Transfers.Listener {
         super.onResume()
         if (pf.int("stamp", 0) != stamp) { saveTabs(); recreate(); return }   // 설정을 바꾸고 돌아옴
         Transfers.listener = this; onTransfers()
+        if (findSyncHere()) adapter.notifyDataSetChanged()   // 동기화 화면에서 짝을 더하거나 뺐을 수 있음
+        syncTick()
         Transfers.asking?.let { onAsk(it) }
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
         if (pf.int("cloudStamp", 0) != cloudStamp) { cloudStamp = pf.int("cloudStamp", 0); loadCloud(); refreshHome() }
@@ -160,7 +172,87 @@ class MainActivity : Activity(), Transfers.Listener {
         if (System.currentTimeMillis() - pf.lastUpdateCheck > 6 * 3600_000L) checkUpdate(false)
     }
 
-    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null }
+    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null; syncH.removeCallbacksAndMessages(null) }
+
+    // ================= 동기화 줄 =================
+    /** 지금 폴더가 어느 짝(의 안)인지 다시 셈. 목록의 ⟳ 표시가 바뀌었으면 true */
+    private fun findSyncHere(): Boolean {
+        val l = tab.loc
+        val ps = Sync.pairs(this)
+        fun inside(path: String, top: String) = top.isEmpty() || path == top || path.startsWith("$top/")
+        syncHere = when (l.kind) {
+            "local" -> { val abs = fs.file(l).path; ps.filter { it.local.isNotEmpty() && (abs == it.local || abs.startsWith(it.local + "/")) }.sortedByDescending { it.local.length } }
+            "nas" -> ps.filter { it.root == l.root && inside(l.path, it.rpath) }.sortedByDescending { it.rpath.length }
+            else -> emptyList()
+        }
+        val lr = ps.map { it.local }.toSet(); val nr = ps.map { it.root + "/" + it.rpath }.toSet()
+        val changed = lr != syncLocalRoots || nr != syncNasRoots
+        syncLocalRoots = lr; syncNasRoots = nr
+        updateSyncBar()
+        return changed
+    }
+
+    /** 목록의 폴더가 동기화 짝의 맨 위 폴더인가 */
+    private fun isSyncRoot(l: Loc, it: Item) = it.dir && when (l.kind) {
+        "local" -> File(l.root, it.path).path in syncLocalRoots
+        "nas" -> (l.root + "/" + it.path) in syncNasRoots
+        else -> false
+    }
+
+    private fun updateSyncBar() {
+        val ps = syncHere
+        if (ps.isEmpty()) { syncBar.visibility = View.GONE; syncWasBusy = false; return }
+        syncBar.visibility = View.VISIBLE
+        val p = ps.first(); val l = tab.loc
+        val top = if (l.kind == "local") fs.file(l).path == p.local else l.path == p.rpath
+        syncTitle.text = (if (top) "동기화 폴더" else "동기화 폴더 ‘${p.name}’ 안") + " · " + SyncActivity.DIR_SHORT[p.dir] + " · " + (if (p.on) SyncActivity.whenText(p) else "꺼 둠") +
+            (if (ps.size > 1) " (외 ${ps.size - 1}개)" else "")
+        val c = Sync.cur
+        val ids = ps.map { it.id }
+        val busy = c != null && c.id in ids
+        if (busy) {
+            val act = c!!.active.size
+            syncSub.setTextColor(ui.accent)
+            syncSub.text = "동기화 중 · " + c.phase + (if (c.total > 0) "  ${c.done}/${c.total}" else "") + (if (act > 1) " · ${act}개 함께" else "") +
+                (c.active.keys.firstOrNull()?.let { " · " + it.substringAfterLast('/') } ?: "")
+            syncProg.visibility = View.VISIBLE
+            if (c.total > 0) { syncProg.isIndeterminate = false; syncProg.progress = c.done * 1000 / c.total } else syncProg.isIndeterminate = true
+        } else {
+            syncProg.visibility = View.GONE
+            val st = Sync.status(this, p.id)
+            val t = if (st.time > 0) java.text.SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(java.util.Date(st.time)) else ""
+            val waiting = ids.any { it in Sync.pendingIds(this) }
+            syncSub.setTextColor(if (waiting) ui.accent else if (st.err || st.held > 0) ui.red else ui.sub)
+            syncSub.text = when {
+                waiting -> "곧 동기화합니다"
+                st.held > 0 -> "지울 것이 많아 멈춤 (${st.held}개) — 눌러서 확인"
+                st.msg.isEmpty() -> "아직 동기화하지 않았습니다"
+                t.isEmpty() -> "지난번: " + st.msg
+                else -> "지난번 $t · ${st.msg}"
+            }
+        }
+        val finished = syncWasBusy && !busy
+        syncWasBusy = busy
+        if (finished) load()   // 방금 끝남 → 이 폴더 목록 새로 고침 (받은·지운 파일이 보이게)
+    }
+
+    private fun syncTick() {
+        syncH.removeCallbacksAndMessages(null)
+        if (syncHere.isNotEmpty()) updateSyncBar()
+        syncH.postDelayed({ syncTick() }, 700)
+    }
+
+    /** [지금 동기화]: 이 폴더가 들어 있는 짝을 지금 맞춤 */
+    private fun syncHereNow() {
+        val ps = syncHere; if (ps.isEmpty()) return
+        if (!pf.paired) { toast("먼저 NAS 에 연결해 주세요 (설정 › 연결)"); return }
+        if (!fs.canReadAll()) { toast("휴대폰 폴더를 읽고 쓰려면 ‘모든 파일 접근’을 허용해 주세요"); askAllFiles(); return }
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 9)
+        SyncService.now(this, ps.map { it.id })
+        toast("동기화를 시작합니다 · " + ps.joinToString { it.name })
+        updateSyncBar()
+    }
 
     // ================= 화면 만들기 =================
     private fun g(kind: String, color: Int = ui.text) = Glyph(kind, color)
@@ -203,6 +295,23 @@ class MainActivity : Activity(), Transfers.Listener {
         banner = ui.row(bannerText, bannerBtn).apply {
             setPadding(ui.dp(14), ui.dp(8), ui.dp(10), ui.dp(8)); visibility = View.GONE
             setBackgroundColor(if (ui.dark) Color.parseColor("#16303D") else Color.parseColor("#E3EEFC"))
+        }
+
+        // 동기화 줄
+        syncTitle = ui.label("", 14f, ui.text, bold = true).apply { setSingleLine(); ellipsize = TextUtils.TruncateAt.END }
+        syncSub = ui.label("", 12f, ui.sub).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.END; layoutParams = ui.lp(top = 1) }
+        val syncBtn = ui.label("지금 동기화", 13.5f, ui.onAccent, bold = true).apply {
+            setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8)); background = ui.press(ui.round(ui.accent, 6), 6)
+            contentDescription = "이 동기화 폴더를 지금 NAS와 맞춤"; setOnClickListener { syncHereNow() }
+        }
+        syncProg = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 1000; progressTintList = android.content.res.ColorStateList.valueOf(ui.accent); visibility = View.GONE; layoutParams = ui.lp(h = ui.dp(4), top = 4)
+        }
+        syncBar = ui.col(ui.row(ImageView(this).apply { setImageDrawable(g("refresh", ui.accent)); layoutParams = LinearLayout.LayoutParams(ui.dp(22), ui.dp(22)) },
+            ui.col(syncTitle, syncSub).apply { layoutParams = ui.lp(0, weight = 1f).apply { leftMargin = ui.dp(10); rightMargin = ui.dp(8) } }, syncBtn), syncProg).apply {
+            setPadding(ui.dp(14), ui.dp(7), ui.dp(10), ui.dp(7)); visibility = View.GONE
+            background = ui.press(android.graphics.drawable.ColorDrawable(if (ui.dark) Color.parseColor("#16303D") else Color.parseColor("#E3EEFC")))
+            contentDescription = "동기화 폴더 — 눌러서 동기화 설정 열기"; setOnClickListener { SyncActivity.open(this@MainActivity) }
         }
 
         list = ListView(this).apply {
@@ -257,7 +366,7 @@ class MainActivity : Activity(), Transfers.Listener {
         xMore.setOnClickListener { showTransfers() }
 
         val line = { View(this).apply { setBackgroundColor(ui.line); layoutParams = ui.lp(h = 1) } }
-        val main = ui.col(top, tabs, line(), pathBar, banner, listBox.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, line(), pasteBar, xfer, selBar, status.apply { layoutParams = ui.lp(h = ui.dp(36)) }).apply { setBackgroundColor(ui.bg) }
+        val main = ui.col(top, tabs, line(), pathBar, syncBar, banner, listBox.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, line(), pasteBar, xfer, selBar, status.apply { layoutParams = ui.lp(h = ui.dp(36)) }).apply { setBackgroundColor(ui.bg) }
 
         // 왼쪽 메뉴 (덮개 + 판)
         drawerBody = ui.col().apply { setPadding(0, ui.dp(8), 0, ui.dp(24)) }
@@ -675,6 +784,7 @@ class MainActivity : Activity(), Transfers.Listener {
             })
         }
         crumbScroll.post { crumbScroll.fullScroll(View.FOCUS_RIGHT) }
+        findSyncHere()
         // 알림 띠: 공유로 받은 파일 > 새 판
         when {
             pending.isNotEmpty() -> {
@@ -1942,6 +2052,8 @@ class MainActivity : Activity(), Transfers.Listener {
                 l.kind == "search" -> "/" + it.path.substringBeforeLast('/', "") + "  ·  " + (if (it.dir) "폴더" else Fmt.size(it.size))
                 l.kind == "lib" && it.dir -> (if (it.extra.startsWith("!")) "갤러리 숨김  ·  " else "") + "${it.count}개  ·  " + Fmt.size(it.size) + "  ·  /" + it.path
                 l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000).take(10) + "  ·  /" + it.path.substringBeforeLast('/', "")
+                it.dir && isSyncRoot(l, it) -> android.text.SpannableString("⇅ 동기화 폴더  ·  " + Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")).apply {
+                    setSpan(android.text.style.ForegroundColorSpan(ui.accent), 0, 8, 0); setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, 8, 0) }
                 it.dir -> Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
                 else -> Fmt.time(it.mtimeMs * 1_000_000) + "  ·  " + Fmt.size(it.size)
             }
