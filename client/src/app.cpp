@@ -778,17 +778,20 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
     std::wstring pcText = c.web && !c.mount.empty() ? c.mount + L" 드라이브" : c.local;
     RECT pr{cl.pc, r.top, cl.mode - S(10), r.bottom}; DrawTextW(dc, pcText.c_str(), -1, &pr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
     SetTextColor(dc, c.web ? RGB(0xC4, 0x9A, 0xFF) : c.onDemand ? RGB(0x8F, 0xB4, 0xFF) : RGB(0x4A, 0xDE, 0xA8));
-    std::wstring modeText = c.web ? L"웹드라이브" : std::wstring(c.onDemand ? L"필요할 때" : L"모두 받기") + (c.every ? L" · " + EveryShort(c.every) : L"");
-    RECT mr{cl.mode, r.top, cl.st - S(6), r.bottom}; DrawTextW(dc, modeText.c_str(), -1, &mr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    // 받는 방식 (실시간이 아니면 아래 줄에 '원할 때만'·'3시간마다')
+    bool two = !c.web && c.every != 0;
+    RECT mr{cl.mode, r.top, cl.st - S(6), two ? cy + S(1) : r.bottom};
+    DrawTextW(dc, c.web ? L"웹드라이브" : c.onDemand ? L"필요할 때" : L"모두 받기", -1, &mr, DT_LEFT | (two ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (two) {
+        HGDIOBJ o2 = SelectObject(dc, g_fontSmall); SetTextColor(dc, kSub);
+        RECT m2{cl.mode, cy + S(2), cl.st - S(6), r.bottom}; DrawTextW(dc, EveryShort(c.every).c_str(), -1, &m2, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, o2);
+    }
     // 상태: 저장된 작업이면 지금 엔진 상태
     std::wstring st = L"저장 뒤 시작"; COLORREF sc = kMuted;
     for (auto& e : g_engines) if (e->cfg().name == c.name && _wcsicmp(e->cfg().localRoot.c_str(), c.local.c_str()) == 0) {
         switch (EngineState(*e)) {
-        case 0: st = L"맞춰짐"; sc = RGB(0x38, 0xD3, 0x9F);
-            if (c.every < 0) st = L"맞춰짐 · 다음은 누를 때";
-            else if (int64_t nx = e->NextPassMs()) { SYSTEMTIME u, lt; FILETIME ft; uint64_t v = ((uint64_t)(nx + 11644473600000LL)) * 10000ULL; ft.dwLowDateTime = (DWORD)v; ft.dwHighDateTime = (DWORD)(v >> 32);
-                FileTimeToSystemTime(&ft, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt); wchar_t b[48]; swprintf(b, 48, L"맞춰짐 · 다음 %02d:%02d", lt.wHour, lt.wMinute); st = b; }
-            break;
+        case 0: st = L"맞춰짐"; sc = RGB(0x38, 0xD3, 0x9F); break;
         case 1: st = L"맞추는 중"; sc = RGB(0x6C, 0xA8, 0xF0); break;
         case 2: st = L"멈춤"; sc = kSub; break;
         case 3: st = L"확인 필요"; sc = RGB(0xF5, 0xB4, 0x48); break;
@@ -802,9 +805,25 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
         else if (w->Uploading()) { st = L"올리는 중"; sc = RGB(0x6C, 0xA8, 0xF0); }
         else { st = L"붙어 있음"; sc = RGB(0x38, 0xD3, 0x9F); }
     }
-    RECT dot{cl.st, cy - S(4), cl.st + S(8), cy + S(4)}; FillRound(dc, dot, sc, S(8));
+    // 'N시간마다'·'원할 때만': 아래 줄에 다음에 맞출 때
+    std::wstring next;
+    if (!c.web && c.every != 0) for (auto& e : g_engines) if (e->cfg().name == c.name && _wcsicmp(e->cfg().localRoot.c_str(), c.local.c_str()) == 0) {
+        if (c.every < 0) next = L"누를 때 맞춤";
+        else if (int64_t nx = e->NextPassMs()) {
+            SYSTEMTIME u, lt; FILETIME ft; uint64_t v = ((uint64_t)(nx + 11644473600000LL)) * 10000ULL; ft.dwLowDateTime = (DWORD)v; ft.dwHighDateTime = (DWORD)(v >> 32);
+            FileTimeToSystemTime(&ft, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt); wchar_t b[32]; swprintf(b, 32, L"다음 %02d:%02d", lt.wHour, lt.wMinute); next = b;
+        }
+    }
+    int dy = next.empty() ? cy : cy - S(9);
+    RECT dot{cl.st, dy - S(4), cl.st + S(8), dy + S(4)}; FillRound(dc, dot, sc, S(8));
     SetTextColor(dc, sc);
-    RECT sr{cl.st + S(14), r.top, r.right - S(4), r.bottom}; DrawTextW(dc, st.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    RECT sr{cl.st + S(14), r.top, r.right - S(4), next.empty() ? r.bottom : cy + S(1)};
+    DrawTextW(dc, st.c_str(), -1, &sr, DT_LEFT | (next.empty() ? DT_VCENTER : DT_BOTTOM) | DT_SINGLELINE | DT_END_ELLIPSIS);
+    if (!next.empty()) {
+        HGDIOBJ o2 = SelectObject(dc, g_fontSmall); SetTextColor(dc, kSub);
+        RECT s2{cl.st + S(14), cy + S(2), r.right - S(4), r.bottom}; DrawTextW(dc, next.c_str(), -1, &s2, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+        SelectObject(dc, o2);
+    }
     SelectObject(dc, of); DeleteObject(icf);
 }
 // 탐색기 '상태' 칸의 아이콘 뜻 (Windows 가 그리는 모양을 비슷하게)
