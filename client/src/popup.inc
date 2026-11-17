@@ -537,7 +537,13 @@ static void DrawNow(Rect r, const Overall& o) {
         where = o.pend > 0 ? Fmt(L"남은 일 %lld개 · 작은 파일 3개, 큰 파일 2개씩 따로", o.pend) : L"작은 파일 3개, 큰 파일(8 MB 이상) 2개씩 따로 처리";
     } else if (o.pend > 0) { label = Fmt(L"맞추는 중 · %lld개 남음", o.pend); }
     else if (o.wait > 0) { g = 0xE916; c = col::Purple(); tile = Alpha(c, 0.14f); label = Fmt(L"다른 프로그램이 쓰는 파일 %lld개를 기다리는 중", o.wait); where = L"그 프로그램이 파일을 닫으면 바로 이어서 맞춥니다"; }
-    else { g = 0xE73E; label = L"모두 맞춰져 있습니다"; where = Fmt(L"연결 %d개 · 바뀌면 1~2초 안에 맞춥니다", (int)g_engines.size()); }
+    else {
+        g = 0xE73E; label = L"모두 맞춰져 있습니다";
+        int sched = 0; for (auto& e : g_engines) if (e->cfg().everyHours != 0 || e->cfg().dailyAt >= 0) sched++;
+        where = sched == 0 ? Fmt(L"연결 %d개 · 바뀌면 1~2초 안에 맞춥니다", (int)g_engines.size())
+              : sched == (int)g_engines.size() ? Fmt(L"연결 %d개 · 정한 때에 맞춥니다 (지금 맞추려면 [지금 동기화])", (int)g_engines.size())
+              : Fmt(L"연결 %d개 · 실시간 %d개는 바뀌면 바로, 나머지는 정한 때에", (int)g_engines.size(), (int)g_engines.size() - sched);
+    }
     Rect ic{in.l, in.t, in.l + 42, in.t + 42};
     g_cv.Fill(ic, tile, 11); g_cv.Icon(g, ic, c, 18);
     float x = in.l + 55, y = in.t;
@@ -779,7 +785,7 @@ static void DrawBar(Rect r, const Overall& o) {
     else if (o.pend > 0) text = Fmt(L"맞출 것 %lld개 남음", o.pend);
     else {
         int sched = 0; for (auto& e : g_engines) if (e->cfg().everyHours != 0 || e->cfg().dailyAt >= 0) sched++;
-        text = sched == 0 ? L"바뀌면 바로 맞춤" : sched == (int)g_engines.size() ? L"정한 때에 맞춤 · 지금 맞추려면 [지금 동기화]" : L"바뀌면 바로 맞춤 · 몇 작업은 정한 때에";
+        text = sched == 0 ? L"바뀌면 바로 맞춤" : sched == (int)g_engines.size() ? L"정한 때에 맞춤" : L"몇 작업은 정한 때에";
     }
     // 오른쪽: 평소에는 '⏸ 30분 1시간 3시간'(잠시 멈춤), 멈춰 있을 때만 [지금 동기화] (멈춤을 풀고 바로 맞춤)
     float right = in.r;
