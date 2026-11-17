@@ -43,6 +43,10 @@ class TimelineGrid(
         private fun fmt(p: String, t: Long) = SimpleDateFormat(p, Locale.KOREA).apply { timeZone = utc }.format(java.util.Date(t * 1000))
         private fun dayKeyOf(t: Long) = fmt("yyyyMMdd", t).toInt()
         val UNITS = listOf("year", "month", "day")
+        /** 줌 단계: 아주 크게(1칸) … 일 … 월 … 연도(14칸). 두 손가락으로 한 단계씩, [연도|월|일] 은 그 묶음의 기본 단계로 */
+        private class Lv(val unit: String, val cols: Int)
+        private val LEVELS = listOf(Lv("day", 1), Lv("day", 2), Lv("day", 3), Lv("day", 4), Lv("day", 5), Lv("month", 6), Lv("month", 8), Lv("year", 10), Lv("year", 14))
+        private fun home(unit: String) = when (unit) { "year" -> 7; "month" -> 5; else -> 3 }
     }
 
     /** 하루: 서버 목록에서의 자리(srvStart~+srvCount)와 그날의 휴대폰에만 있는 사진 */
@@ -65,9 +69,20 @@ class TimelineGrid(
     override val selected = LinkedHashSet<Long>()
     override var onPull: (() -> Unit)? = null
     override val selecting get() = selected.isNotEmpty()
-    override var unit: String = pf.str("unit", "day").let { if (it in UNITS) it else "day" }
-        set(v) { if (field != v) { val anchor = firstVisibleIndex(); field = v; pf.putStr("unit", v); rebuild(); scrollToIndex(anchor); onUnit(v) } }
-    private val cols get() = when (unit) { "year" -> 8; "month" -> pf.int("cols", 4) + 1; else -> pf.int("cols", 4) }
+    private var level: Int = pf.int("zoom", home(pf.str("unit", "day"))).coerceIn(0, LEVELS.size - 1)
+    private fun setLevel(l: Int) {
+        val n = l.coerceIn(0, LEVELS.size - 1); if (n == level) return
+        val anchor = firstVisibleIndex(); val old = unit
+        level = n; pf.putInt("zoom", n); pf.putStr("unit", unit)
+        rebuild(); scrollToIndex(anchor)
+        onUnit(unit)
+    }
+    override var unit: String
+        get() = LEVELS[level].unit
+        set(v) { if (v != unit) setLevel(home(v)) }
+    private val cols get() = LEVELS[level].cols
+    /** 칸 크기에 맞는 썸네일: 1칸은 큰 것, 2칸은 중간, 나머지는 작은 것 */
+    private val thumbSize get() = when (cols) { 1 -> "xl"; 2 -> "m"; else -> "sm" }
     private val showStatus get() = pf.bool("show_status", true)
 
     private val list = ListView(a)
@@ -249,11 +264,9 @@ class TimelineGrid(
         override fun onScaleBegin(d: ScaleGestureDetector): Boolean { pinch = 1f; pinched = false; return true }
         override fun onScale(d: ScaleGestureDetector): Boolean {
             pinch *= d.scaleFactor
-            if (!pinched && (pinch > 1.35f || pinch < 0.75f)) {
-                pinched = true
-                val i = UNITS.indexOf(unit) + (if (pinch > 1f) 1 else -1)   // 벌리면 자세히(일 쪽), 오므리면 넓게(연도 쪽)
-                UNITS.getOrNull(i)?.let { unit = it }
-            }
+            // 계속 벌리거나 오므리면 여러 단계를 차례로: 벌리면 크게(칸 수 줄임), 오므리면 작게 → 월 → 연도
+            if (pinch > 1.3f) { pinch = 1f; setLevel(level - 1) }
+            else if (pinch < 0.77f) { pinch = 1f; setLevel(level + 1) }
             return true
         }
     })
@@ -323,7 +336,7 @@ class TimelineGrid(
 
     private fun bind(c: FrameLayout, it: Item?, v: Int) {
         val iv = c.getChildAt(0) as ImageView
-        val small = unit == "year"
+        val small = cols >= 10
         if (it == null) {   // 아직 받는 중
             iv.tag = null; iv.setImageDrawable(null)
             for (k in 1 until c.childCount) c.getChildAt(k).visibility = View.GONE
@@ -332,7 +345,7 @@ class TimelineGrid(
         }
         iv.scaleType = ImageView.ScaleType.CENTER_CROP
         if (it.local != null) Thumbs.loadLocal(iv, it.local) { b -> if (b == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } }
-        else Thumbs.load(iv, ns, it.unitId, it.cacheKey, "sm") { b -> if (b == null) Thumbs.loadFromOriginal(iv, ns, it) { o -> if (o == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } } }
+        else Thumbs.load(iv, ns, it.unitId, it.cacheKey, thumbSize) { b -> if (b == null) Thumbs.loadFromOriginal(iv, ns, it) { o -> if (o == null) { iv.scaleType = ImageView.ScaleType.CENTER; iv.setImageDrawable(Glyph(if (it.video) "film" else "image", ui.sub)) } } }
         (c.getChildAt(1) as LinearLayout).apply {
             visibility = if (it.video && !small) View.VISIBLE else View.GONE
             (getChildAt(0) as TextView).apply { text = PhotoGrid.duration(it.dur); visibility = if (it.dur > 0 && cols <= 6) View.VISIBLE else View.GONE }
@@ -351,7 +364,7 @@ class TimelineGrid(
             when {
                 selecting -> toggle(it)
                 unit == "year" -> { unit = "month"; scrollToIndex(v) }   // 연도 → 그 달
-                unit == "month" -> { unit = "day"; scrollToIndex(v) }    // 월 → 그날
+                unit == "month" -> { unit = "day"; scrollToIndex(v) }    // 월 → 그날 (일 보기 기본 크기)
                 else -> open(v)
             }
         }
