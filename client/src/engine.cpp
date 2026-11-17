@@ -6,6 +6,8 @@
 #pragma comment(lib, "bcrypt.lib")
 #include <shlwapi.h>
 #include <restartmanager.h>
+#include <pdh.h>
+#pragma comment(lib, "pdh.lib")
 #include <algorithm>
 #include <set>
 #pragma comment(lib, "shell32.lib")
@@ -1914,22 +1916,80 @@ static int64_t EpochMsNow() {
     return (int64_t)((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000ULL) - 11644473600000LL;
 }
 
-// 'N시간마다'·'원할 때만': 때가 됐거나 [지금 동기화]를 눌렀으면 true. 아니면 잠깐 기다리고 false (바뀐 것 알림으로는 깨어나도 맞추지 않음)
-//   마지막으로 맞춘 때는 상태 폴더에 적어 두어, 앱을 다시 켜도 이어 셈. 한 번도 맞춘 적이 없으면 처음 한 번은 맞춤
-bool Engine::WaitTurn() {
-    if (cfg_.everyHours == 0 || chain_ || runNow_.exchange(false)) return true;
-    std::wstring f = cfg_.stateDir + L"\\lastpass.txt";
-    if (!lastPassMs_) {
-        FILE* fp = _wfopen(f.c_str(), L"rb");
-        if (fp) { long long v = 0; if (fscanf(fp, "%lld", &v) == 1) lastPassMs_ = v; fclose(fp); }
-        if (!lastPassMs_) return true;
+// 매일 정해진 시각: last 뒤에 오는 그 시각 (이 PC 의 시간대로)
+static int64_t NextDaily(int64_t lastMs, int minutes) {
+    auto toFt = [](int64_t ms) { uint64_t v = (uint64_t)(ms + 11644473600000LL) * 10000ULL; FILETIME f; f.dwLowDateTime = (DWORD)v; f.dwHighDateTime = (DWORD)(v >> 32); return f; };
+    auto fromFt = [](const FILETIME& f) { return (int64_t)((((uint64_t)f.dwHighDateTime << 32) | f.dwLowDateTime) / 10000ULL) - 11644473600000LL; };
+    FILETIME uf = toFt(lastMs); SYSTEMTIME u, lt, u2;
+    FileTimeToSystemTime(&uf, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt);
+    lt.wHour = (WORD)(minutes / 60); lt.wMinute = (WORD)(minutes % 60); lt.wSecond = 0; lt.wMilliseconds = 0;
+    TzSpecificLocalTimeToSystemTime(nullptr, &lt, &u2);
+    FILETIME f2; SystemTimeToFileTime(&u2, &f2);
+    int64_t t = fromFt(f2);
+    while (t <= lastMs) t += 24LL * 3600000LL;
+    return t;
+}
+
+int64_t Engine::NextPassMs() const {
+    int64_t last = lastPassMs_;
+    if (!last) return 0;
+    if (cfg_.dailyAt >= 0) return NextDaily(last, cfg_.dailyAt);
+    if (cfg_.everyHours > 0) return last + (int64_t)cfg_.everyHours * 3600000LL;
+    return 0;
+}
+
+// 조건 확인 (20초 동안 기억): 0 맞음 · 1 PC 를 쓰는 중 · 2 드라이브가 바쁨
+int Engine::CondNow() {
+    uint64_t now = GetTickCount64();
+    if (condAt_ && now - condAt_ < 20000) return condLast_;
+    int r = 0;
+    if (cfg_.idlePcMin > 0) {
+        LASTINPUTINFO li{sizeof li};
+        if (GetLastInputInfo(&li) && GetTickCount() - li.dwTime < (DWORD)cfg_.idlePcMin * 60000) r = 1;
     }
-    int64_t now = EpochMsNow(), due = NextPassMs();
-    if (due && now >= due) return true;
+    if (!r && cfg_.idleDisk && cfg_.localRoot.size() >= 2 && cfg_.localRoot[1] == L':') {
+        // 그 드라이브의 '쉬는 시간 %' 를 1초 동안 재서 85% 아래면 바쁨 (재지 못하면 따지지 않음)
+        PDH_HQUERY q = nullptr; PDH_HCOUNTER c = nullptr;
+        std::wstring path = std::wstring(L"\\LogicalDisk(") + (wchar_t)towupper(cfg_.localRoot[0]) + L":)\\% Idle Time";
+        if (PdhOpenQueryW(nullptr, 0, &q) == ERROR_SUCCESS) {
+            if (PdhAddEnglishCounterW(q, path.c_str(), 0, &c) == ERROR_SUCCESS && PdhCollectQueryData(q) == ERROR_SUCCESS) {
+                Sleep(1000);
+                PDH_FMT_COUNTERVALUE v{};
+                if (PdhCollectQueryData(q) == ERROR_SUCCESS && PdhGetFormattedCounterValue(c, PDH_FMT_DOUBLE, nullptr, &v) == ERROR_SUCCESS && v.doubleValue < 85.0) r = 2;
+            }
+            PdhCloseQuery(q);
+        }
+    }
+    condAt_ = GetTickCount64(); condLast_ = r;
+    return r;
+}
+
+// 언제 맞출지: 때가 됐고 조건(PC·드라이브 유휴)도 맞으면 true. 아니면 잠깐 기다리고 false (바뀐 것 알림으로 깨어나도 맞추지 않음)
+//   [지금 동기화]는 언제나·조건 없이 바로. 마지막으로 맞춘 때는 상태 폴더에 적어 두어 앱을 다시 켜도 이어 셈. 처음 한 번은 맞춤
+bool Engine::WaitTurn() {
+    if (chain_) return true;
+    if (runNow_.exchange(false)) { condWait_ = 0; return true; }
+    bool sched = cfg_.everyHours != 0 || cfg_.dailyAt >= 0;
+    bool cond = cfg_.idlePcMin > 0 || cfg_.idleDisk;
+    if (!sched && !cond) return true;
     // 기다리는 동안도 NAS 연결 여부는 알림 영역에 맞게 (1분마다 짧게)
-    if (GetTickCount64() - lastPing_ > 60000 || !lastPing_) { lastPing_ = GetTickCount64(); stats.online = http_.Req(L"GET", "/v1/ping", {}, nullptr, 10).ok(); }
-    WaitForSingleObject(wake_, (DWORD)std::min<int64_t>(due ? due - now : 60000, 60000));
-    return false;
+    if (!lastPing_ || GetTickCount64() - lastPing_ > 60000) { lastPing_ = GetTickCount64(); stats.online = http_.Req(L"GET", "/v1/ping", {}, nullptr, 10).ok(); }
+    if (sched) {
+        if (!lastPassMs_) {
+            FILE* fp = _wfopen((cfg_.stateDir + L"\\lastpass.txt").c_str(), L"rb");
+            if (fp) { long long v = 0; if (fscanf(fp, "%lld", &v) == 1) lastPassMs_ = v; fclose(fp); }
+        }
+        if (lastPassMs_) {   // 처음이 아니면 때를 기다림 (원할 때만은 누를 때까지)
+            int64_t now = EpochMsNow(), due = NextPassMs();
+            if (!due || now < due) { condWait_ = 0; WaitForSingleObject(wake_, (DWORD)std::min<int64_t>(due ? due - now : 60000, 60000)); return false; }
+        }
+    }
+    if (cond) {
+        int c = CondNow();
+        condWait_ = c;
+        if (c) { WaitForSingleObject(wake_, 30000); return false; }
+    }
+    return true;
 }
 
 void Engine::LoopMain() {
@@ -1938,10 +1998,10 @@ void Engine::LoopMain() {
         while (!stop_ && Paused()) WaitForSingleObject(wake_, (DWORD)std::min<uint64_t>(PausedLeftMs() + 50, 60000));
         if (stop_) break;
         if (!WaitTurn()) continue;
-        if (cfg_.everyHours != 0 && !chain_) {   // 맞추기 시작: 그때를 적어 둠
+        if ((cfg_.everyHours != 0 || cfg_.dailyAt >= 0) && !chain_) {   // 맞추기 시작: 그때를 적어 둠
             lastPassMs_ = EpochMsNow();
             if (FILE* fp = _wfopen((cfg_.stateDir + L"\\lastpass.txt").c_str(), L"wb")) { fprintf(fp, "%lld", (long long)lastPassMs_.load()); fclose(fp); }
-            LOG("[%s] %s — 맞추기 시작", cfg_.name.c_str(), cfg_.everyHours > 0 ? "정한 시간이 됨" : "지금 동기화");
+            LOG("[%s] 맞추기 시작 (언제: %s)", cfg_.name.c_str(), cfg_.dailyAt >= 0 ? "매일 정해진 시각" : cfg_.everyHours > 0 ? "지정 시간마다" : "원할 때만");
         }
         busy = true;
         uint64_t passAt = GetTickCount64();
@@ -1954,7 +2014,7 @@ void Engine::LoopMain() {
                              prof_[0] / 1000.0, (prof_[1] - prof_[0]) / 1000.0, (prof_[2] - prof_[1]) / 1000.0, (prof_[3] - prof_[2]) / 1000.0,
                              prof_[3] ? (took - prof_[3]) / 1000.0 : 0.0, local_.size(), scanDirs_ < 0 ? "전체" : std::to_string(scanDirs_).c_str(), fastN_);
         polledSeq_ = seq_;
-        chain_ = cfg_.everyHours != 0 && changed;   // 바뀐 게 있었으면 이어서 한 번 더 (다 맞출 때까지)
+        chain_ = (cfg_.everyHours != 0 || cfg_.dailyAt >= 0 || cfg_.idlePcMin > 0 || cfg_.idleDisk) && changed;   // 바뀐 게 있었으면 이어서 한 번 더 (다 맞출 때까지)
         if (stop_) break;
         // 바뀐 게 있었으면 곧바로 한 번 더 (연쇄 변경), 없으면 알림이 올 때까지 (최대 재검사 간격)
         uint64_t waitMs = changed ? 200 : (stats.online ? (uint64_t)std::max(1, cfg_.rescanMin) * 60000 : 15000);

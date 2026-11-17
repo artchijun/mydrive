@@ -39,16 +39,24 @@ struct Conn {
     bool off = false;                 // 웹드라이브 연결을 끊어 둠 ([연결 끊기] / [연결])
     bool paused = false;              // 이 작업만 '다시 시작할 때까지' 멈춤 (앱을 다시 켜도 유지)
     int64_t pauseUntil = 0;           // 시간을 정한 멈춤이 끝나는 시각 (1970년부터 ms). 앱을 다시 켜거나 업데이트해도 남은 시간만큼 이어 감
-    int every = 0;                    // 언제 맞출지: 0 실시간 · N 시간마다 (1·3·6·12·24) · -1 원할 때만 ([지금 동기화])
+    int every = 0;                    // 언제 맞출지: 0 실시간 · N 시간마다 · -1 원할 때만 ([지금 동기화])
+    int dailyAt = -1;                 // 0 이상: 매일 이 시각 (자정부터 분) — every 보다 먼저
+    bool idlePc = false; int idlePcMin = 10;   // 조건: PC 를 이만큼(분) 쓰지 않을 때만
+    bool idleDisk = false;            // 조건: 드라이브가 한가할 때만
 };
-// '언제 맞출지' 고르기 칸의 항목 (휴대폰 앱과 같게)
-static const int kEvery[] = {0, 1, 3, 6, 12, 24, -1};
-static const wchar_t* kEveryName[] = {L"실시간 (바뀌면 바로)", L"1시간마다", L"3시간마다", L"6시간마다", L"12시간마다", L"하루에 한 번", L"원할 때만 ([지금 동기화]를 누를 때)"};
-static std::wstring EveryShort(int every) {
-    if (every == 0) return L"실시간";
-    if (every < 0) return L"원할 때만";
-    if (every >= 24) return L"하루 한 번";
-    return std::to_wstring(every) + L"시간마다";
+// '언제 맞출지' 고르기 칸: 0 실시간 · 1 지정 시간마다 · 2 매일 정해진 시각 · 3 원할 때만
+static const wchar_t* kWhenName[] = {L"실시간 (바뀌면 바로)", L"지정 시간마다", L"매일 정해진 시각", L"원할 때만 ([지금 동기화]를 누를 때)"};
+static int WhenKind(const Conn& c) { return c.dailyAt >= 0 ? 2 : c.every > 0 ? 1 : c.every < 0 ? 3 : 0; }
+static std::wstring EveryShort(const Conn& c) {
+    std::wstring s;
+    switch (WhenKind(c)) {
+    case 1: s = std::to_wstring(c.every) + L"시간마다"; break;
+    case 2: { wchar_t b[24]; swprintf(b, 24, L"매일 %02d:%02d", c.dailyAt / 60, c.dailyAt % 60); s = b; break; }
+    case 3: s = L"원할 때만"; break;
+    default: s = L"실시간";
+    }
+    if (c.idlePc || c.idleDisk) s += L" · 유휴 시";
+    return s;
 }
 static int64_t NowEpochMs() {
     FILETIME ft; GetSystemTimeAsFileTime(&ft);
@@ -134,6 +142,9 @@ static void LoadCfg() {
         x.paused = c.value("paused", false);
         x.pauseUntil = c.value("pauseUntil", (int64_t)0);
         x.every = c.value("every", 0);
+        x.dailyAt = c.value("dailyAt", -1);
+        x.idlePc = c.value("idlePc", false); x.idlePcMin = std::clamp(c.value("idlePcMin", 10), 1, 240);
+        x.idleDisk = c.value("idleDisk", false);
         g_cfg.conns.push_back(x);
     }
     // 예전 '우선순위 높음' 짝은 맨 위로 (이제는 목록 순서 = 우선순위)
@@ -148,7 +159,7 @@ static void SaveCfg() {
     j["upKBps"] = g_cfg.upKBps; j["downKBps"] = g_cfg.downKBps; j["autoUpdate"] = g_cfg.autoUpdate; j["skipBuiltin"] = g_cfg.skipMask;
     j["connections"] = json::array();
     for (auto& c : g_cfg.conns)
-        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"label", U(c.label)}, {"off", c.off}, {"paused", c.paused}, {"pauseUntil", c.pauseUntil}, {"every", c.every}});
+        j["connections"].push_back({{"name", c.name}, {"local", U(c.local)}, {"skipDirs", c.skip}, {"priorityDirs", c.prio}, {"onDemand", c.onDemand}, {"keepDirs", c.keep}, {"mode", c.web ? "webdrive" : "sync"}, {"mount", U(c.mount)}, {"label", U(c.label)}, {"off", c.off}, {"paused", c.paused}, {"pauseUntil", c.pauseUntil}, {"every", c.every}, {"dailyAt", c.dailyAt}, {"idlePc", c.idlePc}, {"idlePcMin", c.idlePcMin}, {"idleDisk", c.idleDisk}});
     std::string s = j.dump(2);
     std::wstring tmp = CfgPath() + L".tmp";
     FILE* f = _wfopen(tmp.c_str(), L"wb");
@@ -280,6 +291,7 @@ static void StartEngines() {
         ec.excludes = SplitW(g_cfg.excludes); ec.maxFileSize = (int64_t)g_cfg.maxSizeMB * 1024 * 1024;
         ec.skipDirs = c.skip; ec.priorityDirs = c.prio; ec.rank = rank++; ec.onDemand = c.onDemand;
         ec.keepDirs = c.keep; ec.autoFreeDays = g_cfg.autoFreeDays; ec.everyHours = c.every;
+        ec.dailyAt = c.dailyAt; ec.idlePcMin = c.idlePc ? c.idlePcMin : 0; ec.idleDisk = c.idleDisk;
         ec.quietSec = g_cfg.quietSec; ec.maxDeferSec = g_cfg.maxDeferSec; ec.rescanMin = g_cfg.rescanMin;
         wchar_t pc[MAX_COMPUTERNAME_LENGTH + 1]; DWORD pn = MAX_COMPUTERNAME_LENGTH + 1;
         if (GetComputerNameW(pc, &pn)) ec.pcName = pc;
@@ -779,12 +791,12 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
     RECT pr{cl.pc, r.top, cl.mode - S(10), r.bottom}; DrawTextW(dc, pcText.c_str(), -1, &pr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
     SetTextColor(dc, c.web ? RGB(0xC4, 0x9A, 0xFF) : c.onDemand ? RGB(0x8F, 0xB4, 0xFF) : RGB(0x4A, 0xDE, 0xA8));
     // 받는 방식 (실시간이 아니면 아래 줄에 '원할 때만'·'3시간마다')
-    bool two = !c.web && c.every != 0;
+    bool two = !c.web && (WhenKind(c) != 0 || c.idlePc || c.idleDisk);
     RECT mr{cl.mode, r.top, cl.st - S(6), two ? cy + S(1) : r.bottom};
     DrawTextW(dc, c.web ? L"웹드라이브" : c.onDemand ? L"필요할 때" : L"모두 받기", -1, &mr, DT_LEFT | (two ? DT_BOTTOM : DT_VCENTER) | DT_SINGLELINE | DT_END_ELLIPSIS);
     if (two) {
         HGDIOBJ o2 = SelectObject(dc, g_fontSmall); SetTextColor(dc, kSub);
-        RECT m2{cl.mode, cy + S(2), cl.st - S(6), r.bottom}; DrawTextW(dc, EveryShort(c.every).c_str(), -1, &m2, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+        RECT m2{cl.mode, cy + S(2), cl.st - S(6), r.bottom}; DrawTextW(dc, EveryShort(c).c_str(), -1, &m2, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(dc, o2);
     }
     // 상태: 저장된 작업이면 지금 엔진 상태
@@ -807,11 +819,16 @@ static void DrawConnCard(DRAWITEMSTRUCT* d) {   // 작업 한 줄
     }
     // 'N시간마다'·'원할 때만': 아래 줄에 다음에 맞출 때
     std::wstring next;
-    if (!c.web && c.every != 0) for (auto& e : g_engines) if (e->cfg().name == c.name && _wcsicmp(e->cfg().localRoot.c_str(), c.local.c_str()) == 0) {
-        if (c.every < 0) next = L"누를 때 맞춤";
+    if (!c.web) for (auto& e : g_engines) if (e->cfg().name == c.name && _wcsicmp(e->cfg().localRoot.c_str(), c.local.c_str()) == 0) {
+        if (int w = e->WaitingFor()) next = w == 1 ? L"PC 사용 중 · 기다림" : L"드라이브 바쁨 · 기다림";
+        else if (WhenKind(c) == 3) next = L"누를 때 맞춤";
         else if (int64_t nx = e->NextPassMs()) {
             SYSTEMTIME u, lt; FILETIME ft; uint64_t v = ((uint64_t)(nx + 11644473600000LL)) * 10000ULL; ft.dwLowDateTime = (DWORD)v; ft.dwHighDateTime = (DWORD)(v >> 32);
-            FileTimeToSystemTime(&ft, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt); wchar_t b[32]; swprintf(b, 32, L"다음 %02d:%02d", lt.wHour, lt.wMinute); next = b;
+            FileTimeToSystemTime(&ft, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt); wchar_t b[40];
+            SYSTEMTIME nowL; GetLocalTime(&nowL);
+            if (lt.wDay == nowL.wDay && lt.wMonth == nowL.wMonth) swprintf(b, 40, L"다음 %02d:%02d", lt.wHour, lt.wMinute);
+            else swprintf(b, 40, L"다음 %d/%d %02d:%02d", lt.wMonth, lt.wDay, lt.wHour, lt.wMinute);
+            next = b;
         }
     }
     int dy = next.empty() ? cy : cy - S(9);
@@ -1704,12 +1721,26 @@ static void PickClick(int r, int x, bool dbl) {
     if (changed) { InvalidateRect(p_list, nullptr, FALSE); PickInfo(); }
 }
 enum { IDP_TAB0 = 720, IDP_TAB1, IDP_TAB2, IDP_OD, IDP_ALL, IDP_ROOT, IDP_LOCAL, IDP_BROWSE, IDP_LINE, IDP_DESC };
-enum { IDP_WEB = 740, IDP_MFOLDER, IDP_MDRIVE, IDP_LETTER, IDP_MLABEL, IDP_WFSP, IDP_WDESC, IDP_DNAME, IDP_DNAMEL, IDP_EVERY, IDP_EVERYL };
+enum { IDP_WEB = 740, IDP_MFOLDER, IDP_MDRIVE, IDP_LETTER, IDP_MLABEL, IDP_WFSP, IDP_WDESC, IDP_DNAME, IDP_DNAMEL, IDP_EVERY, IDP_EVERYL,
+       IDP_HOURS, IDP_HOURSL, IDP_DHOUR, IDP_DHOURL, IDP_DMIN, IDP_DMINL, IDP_IDLEPC, IDP_IDLEMIN, IDP_IDLEMINL, IDP_IDLEDISK, IDP_WHENDESC };
 static std::vector<HWND> p_pg[3];
 static HWND p_od, p_all, p_local, p_rootBox;
 static HWND p_web, p_mFolder, p_mDrive, p_letter, p_mLabel, p_wfsp, p_wdesc, p_mdesc, p_tip;   // 웹드라이브 고르기
 static HWND p_dname, p_dnameL;   // 웹드라이브 이름 (드라이브 문자로 붙일 때)
 static HWND p_every, p_everyL;   // 언제 맞출지 (동기화만 — 웹드라이브는 늘 바로)
+static HWND p_hours, p_hoursL, p_dHour, p_dHourL, p_dMin, p_dMinL;   // 지정 시간마다: 몇 시간 / 매일: 몇 시 몇 분
+static HWND p_idlePc, p_idleMin, p_idleMinL, p_idleDisk, p_whenDesc;   // 조건: PC·드라이브 유휴
+// 언제 맞출지 칸들: 고른 것에 맞춰 시간 칸을 보이고 숨김
+static void PickWhenUi(bool show) {
+    int k = (int)SendMessageW(p_every, CB_GETCURSEL, 0, 0);
+    for (HWND c : {p_every, p_everyL, p_idlePc, p_idleMin, p_idleMinL, p_idleDisk, p_whenDesc}) ShowWindow(c, show ? SW_SHOW : SW_HIDE);
+    for (HWND c : {p_hours, p_hoursL}) ShowWindow(c, show && k == 1 ? SW_SHOW : SW_HIDE);
+    for (HWND c : {p_dHour, p_dHourL, p_dMin, p_dMinL}) ShowWindow(c, show && k == 2 ? SW_SHOW : SW_HIDE);
+    EnableWindow(p_idleMin, ChkGet(p_idlePc));
+    bool manual = k == 3;   // 원할 때만: 조건은 쓰지 않음
+    EnableWindow(p_idlePc, !manual); EnableWindow(p_idleDisk, !manual);
+    InvalidateRect(p_idlePc, nullptr, TRUE); InvalidateRect(p_idleDisk, nullptr, TRUE);
+}
 static void PickTab(HWND h, int k);
 static std::wstring PickLetter() { std::wstring s = GetText(p_letter); return s.size() >= 2 ? s.substr(0, 2) : L""; }
 // 받는 방식 탭: 고른 것 표시 + 웹드라이브면 '연결할 곳' 보이기
@@ -1727,7 +1758,7 @@ static void PickModeUi() {
     for (HWND c : {p_local, p_browse}) ShowWindow(c, letter ? SW_HIDE : SW_SHOW);
     ChkSet(p_mFolder, !letter); ChkSet(p_mDrive, letter);
     for (HWND c : {p_dname, p_dnameL}) ShowWindow(c, letter ? SW_SHOW : SW_HIDE);
-    for (HWND c : {p_every, p_everyL}) ShowWindow(c, web ? SW_HIDE : SW_SHOW);
+    PickWhenUi(!web);
     EnableWindow(p_letter, letter);
     ShowWindow(p_wfsp, web && !WinFspInstalled() ? SW_SHOW : SW_HIDE);
     for (HWND c : {p_od, p_all, p_web, p_mFolder, p_mDrive}) InvalidateRect(c, nullptr, TRUE);
@@ -1803,7 +1834,8 @@ static void PickTab(HWND h, int k) {
     for (int t = 0; t < 2; t++) for (HWND c : p_pg[t]) ShowWindow(c, t == k ? SW_SHOW : SW_HIDE);
     for (int t = 0; t < 2; t++) InvalidateRect(GetDlgItem(h, IDP_TAB0 + t), nullptr, TRUE);
     if (k == 0) { PickModeUi(); return; }
-    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc, p_local, p_browse, p_gd, p_mdesc, p_dname, p_dnameL, p_every, p_everyL}) ShowWindow(c, SW_HIDE);
+    for (HWND c : {p_mFolder, p_mDrive, p_letter, p_wfsp, p_wdesc, p_local, p_browse, p_gd, p_mdesc, p_dname, p_dnameL}) ShowWindow(c, SW_HIDE);
+    PickWhenUi(false);
     if (t_conn.web) {
         ShowWindow(p_list, SW_HIDE);
         SetWindowTextW(p_info, L"웹드라이브는 NAS 폴더 전체를 드라이브로 보여 줍니다. 여기서 고를 폴더는 없습니다.");
@@ -1904,18 +1936,46 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             SendMessageW(p_dname, EM_SETCUEBANNER, TRUE, (LPARAM)(def.empty() ? L"비우면 NAS 폴더 이름" : (def + L" (비우면 NAS 폴더 이름)").c_str()));
         }
         AddTip(p_tip, p_dname, L"탐색기 '내 PC'에 이 드라이브가 보일 이름입니다 (32자까지). 비워 두면 NAS 폴더 이름을 씁니다. 저장하면 드라이브를 다시 붙이며 바뀝니다.");
-        // 언제 맞출지 (휴대폰 앱과 같은 항목)
-        p_everyL = Ctl(h, L"STATIC", L"언제 맞출지", SS_LEFT | SS_NOPREFIX, IDP_EVERYL);
-        SendMessageW(p_everyL, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(p_everyL, x, S(474), S(110), S(22), TRUE);
-        p_every = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_EVERY);
-        MoveWindow(p_every, x + S(114), S(469), CW - S(114), S(300), TRUE);
+        // 언제 맞출지: [실시간 / 지정 시간마다 / 매일 정해진 시각 / 원할 때만] + 시간 칸 + 조건 (PC·드라이브 유휴)
         {
-            int sel = 0;
-            for (int i = 0; i < 7; i++) { SendMessageW(p_every, CB_ADDSTRING, 0, (LPARAM)kEveryName[i]); if (kEvery[i] == t_conn.every) sel = i; }
-            SendMessageW(p_every, CB_SETCURSEL, sel, 0);
+            const int wy = S(470);
+            p_everyL = Ctl(h, L"STATIC", L"언제 맞출지", SS_LEFT | SS_NOPREFIX, IDP_EVERYL);
+            SendMessageW(p_everyL, WM_SETFONT, (WPARAM)g_fontBold, TRUE); MoveWindow(p_everyL, x, wy + S(5), S(110), S(22), TRUE);
+            p_every = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_EVERY);
+            MoveWindow(p_every, x + S(114), wy, S(212), S(300), TRUE);
+            for (auto n : kWhenName) SendMessageW(p_every, CB_ADDSTRING, 0, (LPARAM)n);
+            SendMessageW(p_every, CB_SETCURSEL, WhenKind(t_conn), 0);
+            // 지정 시간마다: [ 6 ] 시간마다
+            p_hours = Ctl(h, L"EDIT", std::to_wstring(t_conn.every > 0 ? t_conn.every : 6).c_str(), WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER | ES_CENTER, IDP_HOURS);
+            MoveWindow(p_hours, x + S(334), wy + S(1), S(56), S(28), TRUE); SendMessageW(p_hours, EM_LIMITTEXT, 3, 0);
+            p_hoursL = Ctl(h, L"STATIC", L"시간마다", SS_LEFT | SS_NOPREFIX, IDP_HOURSL); MoveWindow(p_hoursL, x + S(396), wy + S(5), S(120), S(22), TRUE);
+            // 매일: [03] 시 [00] 분
+            int dm = t_conn.dailyAt >= 0 ? t_conn.dailyAt : 3 * 60;
+            p_dHour = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_DHOUR); MoveWindow(p_dHour, x + S(334), wy, S(66), S(300), TRUE);
+            for (int i = 0; i < 24; i++) { wchar_t b[8]; swprintf(b, 8, L"%02d", i); SendMessageW(p_dHour, CB_ADDSTRING, 0, (LPARAM)b); }
+            SendMessageW(p_dHour, CB_SETCURSEL, dm / 60, 0);
+            p_dHourL = Ctl(h, L"STATIC", L"시", SS_LEFT | SS_NOPREFIX, IDP_DHOURL); MoveWindow(p_dHourL, x + S(404), wy + S(5), S(20), S(22), TRUE);
+            p_dMin = Ctl(h, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDP_DMIN); MoveWindow(p_dMin, x + S(428), wy, S(66), S(300), TRUE);
+            for (int i = 0; i < 60; i += 5) { wchar_t b[8]; swprintf(b, 8, L"%02d", i); SendMessageW(p_dMin, CB_ADDSTRING, 0, (LPARAM)b); }
+            SendMessageW(p_dMin, CB_SETCURSEL, (dm % 60) / 5, 0);
+            p_dMinL = Ctl(h, L"STATIC", L"분", SS_LEFT | SS_NOPREFIX, IDP_DMINL); MoveWindow(p_dMinL, x + S(498), wy + S(5), S(30), S(22), TRUE);
+            // 조건
+            p_idlePc = Ctl(h, L"BUTTON", L"PC를 쓰지 않을 때만", BS_AUTOCHECKBOX | WS_TABSTOP, IDP_IDLEPC);
+            MakeChk(p_idlePc); ChkSet(p_idlePc, t_conn.idlePc); MoveWindow(p_idlePc, x, wy + S(40), S(176), S(26), TRUE);
+            p_idleMin = Ctl(h, L"EDIT", std::to_wstring(t_conn.idlePcMin).c_str(), WS_TABSTOP | ES_AUTOHSCROLL | ES_NUMBER | ES_CENTER, IDP_IDLEMIN);
+            MoveWindow(p_idleMin, x + S(180), wy + S(39), S(48), S(28), TRUE); SendMessageW(p_idleMin, EM_LIMITTEXT, 3, 0);
+            p_idleMinL = Ctl(h, L"STATIC", L"분 동안 마우스·키보드를 쓰지 않았을 때", SS_LEFT | SS_NOPREFIX, IDP_IDLEMINL); MoveWindow(p_idleMinL, x + S(234), wy + S(44), CW - S(234), S(22), TRUE);
+            p_idleDisk = Ctl(h, L"BUTTON", L"드라이브가 한가할 때만 (이 PC 폴더가 있는 디스크를 다른 프로그램이 많이 쓰지 않을 때)", BS_AUTOCHECKBOX | WS_TABSTOP, IDP_IDLEDISK);
+            MakeChk(p_idleDisk); ChkSet(p_idleDisk, t_conn.idleDisk); MoveWindow(p_idleDisk, x, wy + S(74), CW, S(26), TRUE);
+            p_whenDesc = Ctl(h, L"STATIC", L"조건은 자동으로 맞출 때만 따집니다. [지금 동기화]는 언제나 바로 맞춥니다 — 알림 영역 Mydrive 창 위쪽 · 작업 줄의 ⟳ · 탐색기 오른쪽 클릭", SS_LEFT | SS_NOPREFIX, IDP_WHENDESC);
+            SendMessageW(p_whenDesc, WM_SETFONT, (WPARAM)g_fontSmall, TRUE); MoveWindow(p_whenDesc, x, wy + S(106), CW, S(36), TRUE);
+            AddTip(p_tip, p_every, L"실시간: PC나 NAS에서 바뀌면 몇 초 안에 맞춥니다.\n지정 시간마다: 바뀐 것을 알아 두었다가 정한 시간마다 한 번에 맞춥니다.\n매일 정해진 시각: 하루에 한 번, 정한 시각에 맞춥니다 (그때 PC가 꺼져 있었으면 켠 뒤 바로).\n원할 때만: [지금 동기화]를 누를 때만 맞춥니다.\n열어 보려는 온라인 전용 파일은 언제든 바로 받습니다.");
+            AddTip(p_tip, p_everyL, L"이 작업을 언제 NAS와 맞출지 정합니다. 휴대폰 앱의 '언제'와 같습니다.");
+            AddTip(p_tip, p_hours, L"몇 시간마다 맞출지 (1~168시간)");
+            AddTip(p_tip, p_dHour, L"매일 맞출 시각 (이 PC의 시간)");
+            AddTip(p_tip, p_idlePc, L"켜면, 맞출 때가 되어도 PC를 쓰는 중이면 기다렸다가 정한 시간 동안 마우스·키보드 입력이 없을 때 맞춥니다. 실시간에서도 쓸 수 있습니다.");
+            AddTip(p_tip, p_idleDisk, L"켜면, 이 PC 폴더가 있는 드라이브가 바쁠 때(쉬는 시간이 85% 아래) 기다렸다가 한가해지면 맞춥니다. 게임·영상 작업·다른 복사 중에 방해하지 않게.");
         }
-        AddTip(p_tip, p_every, L"실시간: PC나 NAS에서 바뀌면 몇 초 안에 맞춥니다.\nN시간마다: 바뀐 것을 알아 두었다가 그 간격마다 한 번에 맞춥니다.\n원할 때만: 알림 영역 메뉴나 탐색기의 [지금 동기화]를 누를 때만 맞춥니다.\n열어 보려는 온라인 전용 파일은 언제든 바로 받습니다.");
-        AddTip(p_tip, p_everyL, L"이 작업을 언제 NAS와 맞출지 정합니다. 휴대폰 앱의 '언제'와 같습니다.");
         p_wfsp = Ctl(h, L"BUTTON", L"WinFsp 설치", BS_PUSHBUTTON | WS_TABSTOP, IDP_WFSP);
         MoveWindow(p_wfsp, x, ch - S(46), S(150), S(32), TRUE);
         AddTip(p_tip, p_mFolder, L"아래에 적은 PC 폴더 자리에 NAS 내용이 보입니다. 그 폴더는 아직 없거나 비어 있어야 합니다.");
@@ -1965,7 +2025,7 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         HDC dc = (HDC)wp; SetBkColor(dc, kBg);
         int id = GetDlgCtrlID((HWND)lp);
         if (id == IDP_LINE) return (LRESULT)s_brLine;
-        SetTextColor(dc, (HWND)lp == p_info || id == IDP_DESC || id == IDP_DESC + 1 || id == IDP_WDESC ? kMuted : kText);
+        SetTextColor(dc, (HWND)lp == p_info || id == IDP_DESC || id == IDP_DESC + 1 || id == IDP_WDESC || id == IDP_WHENDESC ? kMuted : kText);
         return (LRESULT)g_brDark;
     }
     case WM_NOTIFY: {
@@ -2007,6 +2067,9 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             PickModeUi();
             break;
         case IDP_MFOLDER: t_conn.mount.clear(); PickModeUi(); break;
+        case IDP_EVERY: if (HIWORD(wp) == CBN_SELCHANGE) PickWhenUi(true); break;
+        case IDP_IDLEPC: ChkSet(p_idlePc, !ChkGet(p_idlePc)); PickWhenUi(true); break;
+        case IDP_IDLEDISK: ChkSet(p_idleDisk, !ChkGet(p_idleDisk)); break;
         case IDP_MDRIVE: t_conn.mount = PickLetter(); PickModeUi(); break;
         case IDP_LETTER: if (HIWORD(wp) == CBN_SELCHANGE && !t_conn.mount.empty()) t_conn.mount = PickLetter(); break;
         case IDP_WFSP: InstallWinFsp(h); break;
@@ -2030,7 +2093,15 @@ static LRESULT CALLBACK PickProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (!t_conn.web && p_loaded && p_loadName == name) PickApply();
             if (t_conn.web) t_conn.label = Trim(GetText(p_dname));
-            { int k = (int)SendMessageW(p_every, CB_GETCURSEL, 0, 0); if (k >= 0 && k < 7) t_conn.every = kEvery[k]; }
+            {
+                int k = (int)SendMessageW(p_every, CB_GETCURSEL, 0, 0);
+                int hrs = std::clamp(_wtoi(GetText(p_hours).c_str()), 1, 168);
+                int dm = (int)SendMessageW(p_dHour, CB_GETCURSEL, 0, 0) * 60 + (int)SendMessageW(p_dMin, CB_GETCURSEL, 0, 0) * 5;
+                t_conn.every = k == 1 ? hrs : k == 3 ? -1 : 0;
+                t_conn.dailyAt = k == 2 ? std::clamp(dm, 0, 24 * 60 - 1) : -1;
+                t_conn.idlePc = ChkGet(p_idlePc); t_conn.idlePcMin = std::clamp(_wtoi(GetText(p_idleMin).c_str()), 1, 240);
+                t_conn.idleDisk = ChkGet(p_idleDisk);
+            }
             t_conn.name = name; t_conn.local = local;
             if (t_idx < 0) { s_conns.push_back(t_conn); s_sel = (int)s_conns.size() - 1; }
             else s_conns[t_idx] = t_conn;
@@ -2054,7 +2125,7 @@ static void OpenTask(HWND owner, int idx) {
     t_idx = idx;
     if (idx >= 0) t_conn = s_conns[idx]; else { t_conn = Conn(); t_conn.onDemand = true; }
     MONITORINFO mi{sizeof mi}; GetMonitorInfoW(MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST), &mi);
-    RECT r{0, 0, S(562), std::min<int>(S(590), mi.rcWork.bottom - mi.rcWork.top - S(60))};
+    RECT r{0, 0, S(562), std::min<int>(S(700), mi.rcWork.bottom - mi.rcWork.top - S(60))};
     AdjustWindowRectExForDpi(&r, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0, g_dpi);
     RECT o; GetWindowRect(owner, &o);
     int w = r.right - r.left, hh = r.bottom - r.top;

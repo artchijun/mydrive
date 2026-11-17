@@ -49,6 +49,9 @@ struct Config {
     std::vector<std::string> keepDirs;       // 항상 이 PC에 둘 폴더 (내용까지 늘 받아 둠) — 나머지는 요청 시 받기
     int autoFreeDays = 0;                    // 이만큼 안 연 파일은 온라인 전용으로 (0 = 끔)
     int everyHours = 0;                      // 언제 맞출지: 0 실시간(바뀌면 바로) · N 시간마다 · -1 원할 때만 ([지금 동기화]). 바뀐 것은 계속 알아 두고 때가 되면 맞춤
+    int dailyAt = -1;                        // 0 이상이면 매일 이 시각(자정부터 분)에 맞춤 (everyHours 보다 먼저)
+    int idlePcMin = 0;                       // 조건: 마우스·키보드 입력이 이만큼(분) 없을 때만 자동으로 맞춤 (0 = 따지지 않음)
+    bool idleDisk = false;                   // 조건: 이 PC 폴더가 있는 드라이브가 한가할 때만 자동으로 맞춤
 };
 
 struct Stats {
@@ -104,7 +107,9 @@ public:
     // [지금 동기화]: 'N시간마다'·'원할 때만' 작업도 지금 맞춤
     void RunNow() { runNow_ = true; SetEvent(wake_); }
     int64_t LastPassMs() const { return lastPassMs_; }   // 'N시간마다'·'원할 때만': 마지막으로 맞추기 시작한 때 (1970년부터 ms, 0 = 아직)
-    int64_t NextPassMs() const { return cfg_.everyHours > 0 && lastPassMs_ ? lastPassMs_ + (int64_t)cfg_.everyHours * 3600000LL : 0; }
+    int64_t NextPassMs() const;   // 다음에 맞출 때 (1970년부터 ms, 0 = 정해진 때 없음: 실시간·원할 때만)
+    // 조건(PC·드라이브 유휴)을 기다리는 중: 0 아님 · 1 PC 를 쓰는 중 · 2 드라이브가 바쁨
+    int WaitingFor() const { return condWait_; }
     // NAS 전체 목록을 새로 받아 PC 가 들고 있는 목록을 바로잡음 ([NAS 다시 확인], 올리기가 'NAS에도 다른 판'으로 거절될 때)
     void ResyncRemote() { resync_ = true; scanAll_ = true; Kick(); }
     bool CancelTransfer(const std::string& p);   // 지금 옮기는 파일 하나를 멈추고, 그 판은 다시 옮기지 않음
@@ -186,6 +191,9 @@ private:
     std::atomic<int64_t> lastPassMs_{0};
     bool chain_ = false;           // 'N시간마다'·'원할 때만': 맞추기 차례가 이어지는 중 (바뀐 게 있어 한 번 더)
     uint64_t lastPing_ = 0;
+    std::atomic<int> condWait_{0};
+    uint64_t condAt_ = 0; int condLast_ = 0;
+    int CondNow();                 // 조건 확인: 0 맞음 · 1 PC 사용 중 · 2 드라이브 바쁨 (20초 동안 기억)
     bool WaitTurn();               // 'N시간마다'·'원할 때만': 때가 아니면 기다리고 false
     HANDLE wake_ = nullptr;
     // 상태(local_/remote_/base_)를 여러 통로가 함께 쓰므로 잠금

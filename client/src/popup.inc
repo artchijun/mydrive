@@ -464,6 +464,7 @@ enum Hit {
     H_HELDDIR = 90,        // + 0..2 (대량 삭제가 일어난 폴더)
     H_CONNPAUSE = 7800,    // + 연결 번호 (이 작업만 멈춤/다시 시작)
     H_HELDMOVED = 7900,    // [옮긴 것으로 처리]
+    H_CONNSYNC = 8000,     // + 연결 번호 (이 작업만 지금 동기화)
     H_SUMCHIP = 100,       // + 0..3
     H_LOGF = 120,          // + 0..3
     H_CONN = 200,          // + 연결 번호
@@ -776,7 +777,10 @@ static void DrawBar(Rect r, const Overall& o) {
     if (paused) text = (AnyPausedForever() ? std::wstring(L"다시 시작할 때까지") : ClockAfter(PausedLeft()) + L"까지") + L" 멈춤 · 그동안 바뀐 것은 다시 시작할 때 한꺼번에 맞춤";
     else if (o.offline) text = L"NAS에 연결할 수 없음 — 15초마다 다시 시도";
     else if (o.pend > 0) text = Fmt(L"맞출 것 %lld개 남음", o.pend);
-    else text = L"바뀌면 바로 맞춤";
+    else {
+        int sched = 0; for (auto& e : g_engines) if (e->cfg().everyHours != 0 || e->cfg().dailyAt >= 0) sched++;
+        text = sched == 0 ? L"바뀌면 바로 맞춤" : sched == (int)g_engines.size() ? L"정한 때에 맞춤 · 지금 맞추려면 [지금 동기화]" : L"바뀌면 바로 맞춤 · 몇 작업은 정한 때에";
+    }
     // 오른쪽: 평소에는 '⏸ 30분 1시간 3시간'(잠시 멈춤), 멈춰 있을 때만 [지금 동기화] (멈춤을 풀고 바로 맞춤)
     float right = in.r;
     if (paused) {
@@ -786,6 +790,11 @@ static void DrawBar(Rect r, const Overall& o) {
     } else {
         struct { int id, m; } chips[] = {{H_P180, 180}, {H_P60, 60}, {H_P30, 30}};   // 오른쪽부터
         float x = in.r;
+        {   // [지금 동기화] 늘 보이게 — '지정 시간마다'·'매일'·'원할 때만' 작업도 지금 바로
+            float bw = BtnW(L"지금 동기화", 0xE895, 11.5f, 9);
+            Btn(H_SYNCNOW, {x - bw, in.t + 5, x, in.t + 29}, L"지금 동기화", 0xE895, L"모든 작업을 지금 바로 맞춥니다 ('지정 시간마다'·'매일'·'원할 때만' 작업도, PC·드라이브 유휴 조건과 상관없이)", 0, 11.5f);
+            x -= bw + 10;
+        }
         for (auto& c : chips) {
             std::wstring ct = MinText(c.m); float w = BtnW(ct, 0, 11.5f, 9);
             Btn(c.id, {x - w, in.t + 5, x, in.t + 29}, ct, 0, MinText(c.m) + L" 동안 모든 연결의 동기화를 잠시 멈춤 — 시간이 되면 저절로 다시 맞춤", 0, 11.5f);
@@ -811,6 +820,15 @@ static void DrawBar(Rect r, const Overall& o) {
         if (st == 2) s = e.PausedForever() ? L"멈춤 · 다시 시작할 때까지" : L"멈춤 · " + ClockAfter(e.PausedLeftMs()) + L"까지";
         if (e.stats.pending > 0 && st == 1) s += Fmt(L" · %d개", (int)e.stats.pending);
         if (e.stats.waiting > 0) s += Fmt(L" · 기다림 %d", (int)e.stats.waiting);
+        if (st == 0) {   // 맞춰진 채 기다리는 중: 다음에 맞출 때 / 조건 기다림
+            if (int w = e.WaitingFor()) s = w == 1 ? L"PC 사용 중 · 기다림" : L"드라이브 바쁨 · 기다림";
+            else if (e.cfg().everyHours < 0 && e.cfg().dailyAt < 0) s = L"맞춰짐 · 누를 때";
+            else if (int64_t nx = e.NextPassMs()) {
+                SYSTEMTIME u, lt, nowL; FILETIME ft; uint64_t v = ((uint64_t)(nx + 11644473600000LL)) * 10000ULL; ft.dwLowDateTime = (DWORD)v; ft.dwHighDateTime = (DWORD)(v >> 32);
+                FileTimeToSystemTime(&ft, &u); SystemTimeToTzSpecificLocalTime(nullptr, &u, &lt); GetLocalTime(&nowL);
+                s = lt.wDay == nowL.wDay ? Fmt(L"맞춰짐 · 다음 %02d:%02d", lt.wHour, lt.wMinute) : Fmt(L"맞춰짐 · 다음 %d/%d %02d:%02d", lt.wMonth, lt.wDay, lt.wHour, lt.wMinute);
+            }
+        }
         float sw = g_cv.TextWidth(s, {11}) + 4;
         // 동기화 방식: 모두 받기 / 요청 시 받기 (+ 항상 둘 폴더 수)
         std::wstring mode = !e.cfg().onDemand ? L"모두 받아 두기" : e.cfg().keepDirs.empty() ? L"필요할 때 받기" : Fmt(L"필요할 때 · 항상 %d", (int)e.cfg().keepDirs.size());
@@ -822,7 +840,7 @@ static void DrawBar(Rect r, const Overall& o) {
             g_cv.Text(mode, chip, Hex(0xFF9CC7F0), {10.5f, DWRITE_FONT_WEIGHT_NORMAL, ui::Center});
             mw += 6;
         }
-        float pbw = 24;   // 오른쪽 끝: 이 작업만 멈춤 [⏸] / 다시 시작 [▶]
+        float pbw = 48;   // 오른쪽 끝: 이 작업만 지금 동기화 [⟳] · 멈춤 [⏸] / 다시 시작 [▶]
         g_cv.Text(L"↔  " + e.cfg().localRoot, {in.l + 32 + nw + mw, y, in.r - pbw - sw - 6, y + 22}, col::Muted(), {11});
         g_cv.Text(s, {in.r - pbw - sw, y, in.r - pbw - 2, y + 22}, dc, {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Right});
         std::wstring tip = L"NAS '" + nm + L"' ↔ " + e.cfg().localRoot;
@@ -833,7 +851,14 @@ static void DrawBar(Rect r, const Overall& o) {
         } else tip += L"\n모두 받아 두기: 모든 파일을 이 PC에 둠";
         g_cv.AddHit(row, H_CONN + i, tip + L"\n누르면 PC 폴더를 엽니다 · 오른쪽 클릭: 이 작업만 멈춤");
         {
-            Rect pb{in.r - pbw + 2, y + 1, in.r, y + 21};
+            Rect sb{in.r - pbw + 2, y + 1, in.r - 24, y + 21};
+            bool shot = g_cv.hover == H_CONNSYNC + i;
+            if (shot) g_cv.Fill(sb, col::White(0.17f), 6);
+            g_cv.Icon(0xE895, sb, shot ? col::Text() : col::Muted(), 11);
+            g_cv.AddHit(sb, H_CONNSYNC + i, L"이 작업만 지금 동기화 (정한 때·유휴 조건과 상관없이 바로)");
+        }
+        {
+            Rect pb{in.r - 22, y + 1, in.r, y + 21};
             bool hot = g_cv.hover == H_CONNPAUSE + i;
             if (hot) g_cv.Fill(pb, col::White(0.17f), 6);
             g_cv.Icon(st == 2 ? 0xE768 : 0xE769, pb, st == 2 ? col::Hold() : (hot ? col::Text() : col::Muted()), 11);
@@ -1170,6 +1195,8 @@ static void ConnMenu(int i, bool withPath) {
     if (i < 0 || i >= (int)g_engines.size()) return;
     Engine& e = *g_engines[i];
     HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, 15, L"이 작업만 지금 동기화");
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     if (e.Paused()) AppendMenuW(m, MF_STRING, 10, L"이 작업 다시 시작");
     else {
         AppendMenuW(m, MF_STRING, 11, L"이 작업만 30분 멈춤");
@@ -1185,7 +1212,8 @@ static void ConnMenu(int i, bool withPath) {
     POINT pt; GetCursorPos(&pt);
     int c = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_pop, nullptr);
     DestroyMenu(m);
-    if (c == 10) PauseConn(i, 0);
+    if (c == 15) { if (e.Paused()) PauseConn(i, 0); e.ClearCanceled(); e.RunNow(); }
+    else if (c == 10) PauseConn(i, 0);
     else if (c == 11) PauseConn(i, 30);
     else if (c == 12) PauseConn(i, 60);
     else if (c == 13) PauseConn(i, 180);
@@ -1271,6 +1299,11 @@ static void OnClick(int id) {
     else if (id == H_SUMREF) g_sum.at = 0;
     else if (id >= H_LOGF && id < H_LOGF + 4) { g_logFilter = id - H_LOGF; g_scrollLog = 0; }
     else if (id == H_LOGOPEN) ShellExecuteW(g_pop, L"open", L"notepad.exe", (L"\"" + AlertPath() + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+    else if (id >= H_CONNSYNC && id < H_CONNSYNC + 100 && id - H_CONNSYNC < (int)g_engines.size()) {
+        int k = id - H_CONNSYNC;
+        if (g_engines[k]->Paused()) PauseConn(k, 0);
+        g_engines[k]->ClearCanceled(); g_engines[k]->RunNow();
+    }
     else if (id >= H_CONNPAUSE && id < H_CONNPAUSE + 100 && id - H_CONNPAUSE < (int)g_engines.size()) {
         int k = id - H_CONNPAUSE;
         if (g_engines[k]->Paused()) PauseConn(k, 0); else ConnMenu(k, false);
