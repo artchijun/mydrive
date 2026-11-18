@@ -502,7 +502,7 @@ class MainActivity : Activity() {
                 val phoneToo = copies.isNotEmpty() && box.isChecked
                 if (copies.isNotEmpty()) pf.putBool("del_phone_too", box.isChecked)
                 net.execute {
-                    val err = try { sel.chunked(100).forEach { c -> ph.delete(ns, c.map { it.id }) }; null } catch (e: Exception) { e.message }
+                    val err = try { sel.chunked(20).forEach { c -> ph.delete(ns, c.map { it.id }) }; null } catch (e: Exception) { e.message }
                     runOnUiThread {
                         if (err != null) { Toast.makeText(this, "지우지 못했습니다: $err", Toast.LENGTH_SHORT).show(); return@runOnUiThread }
                         g.removeItems(sel.map { it.id }.toSet())

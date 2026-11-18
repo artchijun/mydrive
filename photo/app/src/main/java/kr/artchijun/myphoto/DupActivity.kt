@@ -23,6 +23,7 @@ import java.util.concurrent.Executors
 /**
  * 중복 정리 (서버): 찾기 → 묶음마다 남길 것 하나(규칙대로) · 나머지는 지움 표시 → 사람이 보고 바꿀 수 있음 → 지우기.
  * 남길 것 고르는 규칙은 순서를 바꾸고 켜고 끌 수 있음 (선호 폴더 · 해상도 · 파일 크기 · 이름 · 날짜).
+ * 지우기는 세 가지: 모두 한꺼번에 · 폴더별로(고른 폴더에 있는 '지움'만) · 묶음 하나씩(묶음 머리의 [이 묶음 지우기]).
  */
 class DupActivity : Activity() {
     override fun attachBaseContext(base: android.content.Context) { super.attachBaseContext(Ui.wrap(base)) }
@@ -33,8 +34,10 @@ class DupActivity : Activity() {
     private var groups: List<Dups.Group> = emptyList()
     private lateinit var body: FrameLayout
     private lateinit var go: android.widget.Button
+    private lateinit var byFolder: android.widget.Button
     private lateinit var summary: TextView
     private val ns = Photos.TEAM
+    private var cleaned = false   // 이번에 지운 것이 있음 (다 지우면 '모두 정리했습니다')
     private var showing = false   // 결과 화면인가 (뒤로 가기 → 처음 화면)
 
     companion object {
@@ -54,12 +57,15 @@ class DupActivity : Activity() {
         body = FrameLayout(this).apply { setBackgroundColor(ui.bg) }
         summary = ui.label("", 13.5f, ui.sub)
         go = ui.button("지울 것 없음") { confirmDelete() }
-        val bottom = ui.col(summary, go.apply { layoutParams = ui.lp(h = ui.dp(50), top = 8) }).apply { setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel); visibility = View.GONE; tag = "bottom" }
+        byFolder = ui.button("폴더별로", primary = false) { pickFolders() }
+        val bottom = ui.col(summary, ui.row(byFolder.apply { layoutParams = ui.lp(0, h = ui.dp(50), weight = 0.38f).apply { rightMargin = ui.dp(8) } },
+            go.apply { layoutParams = ui.lp(0, h = ui.dp(50), weight = 0.62f) }).apply { layoutParams = ui.lp(top = 8) }).apply { setPadding(ui.dp(16), ui.dp(10), ui.dp(16), ui.dp(12)); setBackgroundColor(ui.panel); visibility = View.GONE; tag = "bottom" }
         val root = ui.col(top, body.apply { layoutParams = ui.lp(h = 0, weight = 1f) }, bottom)
         ui.insets(root)
         setContentView(root)
         intro()
     }
+
     override fun onDestroy() { super.onDestroy(); stop = true; bg.shutdownNow() }
     @Deprecated("") override fun onBackPressed() { if (showing) intro() else super.onBackPressed() }
 
@@ -155,7 +161,7 @@ class DupActivity : Activity() {
     }
 
     private fun scan() {
-        stop = false
+        stop = false; cleaned = false
         val stage = ui.label("시작하는 중…", 15f, ui.text)
         val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 1000 }
         val col = ui.col(stage, bar.apply { layoutParams = ui.lp(top = 12) }, ui.button("멈추기", primary = false) { stop = true }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 16) },
@@ -192,7 +198,8 @@ class DupActivity : Activity() {
     private fun results() {
         showing = true; lastGroups = groups
         body.removeAllViews()
-        if (groups.isEmpty()) { body.addView(ui.col(ui.label("중복을 찾지 못했습니다", 16f, ui.text), ui.button("처음으로", primary = false) { intro() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 16) }).apply { setPadding(ui.dp(24), ui.dp(40), ui.dp(24), 0) }); return }
+        if (groups.isEmpty()) { bottomBar().visibility = View.GONE
+            body.addView(ui.col(ui.label(if (cleaned) "중복을 모두 정리했습니다" else "중복을 찾지 못했습니다", 16f, ui.text), ui.button("처음으로", primary = false) { intro() }.apply { layoutParams = ui.lp(h = ui.dp(44), top = 16) }).apply { setPadding(ui.dp(24), ui.dp(40), ui.dp(24), 0) }); return }
         body.addView(list)
         list.adapter = adapter
         bottomBar().visibility = View.VISIBLE
@@ -203,8 +210,8 @@ class DupActivity : Activity() {
         val drop = groups.flatMap { it.drop }
         val bytes = drop.sumOf { it.it.size }
         summary.text = "${groups.size}묶음 · 정확한 중복 ${groups.count { it.kind == "same" }} · 줄인 사본 ${groups.count { it.kind == "small" }}  — 지울 것: ${StatusBadge.kinds(drop.count { !it.it.video }, drop.count { it.it.video })}  — 누르면 남김/지움이 바뀜"
-        go.text = if (drop.isEmpty()) "지울 것 없음" else "${drop.size}개 지우기 (${Fmt.size(bytes)})"
-        go.isEnabled = drop.isNotEmpty()
+        go.text = if (drop.isEmpty()) "지울 것 없음" else "모두 ${drop.size}개 지우기 (${Fmt.size(bytes)})"
+        go.isEnabled = drop.isNotEmpty(); byFolder.isEnabled = drop.isNotEmpty()
         adapter.notifyDataSetChanged()
     }
 
@@ -216,8 +223,15 @@ class DupActivity : Activity() {
             val g = groups[p]
             val row = ui.row().apply { setPadding(ui.dp(10), 0, ui.dp(10), 0) }
             for (e in g.entries) row.addView(card(g, e))
+            // 묶음 머리: 종류·장수 + [이 묶음 지우기] (하나씩 확인하며 지울 때)
+            val one = ui.label("이 묶음 지우기", 13f, ui.red, bold = true).apply {
+                setPadding(ui.dp(12), ui.dp(8), ui.dp(12), ui.dp(8)); background = ui.press(null, 8)
+                contentDescription = "이 묶음에서 '지움' 표시한 것만 지우기"
+                setOnClickListener { deleteEntries(g.drop, "이 묶음에서 ${g.drop.size}개를 지울까요?", "이 묶음의 '남김' 사진은 그대로 둡니다.") }
+            }
             return ui.col(
-                ui.label((if (g.kind == "same") "정확한 중복" else "줄인 사본") + (if (g.entries.any { it.it.video }) " · 동영상" else "") + " · ${g.entries.size}개 · 지울 것 ${Fmt.size(g.drop.sumOf { it.it.size })}", 13f, ui.accent, bold = true).apply { setPadding(ui.dp(14), ui.dp(14), ui.dp(14), ui.dp(6)) },
+                ui.row(ui.label((if (g.kind == "same") "정확한 중복" else "줄인 사본") + (if (g.entries.any { it.it.video }) " · 동영상" else "") + " · ${g.entries.size}개 · 지울 것 ${Fmt.size(g.drop.sumOf { it.it.size })}", 13f, ui.accent, bold = true).apply { layoutParams = ui.lp(0, weight = 1f) },
+                    one).apply { setPadding(ui.dp(14), ui.dp(8), ui.dp(4), ui.dp(2)) },
                 HorizontalScrollView(this@DupActivity).apply { isHorizontalScrollBarEnabled = false; addView(row) },
             )
         }
@@ -260,23 +274,135 @@ class DupActivity : Activity() {
 
     private fun confirmDelete() {
         val drop = groups.flatMap { it.drop }
+        deleteEntries(drop, "${drop.size}개를 지울까요?", "묶음마다 '남김' 표시한 사진은 그대로 둡니다.")
+    }
+
+    /** 폴더별로 지우기: '지움'이 들어 있는 폴더를 나열 → 고른 폴더에 있는 '지움'만 지움 */
+    private fun pickFolders() {
+        val drop = groups.flatMap { it.drop }
         if (drop.isEmpty()) return
-        AlertDialog.Builder(this).setTitle("${drop.size}개를 지울까요?")
-            .setMessage("시놀로지에서 지웁니다 (${Fmt.size(drop.sumOf { it.it.size })}). 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다.\n\n묶음마다 '남김' 표시한 사진은 그대로 둡니다.")
+        val byDir = drop.groupBy { it.path.ifEmpty { "/" } }.entries.sortedWith(compareByDescending<Map.Entry<String, List<Dups.Entry>>> { it.value.size }.thenBy { it.key })
+        val names = byDir.map { (d, l) -> d.trimStart('/').ifEmpty { "(맨 위)" } + "\n" + "${l.size}개 · ${Fmt.size(l.sumOf { it.it.size })}" }.toTypedArray()
+        val on = BooleanArray(names.size)
+        var dlg: AlertDialog? = null
+        fun refresh() {
+            val n = byDir.indices.filter { on[it] }.sumOf { byDir[it].value.size }
+            dlg?.getButton(AlertDialog.BUTTON_POSITIVE)?.apply { isEnabled = n > 0; text = if (n > 0) "${n}개 지우기" else "폴더를 고르세요" }
+        }
+        dlg = AlertDialog.Builder(this).setTitle("어느 폴더에서 지울까요?")
+            .setMultiChoiceItems(names, on) { _, w, c -> on[w] = c; refresh() }
             .setPositiveButton("지우기") { _, _ ->
-                go.isEnabled = false; go.text = "지우는 중…"
-                bg.execute {
-                    val ph = Photos(this)
-                    var done = 0; var err: String? = null
-                    for (c in drop.chunked(100)) { try { ph.delete(ns, c.map { it.it.id }); done += c.size } catch (e: Exception) { err = e.message; break } }
-                    runOnUiThread {
-                        val gone = drop.take(done).map { it.it.id }.toSet()
-                        groups = groups.map { g -> Dups.Group(g.kind, g.entries.filter { it.it.id !in gone }).also { n -> n.keep += g.keep } }.filter { it.entries.size > 1 }
-                        Toast.makeText(this, if (err == null) "${done}개를 지웠습니다" else "${done}개 지우고 멈춤: $err", Toast.LENGTH_LONG).show()
-                        results()
-                    }
+                val pick = byDir.indices.filter { on[it] }
+                val sel = pick.flatMap { byDir[it].value }
+                deleteEntries(sel, "고른 폴더 ${pick.size}곳에서 ${sel.size}개를 지울까요?",
+                    "고른 폴더에 있는 '지움' 표시 사진만 지웁니다:\n" + pick.take(5).joinToString("\n") { "• " + byDir[it].key.trimStart('/') } + (if (pick.size > 5) "\n… 외 ${pick.size - 5}곳" else "") +
+                        "\n\n같은 묶음의 '남김' 사진과 다른 폴더의 사진은 그대로 둡니다.")
+            }.setNegativeButton("그만", null).create()
+        dlg.setOnShowListener { refresh() }
+        dlg.show()
+    }
+
+    /** 고른 '지움' 사진들을 시놀로지에서 지움 (확인 창을 거침) — 모두 · 폴더별 · 묶음 하나 공통 */
+    private fun deleteEntries(drop: List<Dups.Entry>, title: String, note: String) {
+        if (drop.isEmpty()) { Toast.makeText(this, "지울 것이 없습니다", Toast.LENGTH_SHORT).show(); return }
+        AlertDialog.Builder(this).setTitle(title)
+            .setMessage("시놀로지에서 지웁니다 (${Fmt.size(drop.sumOf { it.it.size })}). 공유 폴더 휴지통이 켜져 있으면 DSM 휴지통에서 되살릴 수 있습니다.\n\n$note")
+            .setPositiveButton("지우기") { _, _ -> runDelete(drop) }
+.setNegativeButton("그만", null).show()
+    }
+
+    /** 실제로 지우기 — 진행 막대와 자세한 상황(몇 개·크기·지금 지우는 폴더/파일·남은 시간)을 창에 보여 줌. [멈추기] 가능 */
+    private fun runDelete(drop: List<Dups.Entry>) {
+        go.isEnabled = false; byFolder.isEnabled = false; go.text = "지우는 중…"
+        val total = drop.size; val totalBytes = drop.sumOf { it.it.size }
+        val bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = total; progress = 0 }
+        val count = ui.label("0 / ${total}개", 22f, ui.text, bold = true)
+        val pct = ui.label("0%", 15f, ui.accent, bold = true)
+        val size = ui.label("0 B / ${Fmt.size(totalBytes)}", 13.5f, ui.sub)
+        val eta = ui.label("남은 시간 계산 중…", 13.5f, ui.sub)
+        val nowDir = ui.label("", 13.5f, ui.text).apply { maxLines = 2; ellipsize = TextUtils.TruncateAt.START }
+        val nowFile = ui.label("", 12.5f, ui.sub).apply { maxLines = 3 }
+        val fail = ui.label("", 13f, ui.red)
+        val box = ui.col(
+            ui.row(count.apply { layoutParams = ui.lp(0, weight = 1f) }, pct),
+            bar.apply { layoutParams = ui.lp(h = ui.dp(10), top = 8) },
+            ui.row(size.apply { layoutParams = ui.lp(0, weight = 1f) }, eta).apply { layoutParams = ui.lp(top = 6) },
+            ui.label("지금 지우는 곳", 12f, ui.sub, bold = true).apply { layoutParams = ui.lp(top = 16) },
+            nowDir.apply { layoutParams = ui.lp(top = 2) }, nowFile.apply { layoutParams = ui.lp(top = 2) }, fail.apply { layoutParams = ui.lp(top = 8) },
+        ).apply { setPadding(ui.dp(24), ui.dp(12), ui.dp(24), 0) }
+        val cancel = java.util.concurrent.atomic.AtomicBoolean(false)
+        val dlg = AlertDialog.Builder(this).setTitle("지우는 중").setView(box).setCancelable(false)
+            .setNegativeButton("멈추기", null).create()
+        dlg.setOnShowListener { dlg.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener { cancel.set(true); it.isEnabled = false; (it as? android.widget.Button)?.text = "이번 묶음까지 지우고 멈춤…" } }
+        dlg.show()
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)   // 오래 걸려도 화면이 꺼져 멈추지 않게
+        val t0 = android.os.SystemClock.elapsedRealtime()
+        bg.execute {
+            val ph = Photos(this)
+            var done = 0; var bytes = 0L
+            val gone = HashSet<Long>()                    // 지운 것
+            val failed = LinkedHashMap<Long, String>()    // 못 지운 것 → 까닭
+            fun why(e: Exception) = when (e) {
+                is java.net.SocketTimeoutException -> "NAS 응답이 늦음"
+                is java.io.IOException -> "연결 끊김"
+                is SynoError -> "시놀로지 오류 ${e.code}"
+                else -> e.message ?: e.javaClass.simpleName
+            }
+            /** 한 번 지우기 — 실패하면 2초 쉬고 한 번 더 */
+            fun tryDelete(ids: List<Long>): Exception? {
+                for (k in 0..1) {
+                    try { ph.delete(ns, ids); return null } catch (e: Exception) { if (k == 1 || cancel.get() || stop) return e; Thread.sleep(2000) }
                 }
-            }.setNegativeButton("그만", null).show()
+                return null
+            }
+            // 한 번에 10개씩 — 수천 장도 한 요청이 오래 걸리지 않게 (100개씩은 NAS가 1분 안에 못 끝내 끊기곤 했음).
+            // 묶음이 실패하면 하나씩 다시 해 보고, 그래도 안 되는 것만 '실패'로 두고 다음으로 넘어감 (멈추지 않음)
+            for (c in drop.chunked(10)) {
+                if (cancel.get() || stop) break
+                runOnUiThread {
+                    val dirs = c.map { it.path.trimStart('/').ifEmpty { "(맨 위)" } }.distinct()
+                    nowDir.text = dirs.first() + (if (dirs.size > 1) "  외 ${dirs.size - 1}곳" else "")
+                    nowFile.text = c.take(3).joinToString(", ") { it.it.name } + (if (c.size > 3) " … (${c.size}개)" else "")
+                }
+                val e = tryDelete(c.map { it.it.id })
+                if (e == null) c.forEach { gone += it.it.id; bytes += it.it.size }
+                else for (x in c) {   // 묶음이 안 되면 하나씩
+                    if (cancel.get() || stop) break
+                    val e1 = tryDelete(listOf(x.it.id))
+                    if (e1 == null) { gone += x.it.id; bytes += x.it.size } else failed[x.it.id] = why(e1)
+                }
+                done = gone.size + failed.size
+                val d = done; val b = bytes; val nf = failed.size; val ok = gone.size
+                val ms = android.os.SystemClock.elapsedRealtime() - t0
+                runOnUiThread {
+                    bar.progress = d; count.text = "$ok / ${total}개"; pct.text = "${d * 100 / total}%"
+                    size.text = "${Fmt.size(b)} / ${Fmt.size(totalBytes)}"
+                    val left = if (d > 0) ms * (total - d) / d / 1000 else -1
+                    eta.text = when { left < 0 -> "남은 시간 계산 중…"; left < 60 -> "남은 시간 약 ${left}초"; else -> "남은 시간 약 ${left / 60}분 ${left % 60}초" }
+                    if (nf > 0) fail.text = "못 지운 것 ${nf}개 (${failed.values.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key}) — 끝나고 다시 해 볼 수 있습니다"
+                }
+            }
+            val err = if (failed.isEmpty()) null else failed.values.groupingBy { it }.eachCount().maxByOrNull { it.value }?.key
+            val ms = android.os.SystemClock.elapsedRealtime() - t0
+            runOnUiThread {
+                try { dlg.dismiss() } catch (e: Exception) { }
+                window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                if (gone.isNotEmpty()) cleaned = true
+                val pos = list.firstVisiblePosition; val top = list.getChildAt(0)?.top ?: 0
+                groups = groups.map { g -> Dups.Group(g.kind, g.entries.filter { it.it.id !in gone }).also { n -> n.keep += g.keep } }.filter { it.entries.size > 1 }
+                val secs = ms / 1000
+                val took = if (secs < 60) "${secs}초" else "${secs / 60}분 ${secs % 60}초"
+                results()
+                if (failed.isNotEmpty() || done < total)   // 못 지운 것이 있으면 창으로 알림 (목록에 그대로 남아 있어 다시 지울 수 있음)
+                    AlertDialog.Builder(this).setTitle("${gone.size}개를 지웠습니다")
+                        .setMessage((if (failed.isNotEmpty()) "못 지운 것 ${failed.size}개 — 가장 많은 까닭: $err\n" else "") +
+                            (if (done < total) "멈춰서 지우지 않은 것 ${total - done}개\n" else "") +
+                            "\n남은 것은 목록에 그대로 있으니 [지우기]로 다시 해 보세요. 계속 실패하면 NAS가 바쁜지(색인·백업 중) 확인해 주세요.\n(걸린 시간 $took)")
+                        .setPositiveButton("확인", null).show()
+                else Toast.makeText(this, "${gone.size}개를 지웠습니다 (${Fmt.size(bytes)} · $took)", Toast.LENGTH_LONG).show()
+                if (groups.isNotEmpty()) list.setSelectionFromTop(pos.coerceAtMost(groups.size - 1), top)   // 보던 자리 그대로
+            }
+        }
     }
 
     // ---------- 규칙 ----------
