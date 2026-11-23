@@ -323,6 +323,7 @@ struct Overall {
     std::vector<std::pair<int, Engine::HeldDir>> heldDirs;   // (연결 번호, 폴더) 많은 순 상위 3곳
     int heldGroups = 0;
     int heldMoved = 0; std::wstring heldMovedTo;   // 보류 중 다른 동기화 작업으로 옮겨진 것으로 보이는 파일 수와 그 작업
+    int64_t heldSince = 0;                         // 보류를 처음 알아챈 때 (ms)
     bool offline = false;
 };
 static uint64_t g_offlineSince = 0;
@@ -340,6 +341,7 @@ static Overall GetOverall() {
             int g = 0; for (auto& d : e.HeldDirs(&g)) o.heldDirs.push_back({i, d}); o.heldGroups += g;
             std::string to; int mv = e.HeldMoved(&to);
             if (mv > 0) { o.heldMoved += mv; if (o.heldMovedTo.empty()) o.heldMovedTo = W(to); }
+            int64_t hs = e.HeldSinceMs(); if (hs && (!o.heldSince || hs < o.heldSince)) o.heldSince = hs;
         }
     }
     std::sort(o.heldDirs.begin(), o.heldDirs.end(), [](const auto& a, const auto& b) { return a.second.n > b.second.n; });
@@ -665,7 +667,39 @@ static void DrawStuck(Rect r) {
     }
 }
 static std::vector<std::wstring> g_heldDirAbs;   // [H_HELDDIR + k] 누르면 탐색기에서 보여 줄 폴더
-static float HeldHeight(const Overall& o) { return 110.f + 22.f * (float)o.heldDirs.size() + (o.heldMoved > 0 ? 26.f : 0.f); }
+// 때 보이기: "11:40 (12분 전)" — 오늘이 아니면 "11/20 11:40 (3일 전)"
+static std::wstring WhenAgo(int64_t ms) {
+    if (ms <= 0) return L"";
+    FILETIME ft; uint64_t t = (uint64_t)(ms + 11644473600000LL) * 10000ULL; ft.dwLowDateTime = (DWORD)t; ft.dwHighDateTime = (DWORD)(t >> 32);
+    FILETIME lf; SYSTEMTIME st, now; FileTimeToLocalFileTime(&ft, &lf); FileTimeToSystemTime(&lf, &st); GetLocalTime(&now);
+    FILETIME nf; GetSystemTimeAsFileTime(&nf);
+    int64_t nowMs = (int64_t)((((uint64_t)nf.dwHighDateTime << 32) | nf.dwLowDateTime) / 10000ULL) - 11644473600000LL;
+    int64_t s = (nowMs - ms) / 1000;
+    std::wstring ago = s < 60 ? L"방금 전" : s < 3600 ? Fmt(L"%lld분 전", s / 60) : s < 86400 ? Fmt(L"%lld시간 전", s / 3600) : Fmt(L"%lld일 전", s / 86400);
+    bool today = st.wYear == now.wYear && st.wMonth == now.wMonth && st.wDay == now.wDay;
+    return (today ? Fmt(L"%02d:%02d", st.wHour, st.wMinute) : Fmt(L"%d/%d %02d:%02d", st.wMonth, st.wDay, st.wHour, st.wMinute)) + L" (" + ago + L")";
+}
+// 묶음별 판단: 휴지통에 있으면 직접 지운 것, 다른 동기화 작업에 같은 파일이 있으면 옮긴 것, 둘 다 아니면 알 수 없음
+static std::wstring HeldVerdict(const Engine::HeldDir& d, Color* c) {
+    *c = col::Sub();
+    if (d.files <= 0) return d.lostOnPC ? L"빈 폴더만 사라짐" : L"NAS에서 빈 폴더만 사라짐";
+    std::wstring s;
+    if (d.lostOnPC && d.inBin > 0) {
+        *c = Hex(0xFF9FE3B0);
+        s = (d.inBin >= d.files ? std::wstring(L"모두 Windows 휴지통에 있음") : Fmt(L"%d개는 Windows 휴지통에 있음", d.inBin)) + L" → 직접 지운 것 · 지운 때 " + WhenAgo(d.binAtMs);
+    }
+    if (d.moved > 0) {
+        if (s.empty()) *c = Hex(0xFF9FE3B0);
+        s += (s.empty() ? L"" : L" · ") + (d.moved >= d.files ? std::wstring(L"모두") : Fmt(L"%d개는", d.moved)) + L" '" + W(d.movedTo) + L"'로 옮겨진 것으로 보임";
+    }
+    if (s.empty()) {
+        *c = Hex(0xFFFFB86B);
+        s = d.lostOnPC ? L"휴지통에도 다른 동기화 폴더에도 없음 — Shift+Delete, 다른 프로그램, 또는 동기화 밖으로 옮김"
+                       : L"NAS에서 지워짐 (DSM·다른 PC·휴대폰) — DSM의 #recycle 에 있는지 확인해 보세요";
+    }
+    return s;
+}
+static float HeldHeight(const Overall& o) { return 110.f + 58.f * (float)o.heldDirs.size() + (o.heldMoved > 0 ? 26.f : 0.f) + (o.heldSince ? 0.f : 0.f); }
 static void DrawHeld(Rect r, const Overall& o) {
     int64_t held = o.held;
     g_cv.Fill(r, Hex(0x22F5B544), 12); g_cv.Stroke(r, Hex(0x70F5B544), 12);
@@ -691,10 +725,18 @@ static void DrawHeld(Rect r, const Overall& o) {
         }
         g_cv.Text(shown, {row.l + 24, row.t, row.r - rw - 8, row.b}, col::Text(), {11.5f});
         g_cv.Text(right, {row.r - rw, row.t, row.r - 6, row.b}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Right});
-        g_cv.AddHit(row, H_HELDDIR + (int)k, abs + L"\n누르면 탐색기에서 이 자리를 보여 줍니다", false);
-        ry += 22;
+        // 둘째 줄: 크기와 판단 근거 (휴지통·옮겨짐·알 수 없음), 셋째 줄: 파일 이름 보기
+        Color vc; std::wstring verdict = HeldVerdict(d, &vc);
+        std::wstring l2 = (d.files > 0 ? Fmt(L"파일 %d개 · ", d.files) + SizeText(d.bytes) + L" · " : L"") + verdict;
+        g_cv.Text(l2, {row.l + 24, ry + 21, in.r - 6, ry + 38}, vc, {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, false, true});
+        std::wstring ex;
+        for (auto& s : d.samples) ex += (ex.empty() ? L"예: " : L", ") + W(s);
+        if (!ex.empty()) g_cv.Text(ex + (d.files > (int)d.samples.size() ? L" …" : L""), {row.l + 24, ry + 38, in.r - 6, ry + 54}, col::Muted(), {10.5f, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, false, true});
+        Rect hit{row.l, row.t, row.r, ry + 56};
+        g_cv.AddHit(hit, H_HELDDIR + (int)k, abs + L"\n" + l2 + (ex.empty() ? L"" : L"\n" + ex) + L"\n누르면 탐색기에서 이 자리를 보여 줍니다", false);
+        ry += 58;
     }
-    float off = 22.f * (float)o.heldDirs.size();
+    float off = 58.f * (float)o.heldDirs.size();
     if (o.heldMoved > 0) {   // DSM 에서 다른 공유 폴더로 옮긴 것으로 보임
         Rect mr{in.l + 20, in.t + 56 + off, in.r, in.t + 78 + off};
         g_cv.Icon(0xE8DE, {mr.l + 4, mr.t + 2, mr.l + 20, mr.b - 2}, col::Green(), 12);
@@ -705,7 +747,7 @@ static void DrawHeld(Rect r, const Overall& o) {
     }
     g_cv.Icon(0xE769, {in.l, in.t, in.l + 16, in.t + 20}, col::Orange(), 14);
     g_cv.Text(Fmt(L"한 번에 %lld개가 지워져서 삭제를 멈췄습니다", held), {in.l + 24, in.t, in.r, in.t + 20}, Hex(0xFFFFD18A), {13, DWRITE_FONT_WEIGHT_SEMI_BOLD});
-    g_cv.Text(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [지우기]. 다른 동기화는 계속합니다.",
+    g_cv.Text(std::wstring(L"직접 지운 적이 없으면 [되살리기], 일부러 지웠으면 [지우기] (누르면 바로 진행). 다른 동기화는 계속합니다.") + (o.heldSince ? L" 처음 알아챈 때 " + WhenAgo(o.heldSince) : L""),
               {in.l + 24, in.t + 22, in.r, in.t + 54}, col::Sub(), {11, DWRITE_FONT_WEIGHT_NORMAL, ui::Left, true, true});
     float w1 = BtnW(L"되살리기", 0xE777), w2 = BtnW(L"지우기", 0xE74D), w3 = BtnW(L"목록 보기", 0xE8FD);
     float x0 = in.l + 24;

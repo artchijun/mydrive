@@ -95,11 +95,12 @@ public:
     bool RunPass();                       // 한 번 맞추기 (변경이 있었으면 true)
     void Start();                         // 감시하며 계속 맞추기 (스레드)
     void Stop();
-    void ConfirmMassDelete() { confirmDelete_ = true; Kick(); }
-    void RestoreMassDelete() { restoreDelete_ = true; Kick(); }
+    // [지우기]·[되살리기]는 누른 즉시: 정한 때·유휴 조건을 기다리지 않고 바로 한 번 돎 (runNow_)
+    void ConfirmMassDelete() { confirmDelete_ = true; runNow_ = true; Kick(); }
+    void RestoreMassDelete() { restoreDelete_ = true; runNow_ = true; Kick(); }
     // DSM 에서 다른 공유 폴더로 옮긴 것 알아채기: 보류된 'NAS에서 사라짐' 가운데 다른 연결의 NAS 에 같은 파일(이름·크기·수정 시각)이 생긴 것
     int HeldMoved(std::string* to) { std::lock_guard<std::mutex> g(cfMu_); if (to) *to = movedConn_; return movedN_; }
-    void ConfirmMoved() { confirmMoved_ = true; Kick(); }   // [옮긴 것으로 처리]: 짝이 확인된 것만 옛 자리(PC)에서 지움 (휴지통)
+    void ConfirmMoved() { confirmMoved_ = true; runNow_ = true; Kick(); }   // [옮긴 것으로 처리]: 짝이 확인된 것만 옛 자리(PC)에서 지움 (휴지통)
     void WantKeyIndex() { rkWant_ = GetTickCount64() + 180000; Kick(); }   // 다른 연결이 'NAS 파일 찾기 색인'을 쓰겠다고 알림
     bool LookupKey(const std::string& k, std::string* rel) { std::lock_guard<std::mutex> g(rkMu_); auto it = rkIdx_.find(k); if (it == rkIdx_.end()) return false; if (rel) *rel = it->second; return true; }
     static std::string MoveKey(const std::string& leaf, int64_t size, int64_t mtimeNs) { return leaf + "|" + std::to_string(size) + "|" + std::to_string(mtimeNs / 1000000000LL); }   // 보류된 삭제를 하지 않고, 사라진 쪽에 다시 만듦
@@ -138,7 +139,16 @@ public:
     std::vector<std::string> TakeConflicts() { std::lock_guard<std::mutex> g(cfMu_); std::vector<std::string> v; v.swap(newConf_); return v; }
     // 보류된 대량 삭제 목록 파일 (메모장으로 엶)
     // 보류된 대량 삭제가 일어난 폴더 (많은 순, 상위 3곳). groups: 전체 곳 수
-    struct HeldDir { std::string rel; int n = 0; bool lostOnPC = false; };
+    // 보류된 삭제 묶음 (판단 근거 포함): 크기, 휴지통에 있는 수(=직접 지운 것)와 지운 때,
+    // 다른 동기화 작업으로 옮겨진 것으로 보이는 수와 그 자리, 파일 이름 보기
+    struct HeldDir {
+        std::string rel; int n = 0; bool lostOnPC = false;
+        int files = 0; int64_t bytes = 0;
+        int inBin = 0; int64_t binAtMs = 0;           // Windows 휴지통에서 찾은 수, 가장 최근에 지운 때
+        int moved = 0; std::string movedTo;           // 옮겨진 것으로 보이는 수, "작업/폴더"
+        std::vector<std::string> samples;             // 파일 이름 몇 개
+    };
+    int64_t HeldSinceMs() { std::lock_guard<std::mutex> g(cfMu_); return heldSince_; }   // 처음 알아챈 때
     std::vector<HeldDir> HeldDirs(int* groups) { std::lock_guard<std::mutex> g(cfMu_); if (groups) *groups = heldGroups_; return heldDirs_; }
     std::wstring HeldFile() const { return cfg_.stateDir + L"\\" + W(cfg_.name) + L" 삭제 보류 목록.txt"; }
 private:
@@ -209,12 +219,12 @@ private:
     std::thread loop_, pollThread_, watchThread_;
     HANDLE watchDir_ = INVALID_HANDLE_VALUE;
     bool dirty_ = false; uint64_t lastSave_ = 0, rkAt_ = 0, prof_[4] = {};   // prof_: 한 번 맞추기 단계별 걸린 시간(ms)
-    int lastHeld_ = -1;
+    int lastHeld_ = -1; uint64_t heldInfoAt_ = 0;   // 보류 판단 근거를 마지막으로 계산한 때 (1분마다 다시)
     std::atomic<bool> resync_{false};
     uint64_t lastResync_ = 0;
     std::mutex cfMu_;
     std::vector<std::string> newConf_;
-    std::vector<HeldDir> heldDirs_; int heldGroups_ = 0;
+    std::vector<HeldDir> heldDirs_; int heldGroups_ = 0; int64_t heldSince_ = 0;
     // 옮겨진 것 알아채기 (위 HeldMoved). movedTo_/movedN_/movedConn_ 은 cfMu_ 로 보호
     std::map<std::string, std::pair<std::string, std::string>> movedTo_;   // 이 연결 경로 → (옮겨 간 연결, 그 연결 안 경로). 폴더는 연결 이름이 빈 값
     int movedN_ = 0; std::string movedConn_; uint64_t movedAt_ = 0;

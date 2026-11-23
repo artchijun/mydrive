@@ -19,6 +19,49 @@ using json = nlohmann::json;
 
 namespace md {
 static std::wstring PlainRoot(std::wstring r);
+static int64_t EpochMsNow();
+
+// Windows 휴지통에 있는 것의 원래 경로(소문자) → 지운 때(ms). 대량 삭제 보류 때 '직접 지운 것인지' 판단 근거
+static std::map<std::wstring, int64_t> RecycleBinOrig() {
+    std::map<std::wstring, int64_t> out;
+    HRESULT hi = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    // 원래 자리·지운 때 열 (PSGUID_DISPLACED: PID 2 = 원래 폴더, 3 = 지운 날짜)
+    static const GUID kDisplaced = {0x9b174b33, 0x40ff, 0x11d2, {0xa2, 0x7e, 0x00, 0xc0, 0x4f, 0xc3, 0x08, 0x71}};
+    PIDLIST_ABSOLUTE pidl = nullptr; IShellFolder* desk = nullptr; IShellFolder2* bin = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderIDList(FOLDERID_RecycleBinFolder, 0, nullptr, &pidl)) && SUCCEEDED(SHGetDesktopFolder(&desk)) &&
+        SUCCEEDED(desk->BindToObject(pidl, nullptr, IID_PPV_ARGS(&bin)))) {
+        IEnumIDList* en = nullptr;
+        if (bin->EnumObjects(nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS | SHCONTF_INCLUDEHIDDEN, &en) == S_OK && en) {
+            PITEMID_CHILD c = nullptr; int guard = 0;
+            while (guard++ < 300000 && en->Next(1, &c, nullptr) == S_OK) {
+                SHCOLUMNID from{kDisplaced, 2}, when{kDisplaced, 3};
+                VARIANT v; VariantInit(&v); std::wstring dir;
+                if (SUCCEEDED(bin->GetDetailsEx(c, &from, &v)) && v.vt == VT_BSTR && v.bstrVal) dir = v.bstrVal;
+                VariantClear(&v);
+                int64_t at = 0;
+                if (SUCCEEDED(bin->GetDetailsEx(c, &when, &v)) && v.vt == VT_DATE) {
+                    SYSTEMTIME st; FILETIME ft;
+                    if (VariantTimeToSystemTime(v.date, &st) && SystemTimeToFileTime(&st, &ft))   // 이 열은 UTC 로 옴 (시험으로 확인)
+                        at = (int64_t)((((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000ULL) - 11644473600000LL;
+                }
+                VariantClear(&v);
+                STRRET sr; wchar_t* nm = nullptr;
+                if (!dir.empty() && SUCCEEDED(bin->GetDisplayNameOf(c, SHGDN_INFOLDER, &sr)) && SUCCEEDED(StrRetToStrW(&sr, c, &nm)) && nm) {
+                    std::wstring k = dir + L"\\" + nm; CharLowerBuffW(k.data(), (DWORD)k.size());
+                    out[k] = std::max(out[k], at);
+                    CoTaskMemFree(nm);
+                }
+                CoTaskMemFree(c); c = nullptr;
+            }
+            en->Release();
+        }
+    }
+    if (bin) bin->Release();
+    if (desk) desk->Release();
+    if (pidl) CoTaskMemFree(pidl);
+    if (SUCCEEDED(hi)) CoUninitialize();
+    return out;
+}
 
 // 폴더 짝 순서(rank 0 = 맨 위)가 곧 우선순위: 위 짝이 파일을 옮기는 동안 아래 짝은 기다림
 static std::atomic<int> s_rankBusy[8];   // 우선순위 '높음' 연결이 파일을 옮기는 중인 수
@@ -1199,7 +1242,8 @@ bool Engine::RunPass() {
         std::lock_guard<std::mutex> g(cfMu_);
         if (movedN_ || !movedTo_.empty()) { movedTo_.clear(); movedN_ = 0; movedConn_.clear(); }
     }
-    if ((stats.heldDeletes != lastHeld_ || movedChanged) && stats.heldDeletes > 0) {
+    if ((stats.heldDeletes != lastHeld_ || movedChanged || GetTickCount64() - heldInfoAt_ > 60000) && stats.heldDeletes > 0) {
+        heldInfoAt_ = GetTickCount64();
         if (stats.heldDeletes != lastHeld_)
             Event("⏸ 대량 삭제 보류", cfg_.name, std::to_string(nDelR) + "개 NAS 삭제 / " + std::to_string(nDelL) + "개 PC 삭제 — [지우기]를 누르면 진행");
         // 어느 폴더에서 사라졌나: 같이 사라진 가장 위 폴더(없으면 파일이 있던 폴더)로 묶어 셈
@@ -1248,12 +1292,56 @@ bool Engine::RunPass() {
                 grp[{best, bestSide}] += sum;
             }
             std::vector<HeldDir> v;
-            for (auto& [k, n] : grp) v.push_back({k.first, n, k.second});
+            for (auto& [k, n] : grp) { HeldDir h; h.rel = k.first; h.n = n; h.lostOnPC = k.second; v.push_back(h); }
             std::sort(v.begin(), v.end(), [](const HeldDir& a, const HeldDir& b) { return a.n > b.n; });
+            // 판단 근거: 크기·파일 이름 보기 / PC에서 사라진 것은 휴지통에 있는지(직접 지움), 다른 동기화 작업으로 옮겨졌는지
+            {
+                std::map<std::wstring, int64_t> binSet;
+                if (holdR) binSet = RecycleBinOrig();
+                std::map<std::string, std::pair<std::string, std::string>> mv;
+                { std::lock_guard<std::mutex> g(cfMu_); mv = movedTo_; }
+                if (holdR) { std::lock_guard<std::mutex> g(g_engMu); for (Engine* e : g_engs) if (e != this) e->WantKeyIndex(); }
+                std::wstring root = Abs(cfg_.localRoot, "");
+                if (root.rfind(L"\\\\?\\", 0) == 0) root.erase(0, 4);
+                while (!root.empty() && root.back() == L'\\') root.pop_back();
+                for (auto& it : items) {
+                    bool r = it.a == DelR;
+                    if (!((r && holdR) || (it.a == DelL && holdL && !allowDel_.count(it.p)))) continue;
+                    HeldDir* h = nullptr;
+                    for (auto& x : v) if (x.lostOnPC == r && (x.rel.empty() || it.p == x.rel || Under(it.p, x.rel) || Parent(it.p) == x.rel)) { h = &x; break; }
+                    if (!h) continue;
+                    auto bi = base_.find(it.p);
+                    if (bi == base_.end() || bi->second.d) continue;   // 폴더는 셈에서 뺌
+                    h->files++; h->bytes += bi->second.rs ? bi->second.rs : bi->second.ls;
+                    if (h->samples.size() < 3) h->samples.push_back(Leaf(it.p));
+                    if (r) {
+                        // 휴지통: 그 파일 또는 위 폴더째 지운 것
+                        std::wstring ap = root + L"\\" + W(it.p); for (auto& ch : ap) if (ch == L'/') ch = L'\\';
+                        CharLowerBuffW(ap.data(), (DWORD)ap.size());
+                        for (std::wstring q = ap; q.size() > root.size();) {
+                            auto f = binSet.find(q);
+                            if (f == binSet.end()) { size_t dot = q.rfind(L'.'), sl = q.rfind(L'\\'); if (dot != std::wstring::npos && dot > sl) f = binSet.find(q.substr(0, dot)); }   // 확장자 숨김 설정
+                            if (f != binSet.end()) { h->inBin++; h->binAtMs = std::max(h->binAtMs, f->second); break; }
+                            size_t sl = q.rfind(L'\\'); if (sl == std::wstring::npos) break; q.resize(sl);
+                        }
+                        // 다른 동기화 작업(NAS 쪽)에 같은 이름·크기·수정 시각 파일이 있으면 그리로 옮긴 것
+                        std::string key = MoveKey(Leaf(it.p), bi->second.rs, bi->second.rm), rel;
+                        std::lock_guard<std::mutex> g(g_engMu);
+                        for (Engine* e : g_engs) if (e != this && e->LookupKey(key, &rel)) {
+                            h->moved++; if (h->movedTo.empty()) h->movedTo = e->cfg().name + "/" + Parent(rel);
+                            break;
+                        }
+                    } else {
+                        auto m = mv.find(it.p);
+                        if (m != mv.end() && !m->second.first.empty()) { h->moved++; if (h->movedTo.empty()) h->movedTo = m->second.first + "/" + Parent(m->second.second); }
+                    }
+                }
+            }
             std::lock_guard<std::mutex> g(cfMu_);
             heldGroups_ = (int)v.size();
             if (v.size() > 3) v.resize(3);
             heldDirs_ = v;
+            if (!heldSince_) heldSince_ = EpochMsNow();
         }
         // 무엇이 지워지려는지 파일로 남김 ([목록 보기])
         if (FILE* fp = _wfopen(HeldFile().c_str(), L"wb")) {
@@ -1282,7 +1370,7 @@ bool Engine::RunPass() {
             fclose(fp);
         }
     }
-    if (stats.heldDeletes == 0 && lastHeld_ > 0) { std::lock_guard<std::mutex> g(cfMu_); heldDirs_.clear(); heldGroups_ = 0; }
+    if (stats.heldDeletes == 0 && lastHeld_ > 0) { std::lock_guard<std::mutex> g(cfMu_); heldDirs_.clear(); heldGroups_ = 0; heldSince_ = 0; }
     lastHeld_ = stats.heldDeletes;
 
     stats.pending = (int)items.size();
