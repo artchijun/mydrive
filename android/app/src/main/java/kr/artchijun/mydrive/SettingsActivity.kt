@@ -106,8 +106,10 @@ class SettingsActivity : Activity() {
         }
         val thumbs = pf.bool("thumbs", true)
         item("image", "사진·동영상 미리보기", "목록에서 사진·동영상을 작은 그림으로 보여 줍니다 (휴대폰 파일)", sw = thumbs) { pf.putBool("thumbs", !thumbs); changed() }
-        val rel = pf.bool("relTime", true)
-        item("history", "바뀐 때를 '몇 분 전'으로", "목록에 '방금 전 · 5분 전 · 3시간 전 · 12일 전'처럼 보여 줍니다. 30일이 넘으면 날짜로. 끄면 날짜와 시각 (2026-11-23 08:06). 파일 정보 창에는 둘 다 나옵니다", sw = rel) { pf.putBool("relTime", !rel); changed() }
+        val tms = arrayOf("둘 다 — 3시간 전 · 2026-11-23 08:06", "몇 분 전만 — 3시간 전", "날짜·시각만 — 2026-11-23 08:06"); val tm = Fmt.modeOf(pf)
+        item("history", "바뀐 때 표시", "목록에 바뀐 때를 '방금 전 · 5분 전 · 3시간 전 · 12일 전'과 날짜·시각으로 보여 줍니다. 30일이 넘으면 날짜·시각만. 파일 정보 창에는 언제나 둘 다", tms[tm].substringBefore(" —")) {
+            choose("바뀐 때 표시", tms, tm) { pf.putInt("timeMode", it); changed() }
+        }
         val hidden = pf.bool("hidden", false)
         item("eye", "숨김 파일 보기", "이름이 점(.)으로 시작하는 파일·폴더도 보여 줍니다", sw = hidden) { pf.putBool("hidden", !hidden); changed() }
         val viewer = pf.bool("viewer", true)

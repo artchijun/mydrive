@@ -22,8 +22,10 @@ object Fmt {
     private val df = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA)
     fun time(ns: Long): String = if (ns <= 0) "" else df.format(Date(ns / 1_000_000))
 
-    /** 목록에 '몇 분 전·며칠 전'으로 보일지 (설정 › 바뀐 때 표시). 앱이 켜질 때·설정에서 돌아올 때 맞춤 */
-    @Volatile var relative = true
+    /** 바뀐 때 표시 (설정): 0 둘 다(기본) · 1 몇 분 전만 · 2 날짜·시각만. 앱이 켜질 때·설정에서 돌아올 때 맞춤 */
+    @Volatile var mode = 0
+    val relative get() = mode != 2
+    fun modeOf(pf: Prefs): Int = pf.int("timeMode", if (pf.bool("relTime", true)) 0 else 2)   // 옛 스위치(relTime) 이어받기
     private val dfDay = SimpleDateFormat("yyyy-MM-dd", Locale.KOREA)
 
     /** 지금부터 얼마 전: 방금 전 · 5분 전 · 3시간 전 · 12일 전 (30일이 넘으면 날짜) */
@@ -40,8 +42,26 @@ object Fmt {
         }
     }
 
-    /** 목록 줄에 쓰는 때: 설정에 따라 '3일 전' 또는 '2026-11-20 08:06' */
-    fun listTime(ns: Long): String = if (ns <= 0) "" else if (relative) ago(ns / 1_000_000) else time(ns)
+    /** 목록 줄에 쓰는 때: 둘 다 '3일 전 · 2026-11-20 08:06' / '3일 전' / '2026-11-20 08:06'.
+     *  30일이 넘으면 '얼마 전'이 날짜와 같아지므로 날짜·시각만 */
+    fun listTime(ns: Long): String {
+        if (ns <= 0) return ""
+        val ms = ns / 1_000_000
+        val old = System.currentTimeMillis() - ms >= 86_400_000L * 30
+        return when {
+            mode == 2 || (mode == 0 && old) -> time(ns)
+            mode == 1 -> ago(ms)
+            else -> ago(ms) + " · " + time(ns)
+        }
+    }
+
+    /** 짧은 때 (동기화 '지난번'): 둘 다 '5분 전 (11월 23일 08:06)' / '5분 전' / '11월 23일 08:06' */
+    private val dfShort = SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA)
+    fun shortTime(ms: Long): String = if (ms <= 0) "" else when (mode) {
+        1 -> ago(ms)
+        2 -> dfShort.format(Date(ms))
+        else -> ago(ms) + " (" + dfShort.format(Date(ms)) + ")"
+    }
 
     /** 자세히 보기용: 날짜·시각과 얼마 전을 함께 — 2026-11-20 08:06 (3일 전) */
     fun fullTime(ns: Long): String = if (ns <= 0) "" else time(ns) + "  (" + ago(ns / 1_000_000) + ")"

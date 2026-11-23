@@ -170,7 +170,7 @@ class SyncActivity : Activity() {
                 continue
             }
             k.bar.visibility = View.GONE
-            val t = if (st.time <= 0) "" else if (Fmt.relative) Fmt.ago(st.time) else SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(Date(st.time))
+            val t = Fmt.shortTime(st.time)
             k.status.setTextColor(if (st.err) ui.red else ui.sub)
             k.status.text = when {
                 k.id in wait -> "곧 동기화합니다" + (if (st.msg.isNotEmpty()) " · 지난번: ${st.msg}" else "")

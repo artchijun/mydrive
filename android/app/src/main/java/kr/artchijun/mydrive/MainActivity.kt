@@ -132,7 +132,7 @@ class MainActivity : Activity(), Transfers.Listener {
         ui = Ui(this); if (!ui.dark) setTheme(R.style.AppTheme_Light)
         super.onCreate(savedInstanceState)
         pf = Prefs(this); api = pf.api(); fs = Fs(this, api); stamp = pf.int("stamp", 0)
-        Fmt.relative = pf.bool("relTime", true)
+        Fmt.mode = Fmt.modeOf(pf)
         window.statusBarColor = ui.panel; window.navigationBarColor = ui.panel
         if (!ui.dark) window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         build()
@@ -168,7 +168,7 @@ class MainActivity : Activity(), Transfers.Listener {
         syncTick()
         Transfers.asking?.let { onAsk(it) }
         resumedNow = true
-        Fmt.relative = pf.bool("relTime", true)
+        Fmt.mode = Fmt.modeOf(pf)
         agoTick()
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
         else if (tab.loc.browsable && !firstResume) load()   // 다른 앱·PC에서 바꿨을 수 있음 → 보던 폴더 새로 (보던 자리 그대로)
@@ -294,7 +294,7 @@ class MainActivity : Activity(), Transfers.Listener {
         } else {
             syncProg.visibility = View.GONE
             val st = Sync.status(this, p.id)
-            val t = if (st.time <= 0) "" else if (Fmt.relative) Fmt.ago(st.time) else java.text.SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(java.util.Date(st.time))
+            val t = Fmt.shortTime(st.time)
             val waiting = ids.any { it in Sync.pendingIds(this) }
             syncSub.setTextColor(if (waiting) ui.accent else if (st.err || st.held > 0) ui.red else ui.sub)
             syncSub.text = when {
@@ -2140,7 +2140,7 @@ class MainActivity : Activity(), Transfers.Listener {
                 l.kind == "trash" -> prettyAbs(it.extra.substringBeforeLast('/')) + "  ·  " + Fmt.listTime(it.mtimeMs * 1_000_000)
                 l.kind == "search" -> "/" + it.path.substringBeforeLast('/', "") + "  ·  " + (if (it.dir) "폴더" else Fmt.size(it.size))
                 l.kind == "lib" && it.dir -> (if (it.extra.startsWith("!")) "갤러리 숨김  ·  " else "") + "${it.count}개  ·  " + Fmt.size(it.size) + "  ·  /" + it.path
-                l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + (if (Fmt.relative) Fmt.listTime(it.mtimeMs * 1_000_000) else Fmt.time(it.mtimeMs * 1_000_000).take(10)) + "  ·  /" + it.path.substringBeforeLast('/', "")
+                l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + (if (Fmt.mode == 1) Fmt.listTime(it.mtimeMs * 1_000_000) else if (Fmt.mode == 0 && System.currentTimeMillis() - it.mtimeMs < 86_400_000L * 30) Fmt.ago(it.mtimeMs) + " · " + Fmt.time(it.mtimeMs * 1_000_000).take(10) else Fmt.time(it.mtimeMs * 1_000_000).take(10)) + "  ·  /" + it.path.substringBeforeLast('/', "")
                 it.dir && isSyncRoot(l, it) -> android.text.SpannableString("⇅ 동기화 폴더  ·  " + Fmt.listTime(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")).apply {
                     setSpan(android.text.style.ForegroundColorSpan(ui.accent), 0, 8, 0); setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, 8, 0) }
                 it.dir -> Fmt.listTime(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
