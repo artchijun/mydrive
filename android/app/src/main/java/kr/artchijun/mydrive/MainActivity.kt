@@ -166,13 +166,80 @@ class MainActivity : Activity(), Transfers.Listener {
         if (findSyncHere()) adapter.notifyDataSetChanged()   // 동기화 화면에서 짝을 더하거나 뺐을 수 있음
         syncTick()
         Transfers.asking?.let { onAsk(it) }
+        resumedNow = true
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
+        else if (tab.loc.browsable && !firstResume) load()   // 다른 앱·PC에서 바꿨을 수 있음 → 보던 폴더 새로 (보던 자리 그대로)
+        firstResume = false
+        liveStart()
         if (pf.int("cloudStamp", 0) != cloudStamp) { cloudStamp = pf.int("cloudStamp", 0); loadCloud(); refreshHome() }
         if (pf.bool("openHomeEdit", false)) { pf.putBool("openHomeEdit", false); if (tab.loc.kind != "home") navigate(Loc.HOME); editHome() }
         if (System.currentTimeMillis() - pf.lastUpdateCheck > 6 * 3600_000L) checkUpdate(false)
     }
 
-    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null; syncH.removeCallbacksAndMessages(null) }
+    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null; syncH.removeCallbacksAndMessages(null); resumedNow = false; liveStop() }
+
+    // ================= 보고 있는 폴더가 바뀌면 바로 반영 =================
+    //   휴대폰 폴더: FileObserver 로 그 폴더를 지켜봄.  NAS 폴더: 서버의 바뀜 알림(/v1/changes)을 기다렸다가 받음.
+    //   바뀌면 0.6초 모았다가 목록을 새로 (보던 자리 그대로). 고르는 중이면 다 고른 뒤에.
+    private var resumedNow = false
+    private var firstResume = true
+    private var liveGen = 0
+    private var liveKey = ""
+    private var localObs: android.os.FileObserver? = null
+    private var livePending = false
+    private val liveH = android.os.Handler(android.os.Looper.getMainLooper())
+    private val liveRun = Runnable { liveReload() }
+
+    private fun liveStart() {
+        val l = tab.loc
+        if (!resumedNow) return
+        if (l.key() == liveKey) return
+        liveStop(); liveKey = l.key()
+        when (l.kind) {
+            "local" -> try {
+                val m = android.os.FileObserver.CREATE or android.os.FileObserver.DELETE or android.os.FileObserver.MOVED_FROM or
+                    android.os.FileObserver.MOVED_TO or android.os.FileObserver.CLOSE_WRITE or android.os.FileObserver.DELETE_SELF or android.os.FileObserver.MOVE_SELF
+                localObs = object : android.os.FileObserver(fs.file(l), m) {
+                    override fun onEvent(e: Int, path: String?) { liveH.post { if (liveKey == l.key()) liveHit() } }
+                }.also { it.startWatching() }
+            } catch (e: Exception) { }
+            "nas" -> if (!l.root.startsWith("~")) { val g = ++liveGen; Thread { nasWatch(l, g) }.start() }
+        }
+    }
+
+    private fun liveStop() { liveGen++; liveKey = ""; try { localObs?.stopWatching() } catch (e: Exception) { }; localObs = null; liveH.removeCallbacks(liveRun) }
+    private fun liveHit() { liveH.removeCallbacks(liveRun); liveH.postDelayed(liveRun, 600) }
+    private fun liveReload() {
+        if (!resumedNow || isFinishing) return
+        if (sel.isNotEmpty()) { livePending = true; return }   // 고르는 중에는 목록이 바뀌지 않게
+        load()
+    }
+
+    /** NAS 폴더 바뀜 기다리기 (20초씩). 바뀐 경로의 부모 폴더 목록은 기억해 둔 것도 버림.
+     *  20초 동안 소식이 없으면 그 폴더를 한 번 조용히 물어봄 → 서버(0.6.22+)가 디스크와 맞춰 보고,
+     *  NAS 감시 한도 때문에 놓친 변경(File Station·SMB·시놀로지 포토)이 있으면 바뀜 알림으로 돌아옴 */
+    private fun nasWatch(l: Loc, g: Int) {
+        var epoch = ""; var seq = -1L; var fails = 0
+        while (g == liveGen) {
+            try {
+                if (seq < 0) { val ri = api.roots().firstOrNull { it.name == l.root } ?: return; epoch = ri.epoch; seq = ri.seq }
+                val (reset, s, paths) = api.changes(l.root, epoch, seq, 20)
+                if (g != liveGen) return
+                fails = 0
+                if (reset) { seq = -1; runOnUiThread { if (g == liveGen) liveHit() }; continue }
+                seq = s
+                if (paths.isEmpty()) { try { api.list(l.root, l.path) } catch (e: Exception) { }; continue }
+                val parents = paths.map { it.substringBeforeLast('/', "") }.toSet()
+                runOnUiThread {
+                    parents.forEach { listCache.remove(Loc("nas", l.root, it).key()) }
+                    if (g == liveGen && (l.path in parents || l.path in paths)) liveHit()
+                }
+            } catch (e: Exception) {
+                if (g != liveGen || ++fails > 30) return
+                try { Thread.sleep(minOf(30_000L, 2_000L * fails)) } catch (x: InterruptedException) { return }
+            }
+        }
+    }
 
     // ================= 동기화 줄 =================
     /** 지금 폴더가 어느 짝(의 안)인지 다시 셈. 목록의 ⟳ 표시가 바뀌었으면 true */
@@ -766,6 +833,7 @@ class MainActivity : Activity(), Transfers.Listener {
     // ---------- 위·아래 줄 갱신 ----------
     private fun refreshChrome() {
         val l = tab.loc
+        liveStart()   // 다른 폴더로 옮겼으면 지켜보는 곳도 바꿈
         title.text = tabTitle(l)
         if (::viewBtn.isInitialized) viewBtn.setImageDrawable(g(if (viewMode == 0) "grid" else "listview", ui.sub))
         pathBar.visibility = if (l.kind == "home") View.GONE else View.VISIBLE   // 홈에서는 주소 줄 없음
@@ -886,7 +954,7 @@ class MainActivity : Activity(), Transfers.Listener {
 
     private fun toggle(it: Item) { if (it.dir && it.path.isEmpty()) { toast("저장소 맨 위는 고를 수 없습니다"); return }; if (!sel.remove(it.path)) sel.add(it.path); adapter.notifyDataSetChanged(); refreshChrome() }
     private fun selItems() = items.filter { sel.contains(it.path) && !(it.dir && it.path.isEmpty()) }   // 저장소 맨 위(모아 보기 폴더 줄)는 빼고
-    private fun clearSel() { sel.clear(); adapter.notifyDataSetChanged(); refreshChrome() }
+    private fun clearSel() { sel.clear(); adapter.notifyDataSetChanged(); refreshChrome(); if (livePending) { livePending = false; liveHit() } }
     private fun clearSelSilently() { sel.clear() }
     /** 고른 것 가운데 처음과 끝 사이를 모두 고름 */
     private fun selectRange() {

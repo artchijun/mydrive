@@ -60,6 +60,9 @@ type Root struct {
 	state   string
 	saveMu  sync.Mutex // 주기 저장과 끝낼 때 저장이 겹치지 않게
 	stop    chan struct{}
+
+	refMu sync.Mutex
+	refAt map[string]time.Time // 폴더 → 마지막으로 디스크와 맞춘 때 (RefreshDir 를 너무 자주 하지 않게)
 }
 
 // 관리 창에서 공유 폴더를 뺄 때: 감시를 멈춤
@@ -580,6 +583,89 @@ func (r *Root) Info() (string, int64, int) {
 }
 
 // List: 폴더 하나의 바로 아래 항목 (휴대폰 앱처럼 전체 목록을 받지 않고 폴더씩 볼 때). ok=false 면 그런 폴더가 없음
+// RefreshDir: 목록을 보여 주기 전에 그 폴더 한 단계만 디스크와 맞춤.
+// File Station·SMB·시놀로지 포토로 바꾼 것 중, inotify 한도 때문에 감시하지 못하는 폴더의 변경도
+// 주기적 전체 비교(15분)를 기다리지 않고 바로 보이게. 같은 폴더는 2초에 한 번만.
+// 새로 생긴 하위 폴더는 Apply 로 아래까지 읽고 감시를 걸며, 없어진 것은 색인에서 지움 (바뀜 알림도 나감).
+func (r *Root) RefreshDir(dir string) {
+	if r.Web || (dir != "" && skipRel(dir)) {
+		return
+	}
+	r.refMu.Lock()
+	if r.refAt == nil {
+		r.refAt = map[string]time.Time{}
+	}
+	if t, ok := r.refAt[dir]; ok && time.Since(t) < 2*time.Second {
+		r.refMu.Unlock()
+		return
+	}
+	r.refAt[dir] = time.Now()
+	if len(r.refAt) > 2000 {
+		r.refAt = map[string]time.Time{dir: time.Now()}
+	}
+	r.refMu.Unlock()
+
+	abs := r.Dir
+	if dir != "" {
+		abs = filepath.Join(r.Dir, filepath.FromSlash(dir))
+	}
+	ents, err := os.ReadDir(abs)
+	if err != nil {
+		if dir != "" {
+			r.Apply(dir) // 폴더가 사라졌거나 바뀜 → 그대로 반영
+		}
+		return
+	}
+	disk := make(map[string]fs.FileInfo, len(ents))
+	for _, d := range ents {
+		if skipName(d.Name()) || d.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
+		fi, err := d.Info()
+		if err != nil {
+			continue
+		}
+		rp := d.Name()
+		if dir != "" {
+			rp = dir + "/" + d.Name()
+		}
+		if skipRel(rp) {
+			continue
+		}
+		disk[rp] = fi
+	}
+	var deep []string // 아래까지 다시 봐야 할 것 (새 폴더, 폴더↔파일 바뀜, 없어진 것)
+	r.mu.Lock()
+	if dir != "" {
+		if fi, err := os.Lstat(abs); err == nil {
+			e := entryOf(dir, fi)
+			if p, ok := r.idx[dir]; !ok || !same(p, e) {
+				r.emitLocked("put", e)
+			}
+		}
+	}
+	for rp, fi := range disk {
+		old, ok := r.idx[rp]
+		if fi.IsDir() && (!ok || !old.D) || (ok && old.D && !fi.IsDir()) {
+			deep = append(deep, rp)
+			continue
+		}
+		if e := entryOf(rp, fi); !ok || !same(old, e) {
+			r.emitLocked("put", e)
+		}
+	}
+	for c := range r.kids[dir] {
+		if _, ok := disk[c]; !ok {
+			deep = append(deep, c)
+		}
+	}
+	r.mu.Unlock()
+	sort.Strings(deep)
+	for _, p := range deep {
+		r.Apply(p)
+	}
+}
+
 func (r *Root) List(dir string) ([]Entry, bool) {
 	if r.Web {
 		return r.webList(dir)

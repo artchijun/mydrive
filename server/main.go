@@ -47,7 +47,7 @@ import (
 var roots = map[string]*Root{}
 var token string
 
-const version = "0.6.21"
+const version = "0.6.22"
 
 // 실행 파일 안에 이 글자가 그대로 들어감 — 새 판 받기(selfupdate.go)가 판 번호를 읽는 데 씀
 const versionTag = "mydrived " + version
@@ -265,6 +265,7 @@ func hList(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad_path", "경로가 올바르지 않음")
 		return
 	}
+	rt.RefreshDir(dir) // 감시하지 못하는 폴더의 변경도 바로 보이게 (그 폴더 한 단계만)
 	es, ok := rt.List(dir)
 	if !ok {
 		httpErr(w, 404, "not_found", "그런 폴더가 없음")
