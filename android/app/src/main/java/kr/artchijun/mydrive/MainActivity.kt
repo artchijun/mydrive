@@ -132,6 +132,7 @@ class MainActivity : Activity(), Transfers.Listener {
         ui = Ui(this); if (!ui.dark) setTheme(R.style.AppTheme_Light)
         super.onCreate(savedInstanceState)
         pf = Prefs(this); api = pf.api(); fs = Fs(this, api); stamp = pf.int("stamp", 0)
+        Fmt.relative = pf.bool("relTime", true)
         window.statusBarColor = ui.panel; window.navigationBarColor = ui.panel
         if (!ui.dark) window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or (if (Build.VERSION.SDK_INT >= 26) View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR else 0)
         build()
@@ -167,6 +168,8 @@ class MainActivity : Activity(), Transfers.Listener {
         syncTick()
         Transfers.asking?.let { onAsk(it) }
         resumedNow = true
+        Fmt.relative = pf.bool("relTime", true)
+        agoTick()
         if (tab.loc.kind == "home") load()      // 권한을 켜고 돌아왔을 수 있음
         else if (tab.loc.browsable && !firstResume) load()   // 다른 앱·PC에서 바꿨을 수 있음 → 보던 폴더 새로 (보던 자리 그대로)
         firstResume = false
@@ -176,7 +179,7 @@ class MainActivity : Activity(), Transfers.Listener {
         if (System.currentTimeMillis() - pf.lastUpdateCheck > 6 * 3600_000L) checkUpdate(false)
     }
 
-    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null; syncH.removeCallbacksAndMessages(null); resumedNow = false; liveStop() }
+    override fun onPause() { super.onPause(); saveTabs(); if (Transfers.listener === this) Transfers.listener = null; syncH.removeCallbacksAndMessages(null); resumedNow = false; liveStop(); liveH.removeCallbacks(agoRun) }
 
     // ================= 보고 있는 폴더가 바뀌면 바로 반영 =================
     //   휴대폰 폴더: FileObserver 로 그 폴더를 지켜봄.  NAS 폴더: 서버의 바뀜 알림(/v1/changes)을 기다렸다가 받음.
@@ -206,6 +209,10 @@ class MainActivity : Activity(), Transfers.Listener {
             "nas" -> if (!l.root.startsWith("~")) { val g = ++liveGen; Thread { nasWatch(l, g) }.start() }
         }
     }
+
+    /** '몇 분 전'이 낡지 않게 1분마다 목록 글자만 다시 씀 */
+    private val agoRun = Runnable { if (resumedNow && Fmt.relative && tab.loc.browsable) adapter.notifyDataSetChanged(); agoTick() }
+    private fun agoTick() { liveH.removeCallbacks(agoRun); if (resumedNow) liveH.postDelayed(agoRun, 60_000) }
 
     private fun liveStop() { liveGen++; liveKey = ""; try { localObs?.stopWatching() } catch (e: Exception) { }; localObs = null; liveH.removeCallbacks(liveRun) }
     private fun liveHit() { liveH.removeCallbacks(liveRun); liveH.postDelayed(liveRun, 600) }
@@ -287,7 +294,7 @@ class MainActivity : Activity(), Transfers.Listener {
         } else {
             syncProg.visibility = View.GONE
             val st = Sync.status(this, p.id)
-            val t = if (st.time > 0) java.text.SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(java.util.Date(st.time)) else ""
+            val t = if (st.time <= 0) "" else if (Fmt.relative) Fmt.ago(st.time) else java.text.SimpleDateFormat("M월 d일 HH:mm", Locale.KOREA).format(java.util.Date(st.time))
             val waiting = ids.any { it in Sync.pendingIds(this) }
             syncSub.setTextColor(if (waiting) ui.accent else if (st.err || st.held > 0) ui.red else ui.sub)
             syncSub.text = when {
@@ -1047,7 +1054,7 @@ class MainActivity : Activity(), Transfers.Listener {
     override fun onAsk(q: Transfers.Ask) {
         if (askDlg?.isShowing == true || q.answer >= 0 || isFinishing) return
         fun info(t: String, it: Item) = ui.row(ui.label(t, 13f, ui.sub).apply { layoutParams = LinearLayout.LayoutParams(ui.dp(64), -2) },
-            ui.label("${Fmt.size(it.size)} · ${Fmt.time(it.mtimeMs * 1_000_000)}", 13.5f, ui.text)).apply { setPadding(0, ui.dp(3), 0, ui.dp(3)) }
+            ui.label("${Fmt.size(it.size)} · ${Fmt.fullTime(it.mtimeMs * 1_000_000)}", 13.5f, ui.text)).apply { setPadding(0, ui.dp(3), 0, ui.dp(3)) }
         val all = android.widget.CheckBox(this).apply { text = "다른 모든 항목에 적용"; setTextColor(ui.text); textSize = 15f }
         val body = ui.col(
             ui.label((if (q.move) "옮길" else "붙여 넣을") + " 폴더에 이름(${q.src.name})이 같은 파일이 있습니다.", 14.5f, ui.text).apply { setPadding(0, 0, 0, ui.dp(10)) },
@@ -1235,13 +1242,13 @@ class MainActivity : Activity(), Transfers.Listener {
         val msg = if (its.size == 1) { val it = its[0]
             "위치: ${placeText(l.copy(path = it.path.substringBeforeLast('/', "")))}\n종류: ${if (it.dir) "폴더" else it.name.substringAfterLast('.', "파일").uppercase()}\n" +
                 (if (!it.dir) "크기: ${Fmt.size(it.size)} (%,d 바이트)\n".format(it.size) else if (it.count >= 0) "항목: ${it.count}개\n" else "") +
-                "바뀐 때: ${Fmt.time(it.mtimeMs * 1_000_000)}" + (if (it.extra.isNotEmpty()) "\n원래 자리: ${it.extra}" else "")
+                "바뀐 때: ${Fmt.fullTime(it.mtimeMs * 1_000_000)}" + (if (it.extra.isNotEmpty()) "\n원래 자리: ${it.extra}" else "")
         } else "${its.size}개 · 파일 합계 ${Fmt.size(its.filter { !it.dir }.sumOf { it.size })}"
         AlertDialog.Builder(this).setTitle(if (its.size == 1) its[0].name else "속성").setMessage(msg).setPositiveButton("닫기", null).show()
     }
 
     private fun trashMenu(it: Item) {
-        AlertDialog.Builder(this).setTitle(it.name).setMessage("원래 자리: ${prettyAbs(it.extra)}\n지운 때: ${Fmt.time(it.mtimeMs * 1_000_000)}")
+        AlertDialog.Builder(this).setTitle(it.name).setMessage("원래 자리: ${prettyAbs(it.extra)}\n지운 때: ${Fmt.fullTime(it.mtimeMs * 1_000_000)}")
             .setPositiveButton("되살리기") { _, _ -> bg({ fs.restore(listOf(it)) }) { load(); toast("되살렸습니다") } }
             .setNeutralButton("완전히 지우기") { _, _ -> AlertDialog.Builder(this).setMessage("‘${it.name}’을 완전히 지웁니다. 되살릴 수 없습니다.").setPositiveButton("지우기") { _, _ -> bg({ fs.delete(Loc.TRASH, listOf(it)) }) { load() } }.setNegativeButton("취소", null).show() }
             .setNegativeButton("닫기", null).show()
@@ -2130,14 +2137,14 @@ class MainActivity : Activity(), Transfers.Listener {
             (box.getChildAt(0) as TextView).text = it.name
             val l = tab.loc
             (box.getChildAt(1) as TextView).text = when {
-                l.kind == "trash" -> prettyAbs(it.extra.substringBeforeLast('/')) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000)
+                l.kind == "trash" -> prettyAbs(it.extra.substringBeforeLast('/')) + "  ·  " + Fmt.listTime(it.mtimeMs * 1_000_000)
                 l.kind == "search" -> "/" + it.path.substringBeforeLast('/', "") + "  ·  " + (if (it.dir) "폴더" else Fmt.size(it.size))
                 l.kind == "lib" && it.dir -> (if (it.extra.startsWith("!")) "갤러리 숨김  ·  " else "") + "${it.count}개  ·  " + Fmt.size(it.size) + "  ·  /" + it.path
-                l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + Fmt.time(it.mtimeMs * 1_000_000).take(10) + "  ·  /" + it.path.substringBeforeLast('/', "")
-                it.dir && isSyncRoot(l, it) -> android.text.SpannableString("⇅ 동기화 폴더  ·  " + Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")).apply {
+                l.kind == "usage" || l.kind == "lib" -> Fmt.size(it.size) + "  ·  " + (if (Fmt.relative) Fmt.listTime(it.mtimeMs * 1_000_000) else Fmt.time(it.mtimeMs * 1_000_000).take(10)) + "  ·  /" + it.path.substringBeforeLast('/', "")
+                it.dir && isSyncRoot(l, it) -> android.text.SpannableString("⇅ 동기화 폴더  ·  " + Fmt.listTime(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")).apply {
                     setSpan(android.text.style.ForegroundColorSpan(ui.accent), 0, 8, 0); setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, 8, 0) }
-                it.dir -> Fmt.time(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
-                else -> Fmt.time(it.mtimeMs * 1_000_000) + "  ·  " + Fmt.size(it.size)
+                it.dir -> Fmt.listTime(it.mtimeMs * 1_000_000) + (if (it.count >= 0) "  ·  ${it.count}개" else "")
+                else -> Fmt.listTime(it.mtimeMs * 1_000_000) + "  ·  " + Fmt.size(it.size)
             }
             (v.getChildAt(2) as ImageView).apply {
                 visibility = if (sel.isNotEmpty()) View.VISIBLE else View.GONE
